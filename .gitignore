@@ -1,0 +1,21 @@
+node_modules
+dist
+dist-ssr
+target
+src-tauri/target
+*.log
+.DS_Store
+.env
+.env.*
+ark-workspace
+.pnpm-store
+
+# llama.cpp runtime binaries — downloaded via scripts/setup-llama.ps1 / setup-llama.sh
+# Run the appropriate script from the repo root before launching the dev environment.
+src-tauri/binaries/llama/*.exe
+src-tauri/binaries/llama/*.dll
+src-tauri/binaries/llama/*.so
+src-tauri/binaries/llama/*.so.*
+src-tauri/binaries/llama/*.dylib
+src-tauri/binaries/llama/llama-*
+src-tauri/binaries/llama/ggml-*
