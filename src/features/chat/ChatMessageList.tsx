@@ -168,8 +168,13 @@ const MessageBubble = React.memo(function MessageBubble({
     <article className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[88%] rounded-lg border px-4 py-3",
-          isUser ? "border-primary/25 bg-primary text-primary-foreground" : "border-border bg-card",
+          "rounded-lg border px-4 py-3",
+          // UX-003: assistant messages (prose, code, tables) use the full readable column set by
+          // the outer `max-w-3xl` container; user messages — short prompts, not technical output
+          // — stay visually constrained as a chat bubble rather than stretching edge-to-edge.
+          isUser
+            ? "max-w-[75%] border-primary/25 bg-primary text-primary-foreground"
+            : "max-w-full border-border bg-card",
           isEditing && "w-full max-w-full",
         )}
       >

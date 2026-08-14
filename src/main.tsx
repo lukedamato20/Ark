@@ -15,7 +15,9 @@ const arkClient =
       ? developmentClients!.createSecretStoreFixtureClient()
       : fixture === "workspace-protection"
         ? developmentClients!.createWorkspaceProtectionFixtureClient()
-        : createTauriArkClient();
+        : fixture === "long-conversation"
+          ? developmentClients!.createLongConversationFixtureClient()
+          : createTauriArkClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

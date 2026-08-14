@@ -2,6 +2,7 @@ import type {
   AppBootstrap,
   BuiltInRuntimeStatus,
   Conversation,
+  Message,
   ModelInfo,
   ProviderConfig,
   WorkspaceProtectionStatus,
@@ -316,5 +317,124 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
       locked = false;
       return status("Workspace unlocked with the recovery key.");
     },
+  });
+}
+
+/**
+ * UX-003 browser fixture: a long, scrollable conversation (alternating short user prompts and
+ * long assistant responses with a fenced code block, well past one viewport) for verifying
+ * near-bottom auto-follow, reading-position preservation, and the jump-to-latest control live —
+ * the other fixtures above all return an empty message list, which cannot exercise any of that.
+ */
+export function createLongConversationFixtureClient(): ArkClient {
+  const timestamp = "2026-08-14T06:24:26Z";
+  const conversation: Conversation = {
+    id: "fixture-long-conversation",
+    title: "Long conversation scroll fixture",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    providerId: "built_in",
+    modelId: "fixture-model",
+    archived: false,
+  };
+  const provider: ProviderConfig = {
+    id: "built_in",
+    name: "Built-in llama.cpp",
+    providerType: "built_in",
+    baseUrl: "http://127.0.0.1:49152",
+    defaultModelId: "fixture-model",
+    defaultTemperature: 0.7,
+    defaultMaxTokens: 2048,
+    streamingEnabled: true,
+    isLocal: true,
+    allowInsecureRemote: false,
+    destinationClass: "loopback",
+    capabilities: {
+      streaming: true,
+      modelListing: true,
+      modelPull: false,
+      modelDelete: false,
+      modelUnload: false,
+      requiresAuth: true,
+      reportsContextWindow: true,
+      vision: false,
+      embeddings: false,
+      tools: false,
+    },
+    isEnabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const model: ModelInfo = {
+    id: "fixture-model",
+    providerId: provider.id,
+    name: "fixture-model.gguf",
+    displayName: "Fixture model",
+    contextWindow: 4096,
+    supportsStreaming: true,
+    supportsTools: false,
+    supportsVision: false,
+    supportsEmbeddings: false,
+    isAvailable: true,
+    lastSeenAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  const messageCount = 24;
+  const messages: Message[] = Array.from({ length: messageCount }, (_, index) => {
+    const isUser = index % 2 === 0;
+    const pairIndex = Math.floor(index / 2) + 1;
+    return {
+      id: `fixture-message-${index}`,
+      conversationId: conversation.id,
+      parentMessageId: index === 0 ? null : `fixture-message-${index - 1}`,
+      revisionOfMessageId: null,
+      pathIndex: index + 1,
+      role: isUser ? "user" : "assistant",
+      content: isUser
+        ? `Question ${pairIndex}: can you explain point ${pairIndex} in more depth?`
+        : `Response ${pairIndex}. Here is a longer explanation with several sentences of prose ` +
+          `so the assistant bubble has realistic reading width, followed by a code sample.\n\n` +
+          "```ts\n" +
+          `function pointExample${pairIndex}(input: number): number {\n` +
+          `  // A representative multi-line snippet wide enough to exercise the code block's\n` +
+          `  // own internal horizontal scroll rather than shrinking the surrounding bubble.\n` +
+          `  return input * ${pairIndex} + Math.floor(Math.random() * ${pairIndex + 1});\n` +
+          `}\n` +
+          "```",
+      status: "complete" as const,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      providerId: provider.id,
+      modelId: model.name,
+    };
+  });
+
+  const bootstrap: AppBootstrap = {
+    conversationPage: { items: [conversation], nextCursor: null },
+    providers: [provider],
+    models: [model],
+    workspacePath: "C:\\Ark",
+    workspace: {
+      rootPath: "C:\\Ark",
+      databasePath: "C:\\Ark\\ark.sqlite3",
+      defaultRootPath: "C:\\Ark",
+      configPath: "C:\\Ark\\workspace.json",
+      isPortable: false,
+      requiresRestart: false,
+    },
+    deviceSettings: { theme: "dark", builtInModelPath: null },
+    workspaceOpenError: null,
+  };
+
+  return createFakeArkClient({
+    getAppBootstrap: async () => bootstrap,
+    getConversationMessages: async () => messages,
+    refreshModels: async () => ({
+      health: { providerId: provider.id, isReachable: true, status: "running", message: "Runtime is running." },
+      models: [model],
+      provider,
+    }),
   });
 }

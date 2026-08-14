@@ -31,6 +31,7 @@ import { Button } from "../../ui/button";
 import { Textarea } from "../../ui/textarea";
 import { SetupBanner } from "../onboarding/SetupBanner";
 import { ChatMessageList } from "./ChatMessageList";
+import { MessageScrollContainer } from "./MessageScrollContainer";
 
 /** COR-009: mirrors the authoritative limit enforced in `export::validate_conversation_export`. */
 const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
@@ -697,17 +698,21 @@ export function ChatView({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
-        {isLoading ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Loading conversation
-          </div>
-        ) : !conversation ? (
+      {isLoading ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          Loading conversation
+        </div>
+      ) : !conversation ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center">
           <EmptyChat />
-        ) : messages.length === 0 ? (
+        </div>
+      ) : messages.length === 0 ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center">
           <EmptyChat />
-        ) : (
+        </div>
+      ) : (
+        <MessageScrollContainer resetKey={conversation.id}>
           <ChatMessageList
             messages={messages}
             canBranch={selectedModelAvailable && !activeAssistant}
@@ -723,8 +728,8 @@ export function ChatView({
             onDiscardInterrupted={handleDiscardInterrupted}
             onError={onError}
           />
-        )}
-      </div>
+        </MessageScrollContainer>
+      )}
 
       <footer className="border-t border-border p-4">
         <div className="mx-auto max-w-3xl">
