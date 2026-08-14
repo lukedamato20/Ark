@@ -142,6 +142,9 @@ export interface ProviderHealth {
   isReachable: boolean;
   status: string;
   message: string;
+  /** FTR-009: when this health check actually ran — an ISO timestamp, so the UI can show
+   * "checked N ago" and distinguish a fresh result from state a newer refresh hasn't replaced yet. */
+  checkedAt: string;
 }
 
 export interface AppBootstrap {

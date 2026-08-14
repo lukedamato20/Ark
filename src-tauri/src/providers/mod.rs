@@ -67,6 +67,12 @@ pub struct ProviderHealth {
     pub is_reachable: bool,
     pub status: String,
     pub message: String,
+    /// FTR-009: when this health check actually ran — every `Provider::health()` implementation
+    /// stamps this itself (via `crate::db::now()`) rather than relying on a caller to patch it
+    /// in afterward, so a future consumer of `.health()` can never forget it and leak an empty
+    /// value. Lets the UI show "checked N ago" and distinguish a fresh result from state left
+    /// over from an earlier refresh that a newer, still-in-flight one hasn't replaced yet.
+    pub checked_at: String,
 }
 
 /// ARC-003: describes what a provider *type* (protocol) supports, independent of any one
@@ -464,6 +470,7 @@ impl OllamaProvider {
                 is_reachable: false,
                 status: "missing_base_url".to_string(),
                 message: "Ollama base URL is not configured.".to_string(),
+                checked_at: crate::db::now(),
             };
         };
 
@@ -480,24 +487,28 @@ impl OllamaProvider {
                 is_reachable: true,
                 status: "reachable".to_string(),
                 message: "Ollama is reachable.".to_string(),
+                checked_at: crate::db::now(),
             },
             Ok(response) => ProviderHealth {
                 provider_id: self.provider.id.clone(),
                 is_reachable: false,
                 status: "unhealthy".to_string(),
                 message: format!("Ollama returned HTTP {}.", response.status()),
+                checked_at: crate::db::now(),
             },
             Err(error) if error.is_connect() => ProviderHealth {
                 provider_id: self.provider.id.clone(),
                 is_reachable: false,
                 status: "unreachable".to_string(),
                 message: "Ollama is not reachable. Start Ollama and refresh models.".to_string(),
+                checked_at: crate::db::now(),
             },
             Err(error) => ProviderHealth {
                 provider_id: self.provider.id.clone(),
                 is_reachable: false,
                 status: "error".to_string(),
                 message: format!("Ollama health check failed: {error}"),
+                checked_at: crate::db::now(),
             },
         }
     }
@@ -706,6 +717,7 @@ impl LocalInferenceHostProvider {
                 is_reachable: false,
                 status: "missing_base_url".to_string(),
                 message: "Local inference host base URL is not configured.".to_string(),
+                checked_at: crate::db::now(),
             };
         };
 
@@ -725,6 +737,7 @@ impl LocalInferenceHostProvider {
                     is_reachable: true,
                     status: "reachable".to_string(),
                     message: "Local inference host is reachable.".to_string(),
+                    checked_at: crate::db::now(),
                 };
             }
         }
@@ -741,12 +754,14 @@ impl LocalInferenceHostProvider {
                 is_reachable: true,
                 status: "reachable".to_string(),
                 message: "Local inference host is reachable.".to_string(),
+                checked_at: crate::db::now(),
             },
             Ok(resp) => ProviderHealth {
                 provider_id: self.provider.id.clone(),
                 is_reachable: false,
                 status: "unhealthy".to_string(),
                 message: format!("Local inference host returned HTTP {}.", resp.status()),
+                checked_at: crate::db::now(),
             },
             Err(error) if error.is_connect() => ProviderHealth {
                 provider_id: self.provider.id.clone(),
@@ -755,12 +770,14 @@ impl LocalInferenceHostProvider {
                 message:
                     "Local inference host is not reachable. Start the server and refresh models."
                         .to_string(),
+                checked_at: crate::db::now(),
             },
             Err(error) => ProviderHealth {
                 provider_id: self.provider.id.clone(),
                 is_reachable: false,
                 status: "error".to_string(),
                 message: format!("Local inference host health check failed: {error}"),
+                checked_at: crate::db::now(),
             },
         }
     }
@@ -1447,6 +1464,12 @@ mod tests {
         assert!(
             !health.is_reachable,
             "nothing listens on port 1 — health must report unreachable, not panic or hang"
+        );
+        // FTR-009: every health() implementation must stamp its own checked_at, even on the
+        // unreachable/error path — an empty value would defeat "checked N ago" staleness UI.
+        assert!(
+            !health.checked_at.is_empty(),
+            "health() must stamp checked_at even when the provider is unreachable"
         );
 
         let models_result = provider.list_models("2026-01-01T00:00:00Z").await;

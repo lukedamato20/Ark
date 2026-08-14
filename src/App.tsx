@@ -235,7 +235,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       onConversationDeleted={controller.deleteActiveConversation}
       onConversationImported={controller.importConversation}
       onConversationRenamed={controller.renameConversation}
-      onModelsRefresh={controller.refreshModels}
+      onRefreshProviderModels={controller.refreshProviderModels}
       onError={controller.setError}
       onInfo={controller.setInfo}
     />
@@ -263,7 +263,7 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onThemeChange={controller.changeTheme}
       onWorkspaceChange={controller.setWorkspace}
       onProviderSaved={controller.saveProvider}
-      onModelsRefresh={controller.refreshModels}
+      onRefreshProviderModels={controller.refreshProviderModels}
       onBack={() => controller.setView("chat")}
       onError={controller.setError}
     />

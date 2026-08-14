@@ -40,7 +40,7 @@ export interface ArkController {
   setMessages: (messages: Message[]) => void;
   searchConversations: (query: string) => Promise<void>;
   loadMoreConversations: () => Promise<void>;
-  refreshModels: (result: RefreshModelsResult) => void;
+  refreshProviderModels: (providerId: string) => Promise<void>;
   saveProvider: (provider: ProviderConfig) => void;
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
@@ -104,6 +104,15 @@ export function useArkController(): ArkController {
   const historySequenceRef = React.useRef(0);
   const transcriptSequenceRef = React.useRef(0);
   const reconciliationSequenceByConversationRef = React.useRef(new Map<string, number>());
+  // FTR-009: per-provider sequencing so a slower, earlier refresh can never overwrite a
+  // faster, later one's result — the same `isLatestRequest` pattern already used for
+  // conversation history/transcript loads above, applied to provider/model refresh instead.
+  const providerRefreshSequenceRef = React.useRef(new Map<string, number>());
+  // FTR-009: a refresh already in flight for a provider absorbs any additional trigger for
+  // that same provider rather than starting a second redundant network/IPC round trip —
+  // callers (bootstrap, ChatView's auto-refresh, Settings' Refresh buttons) can all safely
+  // call this without coordinating with each other.
+  const inFlightProviderRefreshesRef = React.useRef(new Set<string>());
   const settingsWriteQueueRef = React.useRef<Promise<unknown>>(Promise.resolve());
   const settingsMutationSequenceRef = React.useRef(0);
   const bootstrappedRef = React.useRef(false);
@@ -212,7 +221,7 @@ export function useArkController(): ArkController {
     [loadConversation, stores],
   );
 
-  const refreshModels = React.useCallback(
+  const applyRefreshedModels = React.useCallback(
     (result: RefreshModelsResult) => {
       stores.providers.set((current) => ({
         health: { ...current.health, [result.health.providerId]: result.health },
@@ -221,6 +230,39 @@ export function useArkController(): ArkController {
       }));
     },
     [stores],
+  );
+
+  /**
+   * FTR-009: the single path every caller (bootstrap, ChatView's auto-refresh, every "Refresh"
+   * button in Settings) goes through to refresh a provider's health/model list. Centralizing it
+   * here — rather than each caller fetching via `client.refreshModels` and applying the result
+   * itself — is what makes the sequencing/dedup guarantees actually hold everywhere, not just at
+   * whichever call site happened to add them: a second trigger for a provider already being
+   * refreshed is absorbed rather than starting a redundant request, and a response is only ever
+   * applied if no newer request for that same provider has started since.
+   */
+  const refreshProviderModels = React.useCallback(
+    async (providerId: string) => {
+      if (!providerId || inFlightProviderRefreshesRef.current.has(providerId)) {
+        return;
+      }
+      const sequence = (providerRefreshSequenceRef.current.get(providerId) ?? 0) + 1;
+      providerRefreshSequenceRef.current.set(providerId, sequence);
+      inFlightProviderRefreshesRef.current.add(providerId);
+      try {
+        const result = await client.refreshModels(providerId);
+        if (isLatestRequest(sequence, providerRefreshSequenceRef.current.get(providerId) ?? 0)) {
+          applyRefreshedModels(result);
+        }
+      } catch (error) {
+        if (isLatestRequest(sequence, providerRefreshSequenceRef.current.get(providerId) ?? 0)) {
+          setError(getErrorMessage(error));
+        }
+      } finally {
+        inFlightProviderRefreshesRef.current.delete(providerId);
+      }
+    },
+    [applyRefreshedModels, client, setError],
   );
 
   const bootstrap = React.useCallback(async () => {
@@ -255,10 +297,15 @@ export function useArkController(): ArkController {
       });
       if (conversations[0]) void loadConversation(conversations[0].id);
 
+      // FTR-009: fire-and-forget — shell/history/settings are already loaded and set above, so
+      // the UI must render now rather than wait on this network round trip. The result still
+      // reaches the store via refreshProviderModels' own sequencing once it resolves, the same
+      // path every other refresh trigger (ChatView's auto-refresh, Settings' Refresh buttons)
+      // goes through.
       const providerToRefresh =
         data.providers.find((provider) => provider.id === conversations[0]?.providerId) ?? data.providers[0];
       if (providerToRefresh) {
-        refreshModels(await client.refreshModels(providerToRefresh.id));
+        void refreshProviderModels(providerToRefresh.id);
       }
     } catch (error) {
       // A total bootstrap failure gets its own dedicated recovery state (App.tsx's
@@ -268,7 +315,7 @@ export function useArkController(): ArkController {
     } finally {
       patchStore(stores.shell, { booting: false });
     }
-  }, [client, loadConversation, refreshModels, stores]);
+  }, [client, loadConversation, refreshProviderModels, stores]);
 
   const createConversation = React.useCallback(async () => {
     try {
@@ -681,7 +728,7 @@ export function useArkController(): ArkController {
       setMessages,
       searchConversations,
       loadMoreConversations,
-      refreshModels,
+      refreshProviderModels,
       saveProvider,
       changeTheme,
       changeBuiltInModelPath,
@@ -707,7 +754,7 @@ export function useArkController(): ArkController {
       importConversation,
       loadMoreConversations,
       openSearch,
-      refreshModels,
+      refreshProviderModels,
       renameConversation,
       retryWorkspace,
       saveProvider,

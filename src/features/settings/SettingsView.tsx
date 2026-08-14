@@ -64,7 +64,9 @@ interface SettingsViewProps {
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
-  onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
+  /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) — see
+   * `useArkController.ts`'s `refreshProviderModels` doc comment. */
+  onRefreshProviderModels: (providerId: string) => Promise<void>;
   onBack: () => void;
   onError: (message: string) => void;
 }
@@ -85,7 +87,7 @@ export function SettingsView({
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
-  onModelsRefresh,
+  onRefreshProviderModels,
   onBack,
   onError,
 }: SettingsViewProps) {
@@ -310,7 +312,7 @@ export function SettingsView({
                   onStatusChange={onBuiltInStatusChange}
                   modelPath={builtInModelPath}
                   onModelPathChange={onBuiltInModelPathChange}
-                  onModelsRefresh={onModelsRefresh}
+                  onRefreshProviderModels={onRefreshProviderModels}
                   onError={onError}
                 />
               ) : provider ? (
@@ -319,7 +321,7 @@ export function SettingsView({
                   provider={provider}
                   models={providerModels}
                   onProviderSaved={onProviderSaved}
-                  onModelsRefresh={onModelsRefresh}
+                  onRefreshProviderModels={onRefreshProviderModels}
                   onError={onError}
                   secretStoreStatus={secretStoreStatus}
                   onSecretStoreRetry={checkSecretStore}
@@ -565,7 +567,7 @@ function ProviderForm({
   provider,
   models,
   onProviderSaved,
-  onModelsRefresh,
+  onRefreshProviderModels,
   onError,
   secretStoreStatus,
   onSecretStoreRetry,
@@ -573,7 +575,7 @@ function ProviderForm({
   provider: ProviderConfig;
   models: ModelInfo[];
   onProviderSaved: (provider: ProviderConfig) => void;
-  onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
+  onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
   secretStoreStatus: SecretStoreStatus | null;
   onSecretStoreRetry: () => Promise<void>;
@@ -606,6 +608,13 @@ function ProviderForm({
     setConvertToRemoteProvider(!provider.isLocal);
     setAllowInsecureRemote(provider.allowInsecureRemote);
   }, [baseUrl, provider.allowInsecureRemote, provider.isLocal]);
+
+  // FTR-009: re-syncs the draft whenever the provider's own default model changes for any
+  // reason — switching tabs, or a refresh (now centralized in the controller, so this
+  // component no longer receives the refreshed provider directly as a call result).
+  React.useEffect(() => {
+    setDefaultModelId(provider.defaultModelId ?? "");
+  }, [provider.id, provider.defaultModelId]);
 
   React.useEffect(() => {
     if (!supportsCredential) return;
@@ -698,15 +707,12 @@ function ProviderForm({
   }
 
   async function handleRefresh() {
+    // FTR-009: refreshProviderModels owns error reporting for every caller — see its doc
+    // comment in useArkController.ts. The defaultModelId sync effect above reacts to the
+    // resulting store update, so no manual follow-up is needed here either.
     setRefreshing(true);
     try {
-      const result = await client.refreshModels(provider.id);
-      onModelsRefresh(result);
-      if (result.provider.defaultModelId) {
-        setDefaultModelId(result.provider.defaultModelId);
-      }
-    } catch (error) {
-      onError(getErrorMessage(error));
+      await onRefreshProviderModels(provider.id);
     } finally {
       setRefreshing(false);
     }
@@ -924,7 +930,12 @@ function ProviderForm({
           check — a future provider type that also supports model pull/delete would show this
           panel without any change here. */}
       {provider.capabilities.modelPull && (
-        <OllamaModelsPanel provider={provider} models={models} onModelsRefresh={onModelsRefresh} onError={onError} />
+        <OllamaModelsPanel
+          provider={provider}
+          models={models}
+          onRefreshProviderModels={onRefreshProviderModels}
+          onError={onError}
+        />
       )}
     </div>
   );
@@ -933,12 +944,12 @@ function ProviderForm({
 function OllamaModelsPanel({
   provider,
   models,
-  onModelsRefresh,
+  onRefreshProviderModels,
   onError,
 }: {
   provider: ProviderConfig;
   models: ModelInfo[];
-  onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
+  onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const client = useArkClient();
@@ -974,8 +985,7 @@ function OllamaModelsPanel({
     setPullProgress(null);
     try {
       await client.pullOllamaModel(provider.id, name);
-      const result = await client.refreshModels(provider.id);
-      onModelsRefresh(result);
+      await onRefreshProviderModels(provider.id);
       setPullName("");
     } catch (error) {
       onError(getErrorMessage(error));
@@ -992,8 +1002,7 @@ function OllamaModelsPanel({
     setDeletingModel(modelName);
     try {
       await client.deleteOllamaModel(provider.id, modelName);
-      const result = await client.refreshModels(provider.id);
-      onModelsRefresh(result);
+      await onRefreshProviderModels(provider.id);
     } catch (error) {
       onError(getErrorMessage(error));
     } finally {
@@ -1395,7 +1404,7 @@ function BuiltInRuntimeForm({
   onStatusChange,
   modelPath,
   onModelPathChange,
-  onModelsRefresh,
+  onRefreshProviderModels,
   onError,
 }: {
   status: BuiltInRuntimeStatus;
@@ -1405,7 +1414,7 @@ function BuiltInRuntimeForm({
    * value itself, so a keystroke doesn't trigger a backend write on every character. */
   modelPath: string | null;
   onModelPathChange: (path: string) => void;
-  onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
+  onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const client = useArkClient();
@@ -1427,8 +1436,7 @@ function BuiltInRuntimeForm({
     try {
       const next = await client.startBuiltInRuntime(path, modelSource.trim(), modelLicense.trim());
       onStatusChange(next);
-      const result = await client.refreshModels("built_in");
-      onModelsRefresh(result);
+      await onRefreshProviderModels("built_in");
     } catch (err) {
       const startError = getErrorMessage(err);
       try {
@@ -1457,10 +1465,7 @@ function BuiltInRuntimeForm({
   async function handleRefresh() {
     setRefreshing(true);
     try {
-      const result = await client.refreshModels("built_in");
-      onModelsRefresh(result);
-    } catch (err) {
-      onError(getErrorMessage(err));
+      await onRefreshProviderModels("built_in");
     } finally {
       setRefreshing(false);
     }

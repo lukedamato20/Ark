@@ -165,6 +165,7 @@ fn sample_provider_health() -> ProviderHealth {
         is_reachable: true,
         status: "ok".to_string(),
         message: "Reachable".to_string(),
+        checked_at: "2026-08-14T00:00:00Z".to_string(),
     }
 }
 

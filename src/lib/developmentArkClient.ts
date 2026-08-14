@@ -128,7 +128,13 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     getBuiltInRuntimeStatus: async () => status,
     getConversationMessages: async () => [],
     refreshModels: async () => ({
-      health: { providerId: provider.id, isReachable: false, status: "stopped", message: "Runtime is stopped." },
+      health: {
+        providerId: provider.id,
+        isReachable: false,
+        status: "stopped",
+        message: "Runtime is stopped.",
+        checkedAt: new Date().toISOString(),
+      },
       models: [model],
       provider,
     }),
@@ -227,7 +233,13 @@ export function createSecretStoreFixtureClient(): ArkClient {
       metadata = null;
     },
     refreshModels: async () => ({
-      health: { providerId: provider.id, isReachable: false, status: "unavailable", message: "Fixture only." },
+      health: {
+        providerId: provider.id,
+        isReachable: false,
+        status: "unavailable",
+        message: "Fixture only.",
+        checkedAt: new Date().toISOString(),
+      },
       models: [],
       provider,
     }),
@@ -332,7 +344,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     createdAt: timestamp,
     updatedAt: timestamp,
     providerId: "built_in",
-    modelId: "fixture-model",
+    modelId: "fixture-model.gguf",
     archived: false,
   };
   const provider: ProviderConfig = {
@@ -429,7 +441,13 @@ export function createLongConversationFixtureClient(): ArkClient {
     getAppBootstrap: async () => bootstrap,
     getConversationMessages: async () => messages,
     refreshModels: async () => ({
-      health: { providerId: provider.id, isReachable: true, status: "running", message: "Runtime is running." },
+      health: {
+        providerId: provider.id,
+        isReachable: true,
+        status: "running",
+        message: "Runtime is running.",
+        checkedAt: new Date().toISOString(),
+      },
       models: [model],
       provider,
     }),
@@ -488,6 +506,7 @@ export function createLongConversationFixtureClient(): ArkClient {
         isReachable: true,
         status: "running",
         message: "Runtime is running.",
+        checkedAt: new Date().toISOString(),
       },
       modelAvailable: true,
       benchmark: null,

@@ -16,6 +16,7 @@ import { cn } from "../../lib/cn";
 import { CONNECTION_METADATA } from "../../lib/destinationClass";
 import { downloadText, safeFilename } from "../../lib/download";
 import { getErrorMessage } from "../../lib/arkErrors";
+import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
 import type { Conversation, Message, ModelInfo, ProviderConfig, ProviderHealth, SendChatResult } from "../../types/ark";
 import { Button } from "../../ui/button";
@@ -50,7 +51,10 @@ interface ChatViewProps {
   onConversationDeleted: () => void;
   onConversationImported: (conversation: Conversation) => void;
   onConversationRenamed: (conversation: Conversation) => void;
-  onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
+  /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) rather than
+   * this component fetching and applying a result itself — see `useArkController.ts`'s
+   * `refreshProviderModels` doc comment. */
+  onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
   onInfo: (message: string) => void;
 }
@@ -67,7 +71,7 @@ export function ChatView({
   onConversationDeleted,
   onConversationImported,
   onConversationRenamed,
-  onModelsRefresh,
+  onRefreshProviderModels,
   onError,
   onInfo,
 }: ChatViewProps) {
@@ -170,27 +174,43 @@ export function ChatView({
   }, [conversation?.id, conversation?.title]);
 
   React.useEffect(() => {
-    const providerDefault = provider?.defaultModelId;
     const conversationModel = conversation?.modelId;
-    const firstAvailable = providerModels.find((item) => item.isAvailable)?.name;
+    const conversationModelKnown = Boolean(
+      conversationModel && providerModels.some((item) => item.name === conversationModel),
+    );
+    if (conversationModel && conversationModelKnown) {
+      // FTR-009 AC3: keep the conversation's own model selected even if it's no longer
+      // available, rather than silently substituting something else — `selectedModelAvailable`
+      // already gates sending, and the notice rendered below explains why and offers
+      // alternatives. Only fall through to picking a substitute when Ark genuinely has no
+      // record of this model at all (e.g. the provider hasn't been refreshed yet).
+      setModel(conversationModel);
+      return;
+    }
 
-    const candidates = [conversationModel, providerDefault, firstAvailable].filter(Boolean) as string[];
+    const providerDefault = provider?.defaultModelId;
+    const firstAvailable = providerModels.find((item) => item.isAvailable)?.name;
+    const candidates = [providerDefault, firstAvailable].filter(Boolean) as string[];
     const availableCandidate = candidates.find((candidate) =>
       providerModels.some((item) => item.name === candidate && item.isAvailable),
     );
     setModel(availableCandidate ?? "");
   }, [conversation?.modelId, provider?.id, provider?.defaultModelId, providerModels]);
 
+  // FTR-009 AC3: distinct from "no model selected yet" — this is specifically "the model this
+  // conversation was using is known to Ark but no longer available," which needs its own
+  // explanation and alternatives rather than the generic setup banner's message.
+  const removedSelectedModel =
+    conversation?.modelId && model === conversation.modelId
+      ? providerModels.find((item) => item.name === conversation.modelId && !item.isAvailable)
+      : undefined;
+
   async function handleRefreshModels() {
-    try {
-      const result = await client.refreshModels(provider?.id ?? "");
-      onModelsRefresh(result);
-      if (!model && result.provider.defaultModelId) {
-        setModel(result.provider.defaultModelId);
-      }
-    } catch (error) {
-      onError(getErrorMessage(error));
-    }
+    // FTR-009: refreshProviderModels owns error reporting (via the global setError) for every
+    // caller, so no local try/catch here — the model-selection effect above already reacts to
+    // the store update this produces (its deps include provider?.defaultModelId/providerModels),
+    // so no manual setModel follow-up is needed either.
+    await onRefreshProviderModels(provider?.id ?? "");
   }
 
   const reconcileGenerationFailure = React.useCallback(
@@ -651,6 +671,20 @@ export function ChatView({
           <div className="mt-0.5 flex flex-wrap items-center gap-2">
             <ProviderStatusIcon provider={provider} />
             <span className="text-xs text-muted-foreground">{health?.message ?? "Runtime status unknown"}</span>
+            {health?.checkedAt && (
+              <span
+                className={cn(
+                  "text-xs",
+                  isProviderHealthStale(health.checkedAt)
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-muted-foreground",
+                )}
+                title={new Date(health.checkedAt).toLocaleString()}
+              >
+                · checked {formatRelativeTime(health.checkedAt)}
+                {isProviderHealthStale(health.checkedAt) ? " (stale)" : ""}
+              </span>
+            )}
           </div>
         </div>
 
@@ -690,13 +724,22 @@ export function ChatView({
       </header>
 
       <div className="space-y-3 border-b border-border p-3">
-        <SetupBanner
-          health={health}
-          provider={provider}
-          models={providerModels}
-          selectedModel={model}
-          onRefresh={handleRefreshModels}
-        />
+        {removedSelectedModel ? (
+          <UnavailableModelNotice
+            modelName={removedSelectedModel.name}
+            alternatives={providerModels.filter((item) => item.isAvailable)}
+            onSelectAlternative={setModel}
+            onRefresh={handleRefreshModels}
+          />
+        ) : (
+          <SetupBanner
+            health={health}
+            provider={provider}
+            models={providerModels}
+            selectedModel={model}
+            onRefresh={handleRefreshModels}
+          />
+        )}
         {activeImport && (
           <div
             className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2"
@@ -1154,6 +1197,57 @@ function ConversationSettingsButton({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * FTR-009 AC3: shown instead of the generic `SetupBanner` "install or select a model" message
+ * when Ark specifically knows this conversation's own model was removed (still present in the
+ * provider's model list, just marked unavailable) — names it explicitly and offers other
+ * available models from the same provider as one-click alternatives, rather than leaving the
+ * user to guess why sending is disabled or to reopen the provider dropdown themselves.
+ */
+function UnavailableModelNotice({
+  modelName,
+  alternatives,
+  onSelectAlternative,
+  onRefresh,
+}: {
+  modelName: string;
+  alternatives: ModelInfo[];
+  onSelectAlternative: (name: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm">
+      <div className="flex min-w-0 items-start gap-2">
+        <FileText className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
+        <div className="min-w-0">
+          <div className="font-medium">"{modelName}" is no longer available</div>
+          <div className="text-muted-foreground">
+            This conversation was using a model that Ark can't find anymore — it may have been deleted or renamed.
+            {alternatives.length > 0 ? " Choose a compatible alternative:" : " Refresh models or install it again."}
+          </div>
+          {alternatives.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {alternatives.map((alternative) => (
+                <button
+                  key={alternative.id}
+                  type="button"
+                  onClick={() => onSelectAlternative(alternative.name)}
+                  className="rounded-md border border-input bg-background px-2 py-1 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {alternative.displayName ?? alternative.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <Button size="sm" onClick={onRefresh} className="shrink-0">
+        Refresh
+      </Button>
     </div>
   );
 }

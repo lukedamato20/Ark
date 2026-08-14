@@ -91,7 +91,7 @@
       "createdAt",
       "updatedAt"
     ],
-    "ProviderHealth": ["providerId", "isReachable", "status", "message"],
+    "ProviderHealth": ["providerId", "isReachable", "status", "message", "checkedAt"],
     "AppBootstrap": [
       "conversationPage",
       "providers",
