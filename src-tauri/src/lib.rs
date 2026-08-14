@@ -8,14 +8,17 @@ mod data_protection;
 mod db;
 mod device_settings;
 mod diagnostics;
+mod diagnostics_bundle;
 mod errors;
 mod export;
 mod file_permissions;
 mod generation;
 mod import_export;
+mod observability;
 mod provider_management;
 mod providers;
 mod proxy;
+mod redaction;
 mod secret_store;
 mod security;
 mod sidecar;
@@ -29,16 +32,16 @@ use commands::{
     cancel_import, cancel_stream, create_conversation, create_workspace_backup,
     delete_conversation, delete_ollama_model, delete_provider_secret, disable_workspace_encryption,
     discard_interrupted_message, edit_user_message, enable_workspace_encryption,
-    export_conversation_json, export_conversation_markdown, get_app_bootstrap,
-    get_assistant_alternatives, get_built_in_runtime_status, get_conversation_messages,
-    get_provider_secret_metadata, get_secret_store_status, get_workspace_protection_status,
-    import_conversation_json, keep_partial_message, list_conversations,
-    preview_conversation_import, preview_workspace_restore, pull_ollama_model, refresh_models,
-    regenerate_assistant_message, rename_conversation, reset_workspace, restore_workspace_backup,
-    restore_workspace_recovery_key, retry_workspace_open, rotate_workspace_encryption,
-    run_diagnostics, send_chat_message, set_workspace, start_built_in_runtime,
-    start_pending_stream, stop_built_in_runtime, switch_active_branch, update_device_settings,
-    update_provider, upsert_provider_secret,
+    export_conversation_json, export_conversation_markdown, export_diagnostics_bundle,
+    get_app_bootstrap, get_assistant_alternatives, get_built_in_runtime_status,
+    get_conversation_messages, get_provider_secret_metadata, get_secret_store_status,
+    get_workspace_protection_status, import_conversation_json, keep_partial_message,
+    list_conversations, preview_conversation_import, preview_workspace_restore, pull_ollama_model,
+    refresh_models, regenerate_assistant_message, rename_conversation, reset_workspace,
+    restore_workspace_backup, restore_workspace_recovery_key, retry_workspace_open,
+    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, send_chat_message,
+    set_workspace, start_built_in_runtime, start_pending_stream, stop_built_in_runtime,
+    switch_active_branch, update_device_settings, update_provider, upsert_provider_secret,
 };
 use db::Database;
 use errors::AppError;
@@ -76,6 +79,10 @@ pub struct AppState {
     /// both connections. Compare-and-swap prevents concurrent protection operations.
     pub(crate) storage_maintenance: AtomicBool,
     pub sidecar: Arc<Mutex<SidecarState>>,
+    /// OPS-001: bounded, redacted, best-effort-persisted local diagnostics log. `Arc` for the
+    /// same reason as `sidecar` — the panic hook installed in `run()` needs a handle to it that
+    /// outlives any single command invocation.
+    pub(crate) observability_log: Arc<Mutex<observability::DiagnosticsLog>>,
 }
 
 impl Drop for AppState {
@@ -117,6 +124,33 @@ pub(crate) fn open_database_pair_with_key(
     Ok((db, read_db))
 }
 
+/// OPS-001: opt-in, off-by-default local crash capture. Chains onto (never replaces) the
+/// default panic hook, so normal stderr panic output is unaffected. Deliberately bypasses
+/// `AppState.observability_log`'s `Mutex` entirely and writes straight to the log file via
+/// `observability::record_crash_directly_to_file` — see that function's doc comment for why:
+/// if the panic happened inside a call already holding that mutex on this same thread, taking
+/// it again here would deadlock instead of failing safely. Re-reads `DeviceSettings` from disk
+/// at panic time (not a value captured at startup) so toggling the setting takes effect on the
+/// very next panic without requiring a restart; the read is a small, tolerant file read with no
+/// locks involved, consistent with `device_settings::load_device_settings`'s existing "corrupt
+/// or missing is just treated as absent" behavior. Nothing this hook does ever transmits
+/// anything off the device — the diagnostics bundle export is a separate, reviewed, manually
+/// user-initiated action.
+fn install_crash_hook(app_handle: tauri::AppHandle, log_file_path: Option<std::path::PathBuf>) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        default_hook(panic_info);
+        let Some(path) = &log_file_path else {
+            return;
+        };
+        let settings = device_settings::load_device_settings(&app_handle, None);
+        if !settings.crash_capture_enabled {
+            return;
+        }
+        observability::record_crash_directly_to_file(path, &panic_info.to_string());
+    }));
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -151,6 +185,29 @@ pub fn run() {
                 }
             };
 
+            // OPS-001: a bounded, redacted, best-effort-persisted local diagnostics log — see
+            // `observability.rs`'s module doc. Unattached (in-memory only) if the config
+            // directory can't be resolved, which never blocks startup.
+            let mut diagnostics_log = observability::DiagnosticsLog::new();
+            let diagnostics_log_path = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .map(|dir| dir.join("logs").join("ark.log"));
+            if let Some(path) = diagnostics_log_path.clone() {
+                diagnostics_log.attach_file(path);
+            }
+            if let Some(error) = &workspace_open_error {
+                diagnostics_log.record(
+                    observability::LogLevel::Warn,
+                    "startup",
+                    None,
+                    &format!("workspace open failed, using in-memory fallback: {}", error.code),
+                );
+            }
+
+            install_crash_hook(app.handle().clone(), diagnostics_log_path);
+
             app.manage(AppState {
                 db: Mutex::new(db),
                 workspace: Mutex::new(workspace_info),
@@ -161,6 +218,7 @@ pub fn run() {
                 active_imports: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
+                observability_log: Arc::new(Mutex::new(diagnostics_log)),
             });
 
             Ok(())
@@ -199,6 +257,8 @@ pub fn run() {
             create_workspace_backup,
             preview_workspace_restore,
             restore_workspace_backup,
+            export_diagnostics_bundle,
+            save_diagnostics_bundle,
             run_diagnostics,
             export_conversation_markdown,
             export_conversation_json,

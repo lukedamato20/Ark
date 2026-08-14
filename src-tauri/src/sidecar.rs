@@ -482,82 +482,9 @@ fn parse_assigned_loopback_port(line: &str) -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-pub fn redact_runtime_log(message: &str, sensitive_values: &[String]) -> String {
-    let mut redacted = message.to_string();
-    for value in sensitive_values {
-        if !value.is_empty() {
-            redacted = redacted.replace(value, "[REDACTED]");
-        }
-    }
-    for marker in [
-        "authorization: bearer ",
-        "bearer ",
-        "--api-key ",
-        "api-key=",
-        "api_key=",
-        "token=",
-    ] {
-        redacted = redact_value_after_marker(redacted, marker);
-    }
-    redact_absolute_path_tokens(&redacted)
-}
-
-fn redact_absolute_path_tokens(text: &str) -> String {
-    text.split_inclusive(char::is_whitespace)
-        .map(|segment| {
-            let token = segment.trim_end_matches(char::is_whitespace);
-            let whitespace = &segment[token.len()..];
-            let candidate = token.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-                )
-            });
-            let bytes = candidate.as_bytes();
-            let windows_absolute = bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && matches!(bytes[2], b'\\' | b'/');
-            let assigned_absolute = candidate.split_once('=').is_some_and(|(_, value)| {
-                let value = value.as_bytes();
-                value.first() == Some(&b'/')
-                    || (value.len() >= 3
-                        && value[0].is_ascii_alphabetic()
-                        && value[1] == b':'
-                        && matches!(value[2], b'\\' | b'/'))
-            });
-            if candidate.starts_with('/') || windows_absolute || assigned_absolute {
-                format!("[REDACTED_PATH]{whitespace}")
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect()
-}
-
-fn redact_value_after_marker(mut text: String, marker: &str) -> String {
-    let marker_lower = marker.to_ascii_lowercase();
-    let mut search_from = 0;
-    loop {
-        let lower = text.to_ascii_lowercase();
-        let Some(relative_start) = lower[search_from..].find(&marker_lower) else {
-            break;
-        };
-        let value_start = search_from + relative_start + marker.len();
-        let value_end = text[value_start..]
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, ',' | ';' | '"' | '\'')
-            })
-            .map_or(text.len(), |offset| value_start + offset);
-        if value_end == value_start {
-            search_from = value_start;
-            continue;
-        }
-        text.replace_range(value_start..value_end, "[REDACTED]");
-        search_from = value_start + "[REDACTED]".len();
-    }
-    text
-}
+/// OPS-001: thin re-export so existing call sites in this file don't need touching beyond their
+/// import — the actual logic now lives in `redaction.rs`, shared with `observability.rs`.
+use crate::redaction::redact as redact_runtime_log;
 
 fn server_exe_name() -> &'static str {
     if cfg!(windows) {
@@ -800,21 +727,6 @@ pub async fn check_health(port: u16, api_key: &str) -> Result<(), RuntimeFailure
 mod tests {
     use super::*;
     use std::thread;
-
-    #[test]
-    fn log_redaction_covers_known_paths_secrets_and_common_auth_shapes() {
-        let sensitive = vec![
-            "C:\\Users\\person\\Models\\private.gguf".to_string(),
-            "launch-secret".to_string(),
-        ];
-        let source = "model=C:\\Users\\person\\Models\\private.gguf Authorization: Bearer launch-secret token=other /Users/person/cache";
-        let redacted = redact_runtime_log(source, &sensitive);
-        assert!(!redacted.contains("person"));
-        assert!(!redacted.contains("launch-secret"));
-        assert!(!redacted.contains("other"));
-        assert!(!redacted.contains("/Users/person"));
-        assert!(redacted.matches("[REDACTED]").count() >= 3);
-    }
 
     #[test]
     fn rotating_log_buffer_is_bounded_by_entry_count_and_bytes() {

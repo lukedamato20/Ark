@@ -58,6 +58,7 @@ export interface SettingsState {
   theme: ThemeMode;
   builtInStatus: BuiltInRuntimeStatus;
   builtInModelPath: string | null;
+  crashCaptureEnabled: boolean;
   workspaceOpenError: AppErrorShape | null;
   retryingWorkspace: boolean;
 }
@@ -123,6 +124,7 @@ export function createArkStores(initial?: {
         failure: null,
       },
       builtInModelPath: null,
+      crashCaptureEnabled: false,
       workspaceOpenError: null,
       retryingWorkspace: false,
     }),

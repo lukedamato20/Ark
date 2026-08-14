@@ -5,6 +5,7 @@ import {
   Circle,
   Database,
   Download,
+  FileText,
   HardDrive,
   Info,
   Loader2,
@@ -25,6 +26,7 @@ import type {
   AppErrorShape,
   BackupResult,
   BuiltInRuntimeStatus,
+  DiagnosticsBundle,
   ModelInfo,
   OllamaPullProgress,
   ProviderConfig,
@@ -56,6 +58,9 @@ interface SettingsViewProps {
   /** ARC-006: device-scoped — see docs/settings-catalog.md. */
   builtInModelPath: string | null;
   onBuiltInModelPathChange: (path: string) => void;
+  /** OPS-001: opt-in, off by default — see `observability.rs`'s module doc. */
+  crashCaptureEnabled: boolean;
+  onCrashCaptureEnabledChange: (enabled: boolean) => void;
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
@@ -75,6 +80,8 @@ export function SettingsView({
   onBuiltInStatusChange,
   builtInModelPath,
   onBuiltInModelPathChange,
+  crashCaptureEnabled,
+  onCrashCaptureEnabledChange,
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
@@ -502,6 +509,12 @@ export function SettingsView({
           </Panel>
 
           <BackupRestorePanel onError={onError} />
+
+          <DiagnosticsBundlePanel
+            onError={onError}
+            crashCaptureEnabled={crashCaptureEnabled}
+            onCrashCaptureEnabledChange={onCrashCaptureEnabledChange}
+          />
 
           <Panel className="p-4">
             <div className="mb-2 flex items-center gap-2">
@@ -1262,6 +1275,111 @@ function BackupRestorePanel({ onError }: { onError: (message: string) => void })
             </p>
           )}
         </div>
+      </div>
+    </Panel>
+  );
+}
+
+function DiagnosticsBundlePanel({
+  onError,
+  crashCaptureEnabled,
+  onCrashCaptureEnabledChange,
+}: {
+  onError: (message: string) => void;
+  crashCaptureEnabled: boolean;
+  onCrashCaptureEnabledChange: (enabled: boolean) => void;
+}) {
+  const client = useArkClient();
+  const [bundle, setBundle] = React.useState<DiagnosticsBundle | null>(null);
+  const [generating, setGenerating] = React.useState(false);
+  const [savePath, setSavePath] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState<string | null>(null);
+
+  async function generateBundle() {
+    setGenerating(true);
+    setSaved(null);
+    try {
+      setBundle(await client.exportDiagnosticsBundle());
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function saveBundle() {
+    if (!bundle || !savePath.trim()) return;
+    setSaving(true);
+    try {
+      // OPS-001: saves exactly `bundle.previewText` — the same text already shown for review
+      // below, byte for byte, so what gets saved can never differ from what was reviewed.
+      await client.saveDiagnosticsBundle(savePath.trim(), bundle.previewText);
+      setSaved(savePath.trim());
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <FileText className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Diagnostics bundle</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Generates a local, redacted support bundle — hardware info, managed-runtime status, and recent app log
+        lines. Never includes prompts, model output, or attachment content. Nothing leaves this device unless you
+        save and send the file yourself.
+      </p>
+
+      <label className="mt-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={crashCaptureEnabled}
+          onChange={(event) => onCrashCaptureEnabledChange(event.target.checked)}
+          className="h-4 w-4"
+        />
+        Capture crash details locally (off by default; never sent anywhere automatically)
+      </label>
+
+      <div className="mt-3 grid gap-2">
+        <Button onClick={() => void generateBundle()} disabled={generating} className="w-fit">
+          {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+          Generate diagnostics bundle
+        </Button>
+
+        {bundle && (
+          <div className="grid gap-2">
+            <div className="text-sm font-medium">Review before saving</div>
+            <textarea
+              readOnly
+              value={bundle.previewText}
+              aria-label="Diagnostics bundle contents"
+              className="h-48 w-full resize-y rounded-md border border-border bg-muted/30 p-2.5 font-mono text-xs"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Input
+                value={savePath}
+                onChange={(event) => setSavePath(event.target.value)}
+                placeholder="C:\Diagnostics\ark-bundle.txt"
+                className="min-w-64 flex-1"
+                aria-label="Diagnostics bundle save path"
+              />
+              <Button onClick={() => void saveBundle()} disabled={saving || !savePath.trim()}>
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                Save
+              </Button>
+            </div>
+            {saved && (
+              <p role="status" className="text-sm text-emerald-600 dark:text-emerald-300">
+                Saved to {saved}.
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </Panel>
   );

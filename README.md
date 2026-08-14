@@ -103,6 +103,7 @@ The MVP does not automatically move an existing database into the new workspace.
 - [Conversation import format and limits](docs/import-format.md)
 - [Credential storage, export, and restore behavior](docs/secrets-and-backups.md)
 - [Local data-at-rest protection and threat model](docs/data-at-rest.md)
+- [Diagnostics logs and crash capture](docs/diagnostics-and-logs.md)
 - [Privacy and data flow](docs/privacy-and-data-flow.md)
 - [Security policy and vulnerability reporting](SECURITY.md)
 - [Incident response](docs/incident-response.md)

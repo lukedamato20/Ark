@@ -120,7 +120,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: status.modelPath },
+    deviceSettings: { theme: "dark", builtInModelPath: status.modelPath, crashCaptureEnabled: false },
     workspaceOpenError: null,
   };
 
@@ -190,7 +190,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null },
+    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
     workspaceOpenError: null,
   };
   let statusChecks = 0;
@@ -264,7 +264,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null },
+    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
     workspaceOpenError: null,
   };
 
@@ -424,7 +424,7 @@ export function createLongConversationFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null },
+    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
     workspaceOpenError: null,
   };
 
@@ -436,6 +436,21 @@ export function createLongConversationFixtureClient(): ArkClient {
       models: [model],
       provider,
     }),
+    updateDeviceSettings: async (settings) => settings,
+    // OPS-001: a static but realistic-looking bundle — every other fixture's diagnostics-bundle
+    // methods are unimplemented, so this is the only way to exercise the review/save UI live.
+    exportDiagnosticsBundle: async () => ({
+      generatedAt: "2026-08-14T00:00:00Z",
+      previewText:
+        "Ark diagnostics bundle — generated 2026-08-14T00:00:00Z\n" +
+        "App version: 0.1.0\nOS: Windows 11\nCPU: Fixture CPU (8 cores)\n" +
+        "Memory: 8000000000 / 16000000000 bytes available\n" +
+        "Workspace location: [REDACTED_PATH]\n\n" +
+        "-- Managed runtime --\nState: Healthy\nPID present: true\nPort: 51234\nFailure: none\n\n" +
+        "-- Recent runtime log lines --\n(none)\n\n-- Recent app log lines --\n" +
+        "1755100000000 [info] runtime (-) managed runtime became healthy\n",
+    }),
+    saveDiagnosticsBundle: async () => undefined,
     // UX-004: minimal import overrides so the terminal-summary toast and its auto-dismiss timer
     // can be exercised live — every other fixture's import methods are unimplemented.
     previewConversationImport: async () => ({

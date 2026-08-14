@@ -9,6 +9,7 @@ import type {
   Conversation,
   ConversationPage,
   DeviceSettings,
+  DiagnosticsBundle,
   DiagnosticsResult,
   ImportConversationPreview,
   ImportConversationResult,
@@ -105,6 +106,12 @@ export interface ArkClient {
    * contain a workspace database). Never touches the live workspace; use `setWorkspace` after to
    * actually switch to it. */
   restoreWorkspaceBackup(backupPath: string, targetRoot: string): Promise<void>;
+  /** OPS-001: assembles the reviewable diagnostics bundle text — call this and show the exact
+   * `previewText` to the user before ever calling `saveDiagnosticsBundle`. */
+  exportDiagnosticsBundle(): Promise<DiagnosticsBundle>;
+  /** OPS-001: writes `bundleText` verbatim to `destinationPath` — always pass back the exact
+   * text the user reviewed from `exportDiagnosticsBundle`, never a re-derived value. */
+  saveDiagnosticsBundle(destinationPath: string, bundleText: string): Promise<void>;
   getWorkspaceProtectionStatus(): Promise<WorkspaceProtectionStatus>;
   enableWorkspaceEncryption(): Promise<WorkspaceProtectionChange>;
   rotateWorkspaceEncryption(): Promise<WorkspaceProtectionChange>;
@@ -206,6 +213,9 @@ export function createTauriArkClient(): ArkClient {
     previewWorkspaceRestore: (backupPath) => invoke<RestorePreview>("preview_workspace_restore", { backupPath }),
     restoreWorkspaceBackup: (backupPath, targetRoot) =>
       invoke<void>("restore_workspace_backup", { backupPath, targetRoot }),
+    exportDiagnosticsBundle: () => invoke<DiagnosticsBundle>("export_diagnostics_bundle"),
+    saveDiagnosticsBundle: (destinationPath, bundleText) =>
+      invoke<void>("save_diagnostics_bundle", { destinationPath, bundleText }),
     getWorkspaceProtectionStatus: () => invoke<WorkspaceProtectionStatus>("get_workspace_protection_status"),
     enableWorkspaceEncryption: () => invoke<WorkspaceProtectionChange>("enable_workspace_encryption"),
     rotateWorkspaceEncryption: () => invoke<WorkspaceProtectionChange>("rotate_workspace_encryption"),
@@ -359,6 +369,8 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     createWorkspaceBackup: notImplemented("createWorkspaceBackup"),
     previewWorkspaceRestore: notImplemented("previewWorkspaceRestore"),
     restoreWorkspaceBackup: notImplemented("restoreWorkspaceBackup"),
+    exportDiagnosticsBundle: notImplemented("exportDiagnosticsBundle"),
+    saveDiagnosticsBundle: notImplemented("saveDiagnosticsBundle"),
     getWorkspaceProtectionStatus: async () => ({
       mode: "plaintext",
       locked: false,

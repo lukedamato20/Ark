@@ -298,6 +298,7 @@ fn app_bootstrap_matches_contract() {
             device_settings: crate::device_settings::DeviceSettings {
                 theme: "dark".to_string(),
                 built_in_model_path: None,
+                crash_capture_enabled: false,
             },
             workspace_open_error: None,
         },
@@ -311,6 +312,7 @@ fn device_settings_matches_contract() {
         &crate::device_settings::DeviceSettings {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
+            crash_capture_enabled: true,
         },
     );
 }
@@ -366,6 +368,17 @@ fn restore_preview_matches_contract() {
             schema_supported: true,
             conversation_count: 12,
             message_count: 340,
+        },
+    );
+}
+
+#[test]
+fn diagnostics_bundle_matches_contract() {
+    assert_matches_contract(
+        "DiagnosticsBundle",
+        &crate::diagnostics_bundle::DiagnosticsBundle {
+            generated_at: "2026-08-14T00:00:00Z".to_string(),
+            preview_text: "Ark diagnostics bundle...".to_string(),
         },
     );
 }

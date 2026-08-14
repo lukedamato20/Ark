@@ -823,6 +823,7 @@ mod tests {
             active_imports: Mutex::new(HashMap::new()),
             storage_maintenance: AtomicBool::new(false),
             sidecar: Arc::new(Mutex::new(SidecarState::new())),
+            observability_log: Arc::new(Mutex::new(crate::observability::DiagnosticsLog::new())),
         }
     }
 

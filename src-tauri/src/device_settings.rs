@@ -22,6 +22,13 @@ pub struct DeviceSettings {
     /// Absolute path to the last GGUF model file selected for the built-in runtime on this
     /// device. `None` until the user starts the built-in runtime at least once.
     pub built_in_model_path: Option<String>,
+    /// OPS-001: opt-in, off by default. When true, an uncaught panic is recorded (redacted) to
+    /// the local diagnostics log file so it can be included in a diagnostics bundle after
+    /// restart — never transmitted anywhere automatically; export is always a separate,
+    /// reviewed, user-initiated action. `#[serde(default)]` so a device settings file saved
+    /// before this field existed still parses instead of falling back to the legacy-seed path.
+    #[serde(default)]
+    pub crash_capture_enabled: bool,
 }
 
 impl Default for DeviceSettings {
@@ -29,6 +36,7 @@ impl Default for DeviceSettings {
         Self {
             theme: "dark".to_string(),
             built_in_model_path: None,
+            crash_capture_enabled: false,
         }
     }
 }
@@ -143,6 +151,7 @@ mod tests {
         let settings = DeviceSettings {
             theme: "light".to_string(),
             built_in_model_path: Some("C:\\models\\model.gguf".to_string()),
+            crash_capture_enabled: true,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         let parsed: DeviceSettings = serde_json::from_str(&json).expect("deserializes");
@@ -151,6 +160,7 @@ mod tests {
             parsed.built_in_model_path.as_deref(),
             Some("C:\\models\\model.gguf")
         );
+        assert!(parsed.crash_capture_enabled);
     }
 
     #[test]
@@ -158,6 +168,7 @@ mod tests {
         let settings = DeviceSettings {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
+            crash_capture_enabled: false,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         assert!(
@@ -177,6 +188,10 @@ mod tests {
             settings.built_in_model_path.as_deref(),
             Some("D:\\models\\other.gguf")
         );
+        // OPS-001: this raw JSON predates `crashCaptureEnabled` — proves a device settings file
+        // saved before that field existed still parses (via #[serde(default)]) instead of being
+        // treated as corrupt and falling back to the legacy-seed path.
+        assert!(!settings.crash_capture_enabled);
     }
 
     /// ARC-006 acceptance: "Legacy localStorage/DB values migrate deterministically." On a

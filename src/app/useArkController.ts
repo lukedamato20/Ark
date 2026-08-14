@@ -44,6 +44,7 @@ export interface ArkController {
   saveProvider: (provider: ProviderConfig) => void;
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
+  changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
   retryWorkspace: () => Promise<void>;
   setBuiltInStatus: (status: BuiltInRuntimeStatus) => void;
   setWorkspace: (workspace: WorkspaceInfo) => void;
@@ -248,6 +249,7 @@ export function useArkController(): ArkController {
         theme: data.deviceSettings.theme,
         builtInStatus: sidecarStatus,
         builtInModelPath: data.deviceSettings.builtInModelPath ?? null,
+        crashCaptureEnabled: data.deviceSettings.crashCaptureEnabled,
         workspaceOpenError: data.workspaceOpenError ?? null,
         retryingWorkspace: false,
       });
@@ -400,7 +402,11 @@ export function useArkController(): ArkController {
       const sequence = ++settingsMutationSequenceRef.current;
       patchStore(stores.settings, { theme });
       const operation = settingsWriteQueueRef.current.then(() =>
-        client.updateDeviceSettings({ theme, builtInModelPath: settings.builtInModelPath }),
+        client.updateDeviceSettings({
+          theme,
+          builtInModelPath: settings.builtInModelPath,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+        }),
       );
       settingsWriteQueueRef.current = operation.then(
         () => undefined,
@@ -424,7 +430,11 @@ export function useArkController(): ArkController {
       const sequence = ++settingsMutationSequenceRef.current;
       patchStore(stores.settings, { builtInModelPath: path });
       const operation = settingsWriteQueueRef.current.then(() =>
-        client.updateDeviceSettings({ theme: settings.theme, builtInModelPath: path }),
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          builtInModelPath: path,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+        }),
       );
       settingsWriteQueueRef.current = operation.then(
         () => undefined,
@@ -438,6 +448,37 @@ export function useArkController(): ArkController {
           stores.settings.getSnapshot().builtInModelPath === path
         ) {
           patchStore(stores.settings, { builtInModelPath: settings.builtInModelPath });
+        }
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
+  const changeCrashCaptureEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      const settings = stores.settings.getSnapshot();
+      const sequence = ++settingsMutationSequenceRef.current;
+      patchStore(stores.settings, { crashCaptureEnabled: enabled });
+      const operation = settingsWriteQueueRef.current.then(() =>
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          builtInModelPath: settings.builtInModelPath,
+          crashCaptureEnabled: enabled,
+        }),
+      );
+      settingsWriteQueueRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        await operation;
+      } catch (error) {
+        if (
+          sequence === settingsMutationSequenceRef.current &&
+          stores.settings.getSnapshot().crashCaptureEnabled === enabled
+        ) {
+          patchStore(stores.settings, { crashCaptureEnabled: settings.crashCaptureEnabled });
         }
         setError(getErrorMessage(error));
       }
@@ -644,6 +685,7 @@ export function useArkController(): ArkController {
       saveProvider,
       changeTheme,
       changeBuiltInModelPath,
+      changeCrashCaptureEnabled,
       retryWorkspace,
       setBuiltInStatus,
       setWorkspace,
@@ -658,6 +700,7 @@ export function useArkController(): ArkController {
     [
       bootstrap,
       changeBuiltInModelPath,
+      changeCrashCaptureEnabled,
       changeTheme,
       createConversation,
       deleteActiveConversation,

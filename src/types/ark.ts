@@ -165,6 +165,9 @@ export interface AppBootstrap {
 export interface DeviceSettings {
   theme: ThemeMode;
   builtInModelPath?: string | null;
+  /** OPS-001: opt-in, off by default. Never transmitted anywhere automatically — see the
+   * diagnostics bundle export flow for the only way crash/log data ever leaves the device. */
+  crashCaptureEnabled: boolean;
 }
 
 export interface WorkspaceInfo {
@@ -194,6 +197,12 @@ export interface RestorePreview {
   schemaSupported: boolean;
   conversationCount: number;
   messageCount: number;
+}
+
+export interface DiagnosticsBundle {
+  generatedAt: string;
+  /** The exact, already-redacted text a save writes verbatim — review this before saving. */
+  previewText: string;
 }
 
 export type ThemeMode = "dark" | "light";

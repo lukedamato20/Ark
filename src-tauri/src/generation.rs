@@ -925,6 +925,17 @@ fn mark_stream_failed(
     emit_error: bool,
 ) {
     let state = app.state::<AppState>();
+    // OPS-001: the error *code* only, never `.message` — a provider's own error text can carry
+    // arbitrary response content, and this log may end up in an exported diagnostics bundle
+    // handed to someone else. The stable code is what a support conversation actually needs.
+    if let Ok(mut log) = state.observability_log.lock() {
+        log.record(
+            crate::observability::LogLevel::Error,
+            "generation",
+            Some(message_id),
+            &format!("stream failed: {}", error.code),
+        );
+    }
     let db = crate::commands::lock_db(&state).ok();
     let became_failed = db
         .as_ref()
@@ -1001,6 +1012,9 @@ mod tests {
                 active_imports: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
+                observability_log: Arc::new(
+                    Mutex::new(crate::observability::DiagnosticsLog::new()),
+                ),
             },
             path,
         )

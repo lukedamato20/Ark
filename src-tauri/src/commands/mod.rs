@@ -317,6 +317,25 @@ pub fn restore_workspace_backup(
     crate::backup::restore_backup(&state, backup_path, target_root)
 }
 
+/// OPS-001: builds the reviewable diagnostics bundle text. The frontend always shows this exact
+/// text to the user before calling `save_diagnostics_bundle` — see `diagnostics_bundle.rs`'s
+/// module doc for why the save command takes the reviewed text verbatim rather than
+/// re-assembling it.
+#[tauri::command]
+pub fn export_diagnostics_bundle(
+    state: State<'_, AppState>,
+) -> Result<crate::diagnostics_bundle::DiagnosticsBundle, AppError> {
+    crate::diagnostics_bundle::build_diagnostics_bundle(&state)
+}
+
+#[tauri::command]
+pub fn save_diagnostics_bundle(
+    destination_path: String,
+    bundle_text: String,
+) -> Result<(), AppError> {
+    crate::diagnostics_bundle::save_diagnostics_bundle(&destination_path, &bundle_text)
+}
+
 #[tauri::command]
 pub async fn refresh_models(
     state: State<'_, AppState>,

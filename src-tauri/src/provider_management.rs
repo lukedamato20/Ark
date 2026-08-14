@@ -428,6 +428,17 @@ pub async fn start_built_in_runtime(
         return Err(error);
     }
 
+    // OPS-001: a lifecycle anchor for support conversations — deliberately no model path or
+    // any other filesystem detail, just confirmation of when a launch reached Healthy.
+    if let Ok(mut log) = state.observability_log.lock() {
+        log.record(
+            crate::observability::LogLevel::Info,
+            "runtime",
+            None,
+            "managed runtime became healthy",
+        );
+    }
+
     Ok(BuiltInRuntimeStatus {
         running: true,
         port: Some(proxy_port),
@@ -491,6 +502,9 @@ mod tests {
                 active_imports: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: std::sync::Arc::new(Mutex::new(SidecarState::new())),
+                observability_log: std::sync::Arc::new(Mutex::new(
+                    crate::observability::DiagnosticsLog::new(),
+                )),
             },
             path,
         )

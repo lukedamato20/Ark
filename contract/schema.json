@@ -102,7 +102,7 @@
       "deviceSettings",
       "workspaceOpenError"
     ],
-    "DeviceSettings": ["theme", "builtInModelPath"],
+    "DeviceSettings": ["theme", "builtInModelPath", "crashCaptureEnabled"],
     "WorkspaceInfo": ["rootPath", "databasePath", "defaultRootPath", "configPath", "isPortable", "requiresRestart"],
     "BackupManifest": ["appVersion", "createdAt", "databaseSha256", "databaseSizeBytes"],
     "BackupResult": ["backupPath", "manifest"],
@@ -113,6 +113,7 @@
       "conversationCount",
       "messageCount"
     ],
+    "DiagnosticsBundle": ["generatedAt", "previewText"],
     "SendChatResult": ["conversationId", "userMessageId", "assistantMessageId"],
     "StreamEvent": ["conversationId", "messageId", "delta", "content", "status", "error", "revision", "schemaVersion"],
     "RefreshModelsResult": ["health", "models", "provider"],
