@@ -18,9 +18,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 getrandom = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 keyring = "4.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "backup"] }

@@ -390,7 +390,32 @@ pub async fn start_built_in_runtime(
         return Err(AppError::provider(safe_failure.message));
     }
 
-    let base_url = format!("http://127.0.0.1:{port}");
+    // SEC-002: llama-server's own HTTP server exempts several routes from its `--api-key`
+    // check and reflects `Origin` into permissive CORS headers (see `proxy.rs`'s module doc).
+    // Ark never points its own traffic, and never persists `base_url`, at that raw port
+    // directly — every request, including from Ark itself, goes through this authenticating,
+    // CORS-sanitizing proxy instead.
+    let (proxy_port, proxy_task) = match crate::proxy::spawn_auth_proxy(port, api_key.clone()).await
+    {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            let mut sidecar = crate::commands::lock_sidecar(state)?;
+            let _ = sidecar.stop();
+            sidecar.mark_failure(
+                RuntimeFailureCategory::PortUnavailable,
+                format!("Ark could not start the runtime's authenticating proxy: {error}"),
+            );
+            return Err(AppError::provider(
+                "Ark could not start the managed runtime's authenticating proxy.",
+            ));
+        }
+    };
+    {
+        let mut sidecar = crate::commands::lock_sidecar(state)?;
+        sidecar.attach_proxy(proxy_port, proxy_task);
+    }
+
+    let base_url = format!("http://127.0.0.1:{proxy_port}");
     if let Err(error) =
         crate::commands::lock_db(state)?.update_provider_base_url(BUILT_IN_PROVIDER_ID, &base_url)
     {
@@ -405,7 +430,7 @@ pub async fn start_built_in_runtime(
 
     Ok(BuiltInRuntimeStatus {
         running: true,
-        port: Some(port),
+        port: Some(proxy_port),
         model_path: Some(model_path),
         binary_installed: true,
         binary_verified: true,

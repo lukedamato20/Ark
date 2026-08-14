@@ -169,6 +169,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `http-body` | 1.0.1 | MIT |
 | cargo | `http-body-util` | 0.1.3 | MIT |
 | cargo | `httparse` | 1.10.1 | MIT OR Apache-2.0 |
+| cargo | `httpdate` | 1.0.3 | MIT OR Apache-2.0 |
 | cargo | `hyper` | 1.10.1 | MIT |
 | cargo | `hyper-rustls` | 0.27.9 | Apache-2.0 OR ISC OR MIT |
 | cargo | `hyper-util` | 0.1.20 | MIT |

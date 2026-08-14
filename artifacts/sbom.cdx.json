@@ -4210,6 +4210,30 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/httpdate@1.0.3",
+      "name": "httpdate",
+      "version": "1.0.3",
+      "purl": "pkg:cargo/httpdate@1.0.3",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pyfisch/httpdate"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/hyper-rustls@0.27.9",
       "name": "hyper-rustls",
       "version": "0.27.9",

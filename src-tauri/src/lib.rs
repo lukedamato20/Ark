@@ -15,6 +15,7 @@ mod generation;
 mod import_export;
 mod provider_management;
 mod providers;
+mod proxy;
 mod secret_store;
 mod security;
 mod sidecar;

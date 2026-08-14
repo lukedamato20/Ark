@@ -109,6 +109,13 @@ pub struct SidecarState {
     logs: Arc<Mutex<RuntimeLogBuffer>>,
     assigned_port: Arc<Mutex<Option<u16>>>,
     redaction_values: Vec<String>,
+    /// SEC-002: the authenticating proxy's own loopback port — this, not `port` (llama-server's
+    /// raw internal port), is what `base_url` and `BuiltInRuntimeStatus.port` expose. `port`
+    /// stays internal-only, used solely for Ark's own direct health checks.
+    proxy_port: Option<u16>,
+    /// Aborted on `stop`/`clear_process_metadata` so the proxy never outlives the runtime it
+    /// fronts.
+    proxy_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SidecarState {
@@ -123,6 +130,8 @@ impl SidecarState {
             logs: Arc::new(Mutex::new(RuntimeLogBuffer::default())),
             assigned_port: Arc::new(Mutex::new(None)),
             redaction_values: Vec::new(),
+            proxy_port: None,
+            proxy_task: None,
         }
     }
 
@@ -215,6 +224,22 @@ impl SidecarState {
     pub fn mark_healthy(&mut self) {
         self.state = RuntimeLifecycleState::Healthy;
         self.failure = None;
+    }
+
+    /// SEC-002: records the authenticating proxy's own loopback port and background task once
+    /// it's confirmed listening in front of the (already-healthy) managed runtime. Aborts any
+    /// stale previous proxy task first — defensive, since callers only invoke this once per
+    /// launch after a successful `mark_healthy`, but a leaked background task would be a silent
+    /// resource/security regression if that ever changed.
+    pub fn attach_proxy(&mut self, proxy_port: u16, task: tokio::task::JoinHandle<()>) {
+        if let Some(previous) = self.proxy_task.replace(task) {
+            previous.abort();
+        }
+        self.proxy_port = Some(proxy_port);
+    }
+
+    pub fn proxy_port(&self) -> Option<u16> {
+        self.proxy_port
     }
 
     pub fn reconcile_process(&mut self) -> bool {
@@ -357,7 +382,11 @@ impl SidecarState {
         RuntimeDiagnostics {
             state: self.state,
             pid: self.process.as_ref().map(Child::id),
-            port: self.port,
+            // SEC-002: report the authenticating proxy's port (the actual reachable front
+            // door), falling back to llama-server's raw internal port only before the proxy
+            // has attached (e.g. mid-`Starting`) — never expose a port that, once healthy,
+            // bypasses the proxy's auth/CORS enforcement.
+            port: self.proxy_port.or(self.port),
             model_configured: self.model_path.is_some(),
             failure: self.failure.clone(),
             recent_logs: if include_logs {
@@ -377,6 +406,10 @@ impl SidecarState {
         *lock_unpoisoned(&self.assigned_port) = None;
         self.api_key = None;
         self.redaction_values.clear();
+        self.proxy_port = None;
+        if let Some(task) = self.proxy_task.take() {
+            task.abort();
+        }
     }
 
     fn sync_assigned_port(&mut self) -> Option<u16> {
@@ -848,6 +881,52 @@ mod tests {
         assert_eq!(sidecar.state(), RuntimeLifecycleState::Degraded);
         sidecar.stop().expect("idle manager stops");
         assert_eq!(sidecar.state(), RuntimeLifecycleState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stopping_the_sidecar_aborts_its_attached_proxy_and_clears_the_proxy_port() {
+        let mut sidecar = SidecarState::new();
+        assert_eq!(sidecar.proxy_port(), None);
+
+        let task = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+            }
+        });
+        sidecar.attach_proxy(54_321, task);
+        assert_eq!(sidecar.proxy_port(), Some(54_321));
+
+        sidecar.stop().expect("idle manager stops");
+        assert_eq!(
+            sidecar.proxy_port(),
+            None,
+            "stop must clear the proxy port so a stopped runtime never reports a stale front door"
+        );
+    }
+
+    #[tokio::test]
+    async fn attaching_a_new_proxy_aborts_a_previously_attached_one() {
+        let mut sidecar = SidecarState::new();
+
+        let first_task = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+            }
+        });
+        sidecar.attach_proxy(11_111, first_task);
+
+        let second_task = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+            }
+        });
+        sidecar.attach_proxy(22_222, second_task);
+
+        assert_eq!(
+            sidecar.proxy_port(),
+            Some(22_222),
+            "the second attached proxy's port must replace the first, not accumulate"
+        );
     }
 
     #[tokio::test]
