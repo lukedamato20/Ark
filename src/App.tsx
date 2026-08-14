@@ -1,8 +1,11 @@
+import { Menu, PanelRight } from "lucide-react";
 import * as React from "react";
+import { Drawer } from "./components/Drawer";
 import { RightPanel } from "./components/RightPanel";
 import { useArkController, type ArkController } from "./app/useArkController";
 import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
 import { buildWorkspaceDiagnostics, getWorkspaceRecoveryActions } from "./lib/workspaceRecovery";
+import { useBreakpoint } from "./lib/useBreakpoint";
 import { entityList } from "./state/arkStores";
 import { useStore, useStoreSelector } from "./state/externalStore";
 import { useArkStores } from "./state/useArkStores";
@@ -17,12 +20,54 @@ export default function App() {
   const controller = useArkController();
   const stores = useArkStores();
   const view = useStoreSelector(stores.shell, (state) => state.view);
+  const breakpoint = useBreakpoint();
+
+  // UX-001: the sidebar is a docked column (rail or expanded, per the persisted preference) at
+  // compact and desktop widths, and only becomes an overlay drawer at phone width. The context
+  // panel is docked only at desktop width and is a drawer at both compact and phone — it has a
+  // higher/earlier breakpoint than the sidebar because two permanently-docked side columns at
+  // 768–1279px would leave too little room for chat, not because it is less important.
+  const sidebarIsDrawer = breakpoint === "phone";
+  const contextIsDrawer = breakpoint !== "desktop";
+
+  // Deliberately local, transient state — not the persisted sidebarCollapsed/rightPanelCollapsed
+  // preference used for docked mode. A drawer must default *closed* regardless of that
+  // preference; reusing the docked-mode boolean directly would mean the sidebar drawer opens
+  // covering the whole screen on first phone-width load whenever the persisted preference
+  // happens to be "expanded".
+  const [sidebarDrawerOpen, setSidebarDrawerOpen] = React.useState(false);
+  const [contextDrawerOpen, setContextDrawerOpen] = React.useState(false);
+  const sidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const contextTriggerRef = React.useRef<HTMLButtonElement | null>(null);
 
   return (
     <>
       <WorkspaceRecoveryBanner controller={controller} />
+      {(sidebarIsDrawer || contextIsDrawer) && (
+        <ShellTopBar
+          showSidebarTrigger={sidebarIsDrawer}
+          showContextTrigger={contextIsDrawer}
+          onOpenSidebar={() => setSidebarDrawerOpen(true)}
+          onOpenContext={() => setContextDrawerOpen(true)}
+          sidebarTriggerRef={sidebarTriggerRef}
+          contextTriggerRef={contextTriggerRef}
+        />
+      )}
       <div className="flex h-screen overflow-hidden bg-background text-foreground">
-        <ConversationSidebarContainer controller={controller} />
+        {sidebarIsDrawer ? (
+          <Drawer
+            open={sidebarDrawerOpen}
+            onClose={() => setSidebarDrawerOpen(false)}
+            side="left"
+            label="Conversations"
+            triggerRef={sidebarTriggerRef}
+            widthPx={288}
+          >
+            <ConversationSidebarContainer controller={controller} forceExpanded />
+          </Drawer>
+        ) : (
+          <ConversationSidebarContainer controller={controller} />
+        )}
         <React.Suspense fallback={<MainViewFallback />}>
           {view === "settings" ? (
             <SettingsContainer controller={controller} />
@@ -30,14 +75,84 @@ export default function App() {
             <ChatContainer controller={controller} />
           )}
         </React.Suspense>
-        <RightPanelContainer controller={controller} />
+        {contextIsDrawer ? (
+          <Drawer
+            open={contextDrawerOpen}
+            onClose={() => setContextDrawerOpen(false)}
+            side="right"
+            label="Context"
+            triggerRef={contextTriggerRef}
+            widthPx={260}
+          >
+            <RightPanel collapsed={false} onToggle={() => setContextDrawerOpen(false)} />
+          </Drawer>
+        ) : (
+          <RightPanelContainer controller={controller} />
+        )}
       </div>
       <AppFeedback controller={controller} />
     </>
   );
 }
 
-function ConversationSidebarContainer({ controller }: { controller: ArkController }) {
+function ShellTopBar({
+  showSidebarTrigger,
+  showContextTrigger,
+  onOpenSidebar,
+  onOpenContext,
+  sidebarTriggerRef,
+  contextTriggerRef,
+}: {
+  showSidebarTrigger: boolean;
+  showContextTrigger: boolean;
+  onOpenSidebar: () => void;
+  onOpenContext: () => void;
+  sidebarTriggerRef: React.RefObject<HTMLButtonElement | null>;
+  contextTriggerRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  // A fixed, always-reachable place to open the sidebar/context drawers — necessary because
+  // each panel's own internal toggle button lives inside that panel, which is off-canvas and
+  // `inert` while its drawer is closed, so it cannot itself be the way back in.
+  return (
+    <div className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-card/80 px-2">
+      {showSidebarTrigger ? (
+        <Button
+          ref={sidebarTriggerRef}
+          size="icon"
+          variant="ghost"
+          onClick={onOpenSidebar}
+          aria-label="Open conversations"
+        >
+          <Menu className="h-4 w-4" />
+        </Button>
+      ) : (
+        <span />
+      )}
+      {showContextTrigger && (
+        <Button
+          ref={contextTriggerRef}
+          size="icon"
+          variant="ghost"
+          onClick={onOpenContext}
+          aria-label="Open context panel"
+        >
+          <PanelRight className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function ConversationSidebarContainer({
+  controller,
+  forceExpanded = false,
+}: {
+  controller: ArkController;
+  /** Inside a phone-width drawer (App.tsx): always show full content, and hide the internal
+   * rail/expanded toggle — collapsing to a 72px rail inside an already-narrow drawer doesn't
+   * make sense, and this must never mutate the persisted desktop/compact collapse preference. */
+  forceExpanded?: boolean;
+}) {
   const stores = useArkStores();
   const catalog = useStore(stores.catalog);
   const shell = useStore(stores.shell);
@@ -45,7 +160,8 @@ function ConversationSidebarContainer({ controller }: { controller: ArkControlle
     <ConversationSidebar
       conversations={entityList(catalog.conversations)}
       activeConversationId={catalog.activeId}
-      collapsed={shell.sidebarCollapsed}
+      collapsed={forceExpanded ? false : shell.sidebarCollapsed}
+      hideCollapseToggle={forceExpanded}
       focusSearchSignal={shell.focusSearchSignal}
       hasMore={catalog.nextCursor != null}
       isLoading={catalog.isLoading}

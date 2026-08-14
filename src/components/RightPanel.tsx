@@ -10,10 +10,13 @@ interface RightPanelProps {
 
 export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
   return (
-    <motion.aside
-      animate={{ width: collapsed ? 48 : 260 }}
-      transition={{ duration: 0.18 }}
-      className="flex h-screen shrink-0 flex-col border-l border-border bg-card/70"
+    // NOTE (UX-001): plain CSS width transition, not framer-motion's `animate` prop — see
+    // `Drawer.tsx` and `ConversationSidebar.tsx` for the investigation of why `animate` on a
+    // persistently-mounted element unreliably commits to the DOM in this app/environment. The
+    // opacity fade below is unaffected: it goes through `AnimatePresence`'s enter/exit path.
+    <aside
+      style={{ width: collapsed ? 48 : 260 }}
+      className="flex h-screen shrink-0 flex-col border-l border-border bg-card/70 transition-[width] duration-200 ease-out motion-reduce:transition-none"
     >
       <div className="flex h-14 items-center justify-between border-b border-border px-2">
         {!collapsed && <div className="px-2 text-sm font-semibold">Context</div>}
@@ -56,6 +59,6 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
           </motion.div>
         )}
       </AnimatePresence>
-    </motion.aside>
+    </aside>
   );
 }

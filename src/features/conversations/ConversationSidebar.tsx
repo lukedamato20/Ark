@@ -11,6 +11,9 @@ interface ConversationSidebarProps {
   conversations: Conversation[];
   activeConversationId?: string;
   collapsed: boolean;
+  /** UX-001: hides the internal rail/expanded toggle when this sidebar is rendered inside a
+   * phone-width drawer, where collapsing to a rail doesn't make sense. */
+  hideCollapseToggle?: boolean;
   focusSearchSignal: number;
   hasMore: boolean;
   isLoading: boolean;
@@ -26,6 +29,7 @@ export function ConversationSidebar({
   conversations,
   activeConversationId,
   collapsed,
+  hideCollapseToggle = false,
   focusSearchSignal,
   hasMore,
   isLoading,
@@ -56,15 +60,21 @@ export function ConversationSidebar({
   }, [collapsed, focusSearchSignal]);
 
   return (
-    <motion.aside
-      animate={{ width: collapsed ? 72 : 288 }}
-      transition={{ duration: 0.18 }}
-      className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80"
+    // NOTE (UX-001): plain CSS width transition, not framer-motion's `animate` prop — `animate`
+    // reliably failed to commit a target width to the DOM for this persistently-mounted element
+    // in this app/environment (confirmed by DOM inspection; see `Drawer.tsx` for the fuller
+    // investigation of the same failure mode). The list items' `motion.button`s below are
+    // unaffected since those animate through `AnimatePresence`'s enter/exit path instead.
+    <aside
+      style={{ width: collapsed ? 72 : 288 }}
+      className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80 transition-[width] duration-200 ease-out motion-reduce:transition-none"
     >
       <div className="flex h-14 items-center gap-2 border-b border-border px-3">
-        <Button size="icon" variant="ghost" onClick={onToggleCollapsed} aria-label="Toggle sidebar">
-          {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-        </Button>
+        {!hideCollapseToggle && (
+          <Button size="icon" variant="ghost" onClick={onToggleCollapsed} aria-label="Toggle sidebar">
+            {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </Button>
+        )}
         {!collapsed && <div className="text-sm font-semibold tracking-wide">Ark</div>}
       </div>
 
@@ -139,6 +149,6 @@ export function ConversationSidebar({
           {!collapsed && "Settings"}
         </Button>
       </div>
-    </motion.aside>
+    </aside>
   );
 }
