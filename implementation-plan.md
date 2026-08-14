@@ -24,7 +24,7 @@ This roadmap resolves the audit in dependency order:
 5. Deliver a responsive, accessible, state-complete desktop experience.
 6. Finish the production desktop product, then add differentiated model, knowledge, tool, and media capabilities, followed by the Ark Code agentic coding environment built on that tool/agent foundation.
 7. Prove performance against budgets.
-8. Build a shared protocol and Expo/React Native iPhone client.
+8. Build an installable PWA iPhone companion with LAN device pairing (no native app or App Store distribution, per the Phase 8 scope decision).
 9. Complete cross-platform validation, signed distribution, observability, staged rollout, and rollback.
 
 After all required tasks are executed, Ark will have:
@@ -36,7 +36,7 @@ After all required tasks are executed, Ark will have:
 - managed local and secure cloud models, projects, search, attachments, RAG, tools, voice, and export/backup workflows;
 - an optional, provider-agnostic Ark Code agentic coding environment built on the tool/agent foundation, addressable independently of Ark Chat;
 - scalable state, database, provider, and protocol boundaries;
-- an offline-capable iPhone companion architecture and implementation;
+- an installable PWA iPhone companion over the local network (Phase 8 scope decision: no native app, no App Store distribution);
 - automated unit, integration, E2E, accessibility, security, performance, migration, and release validation.
 
 ### Delivery assumptions
@@ -123,7 +123,7 @@ Every task is complete only when its acceptance criteria, tests, documentation, 
 | 6 — Competitive capabilities | Add attachments/vision, RAG, tools, web, voice, notifications, automations, and explicit team-edition decision | CMP-001–009 | Phase 5 plus security capabilities | Competitive local AI workspace milestone |
 | 6.5 — Ark Code (agentic coding environment) | Deliver a provider-agnostic, local-model-first agentic coding assistant — repository awareness, scoped file/git/command tools, a durable agent loop, and approvals — as a distinct application surface alongside Ark Chat | CODE-001–008 | Phase 6 tool/agent and security foundation (CMP-003, SEC-009, ARC-003); Phase 5 desktop feature-complete Ark Chat | Read-only investigation agent ships; editing/execution tiers gated behind later CODE tasks |
 | 7 — Performance and scalability | Instrument and meet startup, streaming, history, rendering, and runtime resource budgets | PERF-001–005 | Metrics foundation; feature paths available | Performance budgets pass on reference hardware |
-| 8 — iPhone readiness and delivery | Build shared packages, versioned API, auth/sync, Expo app, offline behavior, native permissions, LAN pairing | MOB-001–010 | ARC typed boundaries; SEC auth design | Beta-quality iPhone companion |
+| 8 — iPhone readiness and delivery | Build an installable PWA over the existing frontend, LAN device pairing, Web Push — no native app, no App Store, per the Phase 8 scope decision (personal-use, no public distribution) | MOB-001, 005, 007, 008, 009 (002/003/004/006/010 retired) | ARC typed boundaries; FTR-010 companion API | Installable PWA usable on the home network |
 | 9 — Verification, operations, and release | Complete layered tests, observability, signed distribution, documentation, rollout, and rollback | TST-001–007, OPS-001–004 | All release-scope implementation tasks | Signed staged production rollout |
 
 ### 3.2 Dependency flow
@@ -661,21 +661,26 @@ Phase 9 test tasks begin earlier than the diagram suggests: every implementation
 - **Potential risks:** Excessive prompts make tools unusable; weak grouping makes them unsafe.
 - **Suggested implementation notes:** Approve narrow capabilities for a bounded time/resource, not broad “allow all tools” sessions.
 
-#### SEC-010 — Define future account, session, companion API, and sync security
+#### SEC-010 — Define companion API and LAN device-pairing security
 
-- **Description:** Produce the mobile/sync threat model and protocol security design: OAuth/OIDC Authorization Code with PKCE, short-lived access tokens, refresh rotation, device registration/revocation, TLS, replay protection, pairing, rate limits, audit, and optional E2E encryption.
-- **Reason:** Authentication/session/CSRF are not applicable to today's local app but become mandatory for mobile and remote APIs.
-- **Related audit findings:** A-SEC-01, A-SEC-04, A-MOB-03–05.
+- **Status: Complete (2026-08-14), rewritten for the Phase 8 scope decision — pending the same review as SEC-009's ADR before FTR-010/MOB-009 implementation begins.** The original scope (OAuth/OIDC PKCE, refresh-token rotation, multi-device E2E-encrypted sync) assumed a hosted-or-syncing multi-device architecture the Phase 8 scope decision (recorded above MOB-001) no longer builds — there is no account, no cloud backend, and no offline replica to reconcile, so most of the original threat model doesn't apply to anything that will actually be built. Rewritten to the threat model that *does* apply: the FTR-010 companion API and MOB-009 LAN pairing.
+  - **The real, narrower threat model:** the companion API is a local HTTP server reachable on the LAN. Two distinct threats matter: (1) **an unrelated website open in the user's normal browser** issuing a same-origin-policy-exempt request to the companion API while it happens to be running — the identical threat class SEC-002 already had to solve for the llama.cpp sidecar, and the same fix applies: the pairing token must be sent as a custom request header (`Authorization: Bearer <token>`), never a cookie, since a cross-origin page cannot attach a custom header without a CORS preflight the companion API can simply refuse; and (2) **another device on the same LAN** attempting to use the API without ever having been paired — defeated by requiring the token at all, full stop, with no unauthenticated route (unlike llama.cpp's own health/models exemption that SEC-002 could not fully close upstream — the companion API is Ark's own code, so this exemption simply does not exist here by construction).
+  - **Device pairing lifecycle (implemented by MOB-009):** a pairing token is high-entropy, generated server-side, bound to one named device, and stored server-side via SEC-005's OS-backed secret storage. It does not expire on a fixed schedule (there is no refresh-token dance) but is individually and immediately revocable — revocation takes effect on the device's very next request, not on some future refresh. A lost/stolen phone is handled by revoking that one device's token from Settings; this is the entire "lost device" story, deliberately simpler than OAuth's refresh-rotation-and-reuse-detection machinery because there is no multi-hop token exchange to defend.
+  - **What is explicitly out of scope, and why that is correct, not a gap:** OAuth/OIDC (no third-party identity provider exists or is needed); short-lived access + refresh tokens (no authorization server to issue them); E2E encryption / searchable-metadata / multi-device key distribution (no sync, no server-held ciphertext to protect against — the SQLite database never leaves the desktop machine); browser-cookie CSRF defenses specifically (the companion API deliberately never uses cookies for auth, which is a stronger position than defending cookie-based CSRF).
+  - **Full validation:** this is a design/threat-model deliverable, like SEC-009 — FTR-010 and MOB-009 (its consumers) are not yet implemented, so there is nothing to test end-to-end yet. FTR-010's and MOB-009's own acceptance criteria (already updated above to require custom-header bearer auth, no database/filesystem exposure, and immediate per-device revocation) are what make this threat model real rather than aspirational when they ship.
+- **Description:** Define the security design for the local companion API (FTR-010) and LAN device pairing (MOB-009): per-device bearer-token authentication via custom header (never a cookie), protection against an unrelated browser tab issuing a drive-by request to the companion API while it's running, and individually/immediately revocable device pairing. Narrower than originally scoped — no OAuth/OIDC, no account system, no multi-device sync, no E2E encryption — because the Phase 8 scope decision means none of those architectures are being built.
+- **Reason:** Authentication is not applicable to the single-user desktop itself, but the companion API (FTR-010) is a real local network service the moment it exists, and it needs the same "don't trust localhost as an authentication boundary" discipline SEC-002 already established for the sidecar.
+- **Related audit findings:** A-SEC-01, A-SEC-04, A-MOB-03–04, A-MOB-07.
 - **Dependencies:** ARC-002 protocol direction.
-- **Priority / complexity:** High / Large.
-- **Expected outcome:** Mobile/API work begins from a reviewed trust model rather than bolting auth onto raw Tauri commands.
+- **Priority / complexity:** Medium / Medium (was High / Large under the original account/sync/E2E scope).
+- **Expected outcome:** FTR-010 and MOB-009 are built against a reviewed trust model from the start, not bolted-on auth after the fact.
 - **Acceptance criteria:**
   - Local single-user desktop remains account-optional and does not gain cosmetic authentication.
-  - Browser-cookie CSRF is either not used or has an explicit same-site/token defense.
-  - Lost device, token theft, replay, downgrade, offline expiry, clock skew, and account deletion are designed.
-  - E2E encryption decision identifies searchable metadata, recovery, multi-device key distribution, and limitations.
-- **Potential risks:** Premature backend choice or overpromising E2E search/RAG.
-- **Suggested implementation notes:** Use standard identity protocols and platform secure stores; do not expose the SQLite schema as an API.
+  - The companion API authenticates every request via a custom header bearer token, never a cookie, and never exempts any route (including health/status) the way SEC-002 documented the sidecar's upstream could not avoid.
+  - Device pairing tokens are high-entropy, server-generated, individually revocable, and revocation is immediate on the device's next request.
+  - Lost/stolen device, token theft over the LAN, and replay are each explicitly addressed by the design above.
+- **Potential risks:** The home Wi-Fi network is the actual trust boundary for LAN pairing; if it is shared/public, the threat model's guarantees are only as strong as the network itself — this must be stated plainly in the UI (MOB-009), not implied to be stronger than it is.
+- **Suggested implementation notes:** Use standard header-based bearer-token conventions and platform secure stores (SEC-005); do not expose the SQLite schema as an API; do not reintroduce a cookie-based session "for convenience" — that would reopen exactly the CSRF-style threat this design avoids by construction.
 
 #### SEC-011 — Publish the security and privacy operating model
 
@@ -686,7 +691,7 @@ Phase 9 test tasks begin earlier than the diagram suggests: every implementation
 - **Priority / complexity:** High / Medium.
 - **Expected outcome:** Users and maintainers know what data is stored/sent, how fixes are handled, and how to report vulnerabilities.
 - **Acceptance criteria:**
-  - Data-flow disclosure covers local DB, logs, provider requests, imports/files, model/runtime downloads, crash reports, and mobile sync.
+  - Data-flow disclosure covers local DB, logs, provider requests, imports/files, model/runtime downloads, crash reports, and the companion API/LAN pairing (SEC-010).
   - SECURITY.md defines private reporting and supported versions without inventing unavailable contact channels.
   - Incident runbook includes advisory triage, credential/signing-key compromise, malicious update, and rollback.
   - Release checklist requires a security delta review.
@@ -950,7 +955,7 @@ Phase 9 test tasks begin earlier than the diagram suggests: every implementation
   - No primary control clips, overlaps, or requires horizontal page scrolling.
   - Supported minimum window size matches tested reality.
 - **Potential risks:** Desktop and mobile-webview patterns may diverge from native iPhone patterns.
-- **Suggested implementation notes:** This makes the desktop webview responsive; it does not replace the native Expo mobile task.
+- **Suggested implementation notes:** This makes the desktop webview responsive; per the Phase 8 scope decision, the phone-width result of this same work is what MOB-001's PWA reuses directly, not a separate native mobile task.
 
 #### UX-002 — Simplify the chat header and context navigation
 
@@ -1279,10 +1284,10 @@ Phase 9 test tasks begin earlier than the diagram suggests: every implementation
 
 #### FTR-010 — Expose a versioned local companion/integration API
 
-- **Description:** Provide a disabled-by-default authenticated local API for supported conversation/provider operations, using the same application services and protocol rather than raw database access.
+- **Description:** Provide a disabled-by-default authenticated local API for supported conversation/provider operations, using the same application services and protocol rather than raw database access. Per the Phase 8 scope decision, this is also the *entire* companion service the PWA speaks to — no separate "cross-device protocol" or "companion service" task exists (former MOB-002/MOB-003, retired and folded in here); the same API and application services serve both the PWA's web-build assets and every conversation/provider operation the phone client needs.
 - **Reason:** Competitors expose integration APIs and mobile/LAN access requires a safe service boundary.
 - **Related audit findings:** A-CMP-11, A-MOB-03, A-SEC-04.
-- **Dependencies:** ARC-001–003, SEC-010, MOB-002.
+- **Dependencies:** ARC-001–003, SEC-010.
 - **Priority / complexity:** High / Large.
 - **Expected outcome:** Integrations and the phone companion use a documented, versioned, least-privilege API.
 - **Acceptance criteria:**
@@ -1663,168 +1668,131 @@ Its repository concept binds to an existing FTR-003 Project rather than introduc
 
 ### Phase 8 — Mobile readiness and iPhone delivery
 
-#### MOB-001 — Create the pnpm monorepo and shared package boundaries
+**Phase 8 scope decision (2026-08-14):** Ark is personal-use software for one user and a small
+number of named friends, with no App Store distribution and no Apple Developer Program
+enrollment — an explicit, deliberate scope decision, not a resource shortfall. This changes
+Phase 8's shape substantially: a native Expo/React Native shell requiring App Store or
+TestFlight distribution isn't viable at this scope (Apple's free-tier personal-team builds
+expire every 7 days and require collecting each friend's device UDID — not workable for a
+casual friend group). The tasks below are rewritten around a PWA that reuses Ark's existing
+React frontend (ARC-002's typed `ArkClient` boundary exists specifically so the transport
+underneath — Tauri IPC today, HTTP/WebSocket for the PWA — is swappable) served over the local
+companion API (FTR-010), with device pairing replacing account-based auth. Several originally
+separate tasks are retired as redundant under this model rather than rewritten; each retired
+entry is kept as a pointer, not deleted, so existing cross-references elsewhere in this plan
+still resolve. Remote access beyond the home network is an explicit non-goal for Ark itself — a
+user wanting that layers their own personal VPN (Tailscale, WireGuard) entirely outside Ark's
+scope. Revisit this whole decision, not just individual tasks, if the intended audience ever
+grows beyond a handful of named people.
 
-- **Description:** Organize desktop and mobile apps with shared domain, protocol, design-token, and test-fixture packages; preserve the Tauri desktop build while preventing platform assumptions from entering shared code.
-- **Reason:** Current React DOM/Tauri code is not reusable on iPhone, but pure contracts/rules can be.
-- **Related audit findings:** A-MOB-01, A-MOB-02.
-- **Dependencies:** ARC-002, ARC-006, ARC-009.
-- **Priority / complexity:** High / Large.
-- **Expected outcome:** Desktop and mobile share semantic code without pretending to share UI or process/filesystem behavior.
+#### MOB-001 — Build the PWA shell over the existing Ark frontend
+
+- **Description:** Add a web build target and a service worker/manifest for installability. Add an `HttpArkClient` implementing the existing `ArkClient` interface over the FTR-010 companion API instead of Tauri IPC, so every existing feature component (`ChatView`, `SettingsView`, etc.) is reused unmodified. Extend UX-001's responsive shell to phone viewport widths.
+- **Reason:** ARC-002's typed client boundary exists specifically so the transport underneath is swappable; a parallel native codebase would duplicate UI work Ark already has, for no benefit at this distribution scope.
+- **Related audit findings:** A-MOB-01, A-MOB-02 (reframed — "DOM/Tauri cannot be reused as iPhone UI" assumed a native-installed binary; a browser-rendered PWA *is* the DOM, which is directly reusable).
+- **Dependencies:** ARC-002, FTR-010, UX-001.
+- **Priority / complexity:** High / Medium.
+- **Expected outcome:** Everything Ark Chat does on desktop is usable from a phone browser and installable to the home screen, with one codebase.
 - **Acceptance criteria:**
-  - Structure includes apps/desktop, apps/mobile, packages/domain, packages/protocol, packages/design-tokens, and packages/test-fixtures or an equivalently documented layout.
-  - Shared packages contain no DOM, Tauri, Node filesystem, native process, or Expo-specific imports.
-  - Desktop behavior/build remains green through incremental moves.
-  - Dependency-boundary linting prevents platform leakage/cycles.
-- **Potential risks:** Large repository move creates noisy history and conflicts.
-- **Suggested implementation notes:** Move one package at a time after characterization tests; do not combine with unrelated component refactors.
+  - A web build target produces a static bundle the companion API's HTTP server can serve.
+  - `HttpArkClient` implements the full `ArkClient` interface; the existing transport-isolation module-boundary rule (today: only `ArkClient.ts` imports `@tauri-apps/*`) extends to cover it — only the adapter file touches `fetch`/`WebSocket`.
+  - `manifest.json` and a service worker make the page installable on iOS/Android home screens.
+  - Supported phone widths render without horizontal scroll or clipped controls.
+- **Potential risks:** iOS Safari's PWA feature support (storage limits, background behavior) lags Chrome; must be verified on real iOS Safari, not desktop responsive-mode.
+- **Suggested implementation notes:** Don't fork feature components for a phone-only layout; branch inside the existing component via a viewport hook if a genuine phone-specific need appears.
 
-#### MOB-002 — Define the versioned cross-device protocol
+#### MOB-002 — Retired, folded into FTR-010
 
-- **Description:** Extend ArkClient contracts into a transport-neutral protocol for conversations, generation revisions/events, projects, providers, attachments, sync cursors, errors, capability negotiation, and compatibility.
-- **Reason:** Mobile must not call Tauri commands or mirror raw SQLite tables.
-- **Related audit findings:** A-MOB-03, A-ARC-06, A-CMP-11.
-- **Dependencies:** FND-002, ARC-002, FTR-003–005.
-- **Priority / complexity:** Critical / Large.
-- **Expected outcome:** Desktop service, mobile client, and tests share stable semantic contracts.
+There is no separate "cross-device protocol" under the PWA model — the PWA speaks the exact
+same FTR-010 companion API contract every other client would. Any acceptance-criteria content
+this task would have owned (version negotiation, request/revision IDs, streaming
+resume/reconciliation) belongs to FTR-010 directly.
+
+#### MOB-003 — Retired, folded into FTR-010
+
+"The authenticated companion service" is FTR-010 itself — there is no separate mobile-specific
+service to build. What this task's LAN/pairing-mode acceptance criteria covered now lives in
+MOB-009.
+
+#### MOB-004 — Retired, folded into MOB-009
+
+OAuth/OIDC PKCE, refresh-token rotation, and device revocation-at-scale solve identity-federation
+problems this product doesn't have at its explicit personal-use scope. MOB-009's lightweight LAN
+pairing tokens are the entire authentication model; there is no separate "mobile authentication"
+task. A phone's own OS lock screen is the app-lock — Ark does not implement a second one.
+
+#### MOB-005 — Disconnected-state UX
+
+- **Description:** Detect when the companion API becomes unreachable (phone left the LAN) and show a clear, honest "Ark is unreachable — check you're on the same network as your computer" state. No local data cache, no write queue, no reconciliation.
+- **Reason:** The PWA is a live thin client to the desktop-hosted database, not a device with its own local replica — there is no sync/conflict problem to solve. Building one anyway would be exactly the speculative complexity Section 2.7 warns against.
+- **Related audit findings:** A-MOB-05 (reframed — "no offline outbox" was a gap under a cloud-sync model; it's a correct absence under a LAN-only thin-client model, not a gap).
+- **Dependencies:** MOB-001.
+- **Priority / complexity:** Low / Small.
+- **Expected outcome:** Leaving the house never shows stale or half-synced data — it says "unreachable," plainly.
 - **Acceptance criteria:**
-  - Protocol has explicit version negotiation and unknown field/event behavior.
-  - Commands are idempotent where retries are possible and carry request/revision IDs.
-  - Streaming supports resume/reconciliation after disconnect.
-  - Persistence/internal paths and secrets are not exposed.
-  - Compatibility fixtures cover current and one previous supported protocol version.
-- **Potential risks:** Freezing a protocol before mobile use cases are understood.
-- **Suggested implementation notes:** Prototype core mobile flows against the contract before declaring v1 stable.
+  - Connection loss is detected within a bounded time and rendered as a distinct, styled state, not a blank screen or silent failure.
+  - No conversation content persists on the phone beyond the current rendered session.
+  - Reconnection is automatic when the phone rejoins the LAN.
+- **Potential risks:** None significant — deliberate scope reduction from the original offline-sync task.
+- **Suggested implementation notes:** A heartbeat against the companion API's health endpoint is sufficient; do not build a service-worker data cache for conversation content.
 
-#### MOB-003 — Build the authenticated companion service
+#### MOB-006 — Retired
 
-- **Description:** Implement the local/LAN or hosted companion service adapter over application services with TLS where applicable, pairing, authenticated streaming, rate limits, capability scopes, and audit.
-- **Reason:** The phone needs a secure service boundary to reach desktop-hosted models/history.
-- **Related audit findings:** A-MOB-03, A-MOB-07, A-SEC-04.
-- **Dependencies:** FTR-010, SEC-010, MOB-002.
-- **Priority / complexity:** High / Extra Large.
-- **Expected outcome:** iPhone can safely access supported Ark use cases without raw local-machine exposure.
+No native Expo/React Native shell. Distribution constraints (no App Store, no Apple Developer
+Program) make it non-viable at this product's explicit scope; MOB-001's PWA covers the same
+user-facing goal. Revisit only alongside a revisit of the Phase 8 scope decision above.
+
+#### MOB-007 — PWA installability and home-screen polish
+
+- **Description:** Icon/splash assets for home-screen install, `display: standalone` manifest behavior, safe-area handling for notches/home indicators, and a dismissible "Add to Home Screen" hint (Safari has no native install prompt).
+- **Reason:** Making a browser tab feel like an installed app is manifest/CSS work once MOB-001's shell exists.
+- **Related audit findings:** None directly — general PWA polish supporting A-MOB-01's resolution via MOB-001.
+- **Dependencies:** MOB-001.
+- **Priority / complexity:** Low / Small.
+- **Expected outcome:** Opening Ark from the home screen looks and behaves like a real app.
 - **Acceptance criteria:**
-  - Loopback, paired LAN, and hosted modes are separate configurations and threat models.
-  - LAN pairing uses user-verifiable short-lived proof/QR and device revocation.
-  - Stream reconnect/replay cannot duplicate messages/actions.
-  - Network interface changes, sleep/wake, desktop unavailable, and version mismatch have explicit behavior.
-  - Penetration/security tests cover unauthorized discovery/access and replay.
-- **Potential risks:** LAN certificates/discovery and firewall behavior vary; inbound service expands attack surface.
-- **Suggested implementation notes:** Start loopback for integration, then authenticated LAN; add hosted sync only with a deliberate operating model.
+  - Manifest passes an installability audit.
+  - Safe-area insets are respected on notched devices.
+  - An install hint is shown once, is dismissible, and never nags on repeat visits.
+- **Potential risks:** iOS-specific viewport/status-bar quirks need real-device verification.
+- **Suggested implementation notes:** Use real iOS Safari for verification; desktop responsive-mode does not reproduce Safari-specific PWA quirks.
 
-#### MOB-004 — Implement mobile authentication and secure credential storage
+#### MOB-008 — Web Push notifications
 
-- **Description:** Add OAuth/OIDC PKCE or secure paired-device identity, iOS Keychain/SecureStore tokens, rotation/revocation, biometric app lock option, and privacy-safe logout.
-- **Reason:** Mobile device loss and remote API access require real identity/session controls.
-- **Related audit findings:** A-MOB-04, A-SEC-01, A-SEC-03.
-- **Dependencies:** SEC-005, SEC-010, MOB-003.
-- **Priority / complexity:** Critical / Large.
-- **Expected outcome:** Lost/stolen devices can be revoked and credentials are never stored in plain app data.
+- **Description:** Opt-in Web Push (self-generated VAPID keys, no third-party push service, no Apple Developer Program) for generation-complete notifications when the PWA is backgrounded. Camera, native share sheet, native file picker, and microphone are explicit non-goals — a PWA on iOS either lacks these or only partially exposes them, and building around partial support isn't worth it at this scope.
+- **Reason:** Push is the one native-feeling capability actually achievable for free; the rest of the originally-scoped capability set assumed a native app with App Store entitlements.
+- **Related audit findings:** A-MOB-06 (partial — notifications only; camera/share-sheet/file-picker explicitly out of scope, not silently dropped).
+- **Dependencies:** MOB-001, MOB-007, CMP-006.
+- **Priority / complexity:** Medium / Medium.
+- **Expected outcome:** You're notified on your phone when a long-running generation finishes, without the tab open.
 - **Acceptance criteria:**
-  - Authorization Code + PKCE is used for account mode; pairing keys are high entropy and hardware-backed where available.
-  - Access tokens are short lived; refresh rotation/reuse detection and revocation are tested.
-  - Logout removes keys/cache according to a clearly confirmed retention choice.
-  - Biometric lock never substitutes for server/device revocation.
-- **Potential risks:** Offline token expiry and identity-provider availability.
-- **Suggested implementation notes:** Keep local paired mode possible without forcing a cloud account if the product can meet recovery/security requirements.
+  - VAPID keys are generated and stored server-side, not through a third-party push service.
+  - The permission request is explicit and deniable.
+  - Delivery is verified on an installed (not just open-tab) iOS PWA, on the actual minimum supported iOS version.
+- **Potential risks:** iOS Web Push has real version gating (16.4+ and home-screen-installed only) and platform quirks; must be tested on real hardware, not assumed from spec.
 
-#### MOB-005 — Implement revisioned offline sync and conflict resolution
+#### MOB-009 — Implement LAN discovery and device pairing
 
-- **Description:** Add durable change log/outbox, tombstones, revision IDs, cursor sync, idempotency keys, retries/backoff, conflict policy, attachment transfer, and account/device deletion propagation.
-- **Reason:** Current direct local SQLite mutations cannot support safe offline multi-device updates.
-- **Related audit findings:** A-MOB-05, A-ARC-02, A-OPS-04.
-- **Dependencies:** ARC-005, MOB-002–004, FTR-001.
-- **Priority / complexity:** Critical / Extra Large.
-- **Expected outcome:** Mobile can read/write offline and converge without duplicate or silently lost history.
+- **Description:** Opt-in local-network discovery, QR-code/manual-code pairing issuing a long-lived, high-entropy per-device bearer token, a Settings screen listing every paired device (name, first-paired date, last-seen) with individual revoke, and network-change handling. This *is* the entire authentication model for the PWA — absorbs what MOB-003's LAN-mode acceptance criteria and MOB-004's device-identity acceptance criteria would have covered separately.
+- **Reason:** OAuth/PKCE, refresh-token rotation, and device revocation-at-scale solve identity-federation problems Ark doesn't have; a personal LAN tool needs "did I show this device the code," not an identity provider.
+- **Related audit findings:** A-MOB-04, A-MOB-07, A-CMP-15.
+- **Dependencies:** FTR-010, SEC-005 (for how Ark itself stores issued tokens server-side).
+- **Priority / complexity:** High / Medium.
+- **Expected outcome:** A friend gets LAN access to your Ark desktop in about ten seconds; you can revoke any one device without touching the others.
 - **Acceptance criteria:**
-  - Create/edit/archive/delete/branch/project operations have documented merge/conflict semantics.
-  - Replayed requests are idempotent and tombstones prevent resurrection.
-  - Sync interruption at every page/attachment boundary resumes safely.
-  - Conflicts that cannot merge are preserved as explicit variants, not last-write-wins data loss.
-  - Deletion/export/account lifecycle is end-to-end tested.
-- **Potential risks:** Sync is a distributed system; hidden last-write-wins behavior can destroy data.
-- **Suggested implementation notes:** Leverage Ark's append-only message branches; keep mutable metadata revisioned and surface conflicts.
-
-#### MOB-006 — Build the native Expo/React Native iPhone shell and core flows
-
-- **Description:** Implement Expo Router/native navigation, conversation list/search, project navigation, chat/stream/stop/retry, provider/model route display, settings, and accessible iPhone layouts using shared contracts/tokens.
-- **Reason:** PWA/desktop DOM reuse does not meet the strategic iPhone requirement.
-- **Related audit findings:** A-MOB-01, A-CMP-13.
-- **Dependencies:** MOB-001–005, UX state/design semantics.
-- **Priority / complexity:** High / Extra Large.
-- **Expected outcome:** A native-feeling iPhone client can perform core Ark workflows.
-- **Acceptance criteria:**
-  - Supports current and minimum declared iOS/device classes with Dynamic Type, dark mode, VoiceOver, reduced motion, safe areas, and keyboard handling.
-  - Chat reconnect/reconciliation follows the same lifecycle contract as desktop.
-  - Navigation uses sheets/stacks/tabs appropriate to iOS, not the desktop three-pane DOM.
-  - Core E2E tests run on simulator and selected physical devices.
-- **Potential risks:** Desktop design tokens may not map directly to native platform conventions.
-- **Suggested implementation notes:** Share semantics/colors, not pixel layouts; prefer platform-native components/gestures.
-
-#### MOB-007 — Deliver offline cache, drafts, and sync UX
-
-- **Description:** Add Expo SQLite-backed history/cache, durable unsent drafts/outbox, connection/sync state, manual retry, storage management, and optional encrypted local database.
-- **Reason:** Mobile connectivity and iOS background limits require offline-first behavior.
-- **Related audit findings:** A-MOB-05.
-- **Dependencies:** MOB-005, MOB-006, SEC-006 design.
-- **Priority / complexity:** High / Large.
-- **Expected outcome:** Users can read history and compose offline without losing work or confusing local/remote completion.
-- **Acceptance criteria:**
-  - Drafts survive force-quit/reboot and clearly show unsent/syncing/failed states.
-  - Cached sensitive data retention and clear-cache behavior are explicit.
-  - Reconnection drains outbox idempotently and presents conflicts.
-  - Background execution limitations are documented; no promise of indefinite background local generation.
-- **Potential risks:** Sensitive lock-screen backups and OS app eviction.
-- **Suggested implementation notes:** Exclude secure tokens from SQLite and iCloud backup as appropriate; evaluate SQLCipher using platform-supported builds.
-
-#### MOB-008 — Integrate notifications, files, camera, microphone, and share sheet
-
-- **Description:** Add explicit permission flows, limited photo/file selection, camera capture, voice input, share-to-Ark, completion/approval notifications, deep links, and privacy-preserving failure states.
-- **Reason:** These platform-specific capabilities are strategic mobile requirements and cannot be shared from desktop implementations.
-- **Related audit findings:** A-MOB-06, A-CMP-07–08, A-CMP-13.
-- **Dependencies:** MOB-006/007, CMP-001/005/006.
-- **Priority / complexity:** High / Large.
-- **Expected outcome:** Mobile-native inputs and notifications work with clear data routing and consent.
-- **Acceptance criteria:**
-  - Permissions are requested only when invoked and denial/revocation never blocks unrelated app use.
-  - Background/lock-screen notification content follows privacy setting and defaults to generic.
-  - Captured/shared files use the same validation, route disclosure, lifecycle, and export rules as desktop.
-  - Deep links validate destination/account and do not execute actions without confirmation.
-- **Potential risks:** App Store privacy declarations and background-mode restrictions.
-- **Suggested implementation notes:** Maintain an auditable permission/data-use inventory for App Store submission.
-
-#### MOB-009 — Implement secure LAN discovery and pairing
-
-- **Description:** Add opt-in local-network discovery, QR/manual pairing, certificate/public-key pinning or equivalent authenticated channel, network-change handling, device naming, and revoke controls.
-- **Reason:** A desktop-hosted local model is a strong iPhone differentiator but LAN discovery is not trust.
-- **Related audit findings:** A-MOB-07, A-CMP-15.
-- **Dependencies:** SEC-010, MOB-003/004.
-- **Priority / complexity:** High / Large.
-- **Expected outcome:** iPhone can use a desktop runtime on trusted networks without exposing it broadly.
-- **Acceptance criteria:**
+  - Pairing tokens are high-entropy and server-generated, never guessable/sequential.
+  - Settings lists every paired device with individual, immediate revoke — not just on next refresh.
   - Discovery advertises no conversation/provider secrets.
-  - Pairing requires physical/user confirmation and resists nearby unauthorized devices/MITM.
-  - Trust persists in secure storage and is independently revocable on both devices.
-  - Public/untrusted network changes disable or re-confirm access according to policy.
-- **Potential risks:** mDNS/firewall/VPN differences and certificate lifecycle.
-- **Suggested implementation notes:** Provide manual pairing fallback and never auto-trust by subnet.
+  - No credential is visible in plaintext after the initial pairing screen closes.
+  - Public/untrusted network changes re-confirm or disable access according to policy; never auto-trust by subnet.
+- **Potential risks:** The home Wi-Fi network is the actual trust boundary; if it's shared/public, pairing tokens are only as safe as the network. State this plainly in the UI rather than implying account-grade security.
+- **Suggested implementation notes:** Reuse SEC-005's OS-backed secret storage pattern for server-side token storage; the phone-side token can live in ordinary browser storage since it is not a credential Ark needs to protect from the phone's own user. Provide a manual pairing-code fallback alongside QR.
 
-#### MOB-010 — Run the on-device inference decision and prototype gate
+#### MOB-010 — Retired
 
-- **Description:** Evaluate native Swift/Metal/Core ML/llama.cpp integration on target devices for performance, thermal, memory, model distribution/license, security, and Expo native-module cost; approve or explicitly defer.
-- **Reason:** The desktop sidecar cannot run on iOS, and on-device inference adds a separate 4–8+ week track.
-- **Related audit findings:** A-MOB-08.
-- **Dependencies:** MOB-006 core client, PERF-004 methods, product demand evidence.
-- **Priority / complexity:** Medium / Large prototype; Extra Large productization.
-- **Expected outcome:** Ark makes an evidence-based local-iPhone inference decision without blocking the companion client.
-- **Acceptance criteria:**
-  - Prototype measures launch, TTFT, token/s, peak memory, thermal throttling, battery, context limits, and app/package/model distribution.
-  - Supported device/model matrix and App Store constraints are documented.
-  - Decision records native-module maintenance and fallback to desktop/cloud.
-  - If deferred, the companion architecture remains unaffected and no feature claim is shown.
-- **Potential risks:** Hardware fragmentation, App Store size/download rules, model licensing, thermal experience.
-- **Suggested implementation notes:** Use Expo development builds/custom native modules, not Expo Go, for the prototype.
+On-device iPhone inference evaluation was already gated behind "product demand evidence" and a
+native Swift module — neither applies once there is no native app. A PWA cannot meaningfully
+run local on-device inference on iOS. Revisit only if Phase 8's scope decision changes.
 
 ### Phase 9 — Testing, operations, and production release
 
@@ -1901,7 +1869,7 @@ Its repository concept binds to an existing FTR-003 Project rather than introduc
 - **Acceptance criteria:**
   - Windows primary suite runs on every release candidate; macOS/Linux supported matrices run before declaring support.
   - Tests use disposable isolated workspaces and verify no external user data changes.
-  - iOS simulator and selected physical-device smoke cover auth/sync/chat/offline/permissions.
+  - Real iOS Safari (PWA, not a native simulator) smoke covers pairing, chat, the disconnected-state UX, and Web Push permissions.
   - Failure artifacts include screenshots, redacted logs, DB state summary, and version metadata.
 - **Potential risks:** Native UI automation flakiness and runner cost.
 - **Suggested implementation notes:** Keep a small blocking smoke suite and broader nightly/release suites.
@@ -1954,21 +1922,20 @@ Its repository concept binds to an existing FTR-003 Project rather than introduc
 - **Potential risks:** Over-redaction removes useful context; under-redaction breaks privacy promise.
 - **Suggested implementation notes:** Prefer stable error codes, versions, counts, and hashes over raw content.
 
-#### OPS-002 — Build, sign, notarize, update, and rollback release artifacts
+#### OPS-002 — Produce locally-built, unsigned installers for personal distribution
 
-- **Description:** Create clean CI bundle pipelines, platform signing/notarization, signed Tauri update manifests, staged channels, downgrade protection, installer/update/uninstall smoke tests, and emergency rollback/revocation.
-- **Reason:** Bundling fails and there is no release trust/update chain.
-- **Related audit findings:** C-03, C-10, A-SEC-10, A-OPS-03.
-- **Dependencies:** COR-012, FND-003, SEC-003/004, TST-005/006.
-- **Priority / complexity:** Critical / Extra Large.
-- **Expected outcome:** Users receive verifiable artifacts and secure fixes through a rehearsed process.
+- **Description:** Produce a working, bundled installer per OS (via the CI matrix's bundling step once COR-012 adds a real one) without code signing or notarization; document the one-time OS trust-bypass steps for the small number of named people who will install it.
+- **Reason:** Signing/notarization establish trust with strangers downloading software from the internet — a problem that doesn't exist when installers go directly to named people the developer knows, per the Phase 8 scope decision recorded above MOB-001.
+- **Related audit findings:** C-03, C-10, A-SEC-10, A-OPS-03 (the underlying "installer must actually work" finding still applies in full; "must be signed/trusted at scale" does not, at this explicit scope).
+- **Dependencies:** COR-012, FND-003, SEC-003/004.
+- **Priority / complexity:** Low / Small (was Critical / Extra Large under a public-distribution assumption).
+- **Expected outcome:** The developer and their friends install a working build by clicking through one OS warning, with no signing infrastructure to build or maintain.
 - **Acceptance criteria:**
-  - Signing keys are hardware/CI-secret protected with least privilege, rotation, backup, and incident procedure.
-  - Windows signing and macOS signing/notarization pass; Linux package formats match declared support.
-  - Update signatures, version/channel policy, rollback, interrupted update, and tamper/downgrade tests pass.
-  - Clean machines install, launch, update from previous supported version, retain data, and uninstall as documented.
-- **Potential risks:** Certificate/notarization provisioning, updater mistakes, irreversible bad release.
-- **Suggested implementation notes:** Use internal/canary channels before stable and retain the prior signed artifact/update metadata.
+  - A bundled installer builds successfully for each OS actually in use.
+  - Install/uninstall is smoke-tested at least once per OS.
+  - Docs state plainly that builds are unsigned and explain the one-time trust step per OS (Windows SmartScreen "More info → Run anyway"; macOS right-click → Open).
+- **Potential risks:** If the intended audience ever grows beyond a handful of known people, this disposition needs revisiting — unsigned installers do not scale to strangers with no reason to trust an "unknown publisher" warning.
+- **Suggested implementation notes:** Revisit this disposition explicitly, not silently, if the user base ever grows — the same pattern CMP-009 already uses to gate the team/multi-user decision rather than letting it drift.
 
 #### OPS-003 — Complete product, support, legal, and release documentation
 
@@ -1987,22 +1954,20 @@ Its repository concept binds to an existing FTR-003 Project rather than introduc
 - **Potential risks:** Legal requirements need specialist review.
 - **Suggested implementation notes:** Treat legal/security wording as requiring appropriate owner/counsel approval, not engineering invention.
 
-#### OPS-004 — Execute staged release, support, and rollback
+#### OPS-004 — Manual release checklist
 
-- **Description:** Run internal dogfood, closed alpha, signed beta, release-candidate, canary production, and broad rollout with entry/exit gates, issue triage, migration/update rehearsal, rollback triggers, and post-release review.
-- **Reason:** There is no deployment, monitoring, beta, rollback, or support process.
-- **Related audit findings:** C-10, A-OPS-01–06.
-- **Dependencies:** All production-scope tasks; OPS-001–003; TST-001–007.
-- **Priority / complexity:** Critical / Large.
-- **Expected outcome:** Production rollout is evidence-driven, reversible, and supportable.
+- **Description:** Tag a version, attach built installer(s) to a GitHub Release with a short changelog, keep at least the previous release's installer available. No staged channels, no telemetry-driven rollback triggers, no cohort rings.
+- **Reason:** Staged rollout percentages and phased channels solve problems that come from an unknown-sized public user base; at the Phase 8 scope decision's explicit personal-use audience, they are pure process overhead with no corresponding benefit.
+- **Related audit findings:** C-10, A-OPS-01–06 (the underlying "there is no release/rollback process at all" finding is still resolved — by a smaller process fit to the smaller audience, not left unresolved).
+- **Dependencies:** OPS-002 (rewritten).
+- **Priority / complexity:** Low / Small (was Critical / Large under a public-rollout assumption).
+- **Expected outcome:** Shipping a new version takes minutes; undoing a bad one is "grab the previous attached file."
 - **Acceptance criteria:**
-  - Each ring has named cohort, duration/minimum use, required metrics/tests, severity thresholds, and owner.
-  - Backup/migration/update/rollback are rehearsed using production-like signed artifacts.
-  - Critical privacy/data-loss/security issues stop rollout automatically by policy.
-  - Prior version and update channel remain available for rollback, subject to schema compatibility.
-  - Post-release review feeds verified defects into regression suites.
-- **Potential risks:** Small beta population misses hardware/provider diversity.
-- **Suggested implementation notes:** Recruit across Windows/macOS/Linux, local providers, large workspaces, assistive technology, and low-resource hardware.
+  - Each GitHub Release states what changed.
+  - The prior release stays available (not deleted) for at least one version back.
+  - Friends know where to check for updates — no auto-update pipeline required.
+- **Potential risks:** None significant at this scope.
+- **Suggested implementation notes:** Revisit alongside OPS-002 if the audience ever grows.
 
 ## 5. Architecture Changes
 
@@ -2017,19 +1982,22 @@ apps/
       app/                 composition, routing, shell
       features/            chat, conversations, providers, settings, diagnostics
       ui/                  owned accessible primitives
+      lib/                 ArkClient — Tauri adapter (desktop) and HTTP/WebSocket adapter (PWA)
     src-tauri/
       commands/            thin Tauri transport adapters
       application/         use cases and transaction boundaries
       domain/              entities, lifecycle, validation contracts
       ports/               repository/provider/files/secrets/runtime/observability traits
-      infrastructure/      SQLite, HTTP providers, OS files/keychain, sidecar
-  mobile/                  Expo/React Native application
+      infrastructure/      SQLite, HTTP providers, OS files/keychain, sidecar, companion API (FTR-010)
 packages/
-  domain/                  pure cross-device types and validation that truly share semantics
-  protocol/                versioned request/response/event schemas
-  design-tokens/           semantic tokens, not DOM components
   test-fixtures/           provider streams, conversation graphs, protocol versions
 ~~~
+
+Per the Phase 8 scope decision, there is no separate `apps/mobile/` or `packages/domain`/
+`packages/protocol`/`packages/design-tokens` — the PWA (MOB-001) is the same `apps/desktop/src/`
+frontend served over a second `ArkClient` transport adapter, not a second application. The
+`packages/` split this diagram originally reserved for cross-device sharing is unnecessary when
+there is only ever one frontend codebase to begin with.
 
 The exact folder names may vary, but dependency direction is mandatory:
 
@@ -2043,7 +2011,7 @@ flowchart LR
     PORTS --> ADAPTERS["SQLite · providers · files · secrets · runtime"]
 ~~~
 
-- Domain and application code must not import Tauri, React, SQLite, reqwest, Expo, or platform dialogs.
+- Domain and application code must not import Tauri, React, SQLite, reqwest, or platform dialogs.
 - Infrastructure may depend inward on ports/domain; domain never depends outward.
 - Tauri commands and HTTP handlers call the same use cases.
 - The mobile protocol exposes semantic operations and revisions, never raw tables or local paths.
@@ -2079,7 +2047,7 @@ Choose the smallest state/query library that meets these behaviors. The plan doe
 
 ### 5.4 API and provider design
 
-ARC-002/003 and MOB-002 establish:
+ARC-002/003 establish:
 
 - versioned schemas and typed error envelopes;
 - idempotency/request/revision identifiers;
@@ -2089,7 +2057,7 @@ ARC-002/003 and MOB-002 establish:
 - explicit capabilities for models, streaming, non-streaming, auth, context, vision, embeddings, tools, unload, and usage;
 - backwards-compatible deprecation and unknown-version behavior.
 
-FTR-010/MOB-003 add inbound APIs only after SEC-010 approves their threat model.
+FTR-010 (the same API the PWA client speaks to — see Section 8) adds inbound APIs only after SEC-010 approves their threat model.
 
 ### 5.5 Database and persistence
 
@@ -2137,9 +2105,9 @@ UX-001/002 establish three behavioral modes:
 |---|---|---|---|
 | Wide desktop | Expanded conversation sidebar | Persistent when useful | Title, route/model, primary state, overflow |
 | Compact desktop/tablet | Rail or drawer | Overlay drawer | Compact title/model plus overflow |
-| Phone-width desktop webview | Single main stack, conversation sheet | Sheet | Back/menu, title, model, overflow |
+| Phone-width desktop webview / PWA (MOB-001) | Single main stack, conversation sheet | Sheet | Back/menu, title, model, overflow |
 
-The native iPhone app uses native stack/sheet/tab navigation from MOB-006 rather than copying these DOM layouts.
+The Phase 8 PWA (Section 8) reuses this exact phone-width layout rather than a separate native design — there is no native iPhone app (MOB-006, retired) to diverge from it.
 
 ### 6.2 Core user flows
 
@@ -2227,31 +2195,40 @@ Every state must answer: what happened, what data is safe, what the user can do 
 | Webview/content | Future UI changes could weaken current strengths | SEC-008 CSP, no raw HTML, controlled links | Production CSP and hostile Markdown test suite |
 | Prompt/tool safety | RAG/tools expand injection impact | SEC-009 untrusted channels, scopes, previews, approvals, audit | Adversarial indirect-injection and approval-bypass tests |
 | Coding-agent tool safety | Repository/file/command tools are Ark Code's highest side-effect surface and must not regress A-RET-02's no-broad-FS/shell disposition | CODE-004/005 capability-scoped tools under the CMP-003/SEC-009 framework; CODE-008 adversarial and least-privilege regression | Adversarial injection, path-traversal, and approval-bypass tests extending TST-006 |
-| Mobile/API identity | Remote access needs real sessions | SEC-010 PKCE/device identity, rotation, replay/rate controls | Protocol security/penetration tests |
+| Companion API/LAN identity | Remote access needs real per-device authentication, not cookie-based sessions | SEC-010 custom-header bearer tokens, per-device pairing (MOB-009), immediate revocation | Drive-by cross-origin request tests (same threat class as SEC-002); device-revocation tests |
 | Operations | Users need disclosure and incident response | SEC-011 policy/runbooks; OPS-001/003 | Release security review and incident rehearsal |
 | Signed updates | Supply-chain recovery depends on trust chain | OPS-002 signing, notarization, signed manifests, rollback | Clean-machine/tamper/downgrade/update tests |
 
 ### Explicit current non-actions
 
 - Do **not** add local username/password authentication to the single-user desktop. It would not protect data from the same OS session and is not required by the current threat model.
-- Do **not** implement CSRF controls for a nonexistent cookie-authenticated web API. SEC-010 defines them if that architecture is later selected.
+- Do **not** implement cookie-based session authentication for the companion API (FTR-010) or add CSRF controls for it — SEC-010's design deliberately avoids cookies entirely (custom-header bearer tokens instead), which sidesteps the CSRF threat class by construction rather than needing to defend it.
 - Do **not** implement multi-user RBAC for the local desktop. CMP-009 is the explicit decision gate.
 - Preserve parameterized SQL and no-raw-HTML Markdown through regression tests; no replacement is required.
 - Preserve minimal Tauri capabilities and expand only per reviewed feature scope.
+- Do **not** pursue code-signing, notarization, App Store/Play Store distribution, or Apple Developer Program enrollment for the current personal-use, no-public-distribution scope. OPS-002/OPS-004 and MOB-006/MOB-010 are reduced or retired accordingly. Revisit only with an explicit decision if the intended audience changes — the same pattern CMP-009 already uses for the team/multi-user question.
 
 ## 8. Mobile Strategy (iPhone)
 
+Rewritten 2026-08-14 for the Phase 8 scope decision recorded above MOB-001: personal-use
+software for one user and a small number of named friends, with no App Store distribution and
+no Apple Developer Program enrollment. This is not a smaller version of a native-app strategy —
+it is a materially different, and materially simpler, architecture.
+
 ### 8.1 Recommended stack
 
-- **Client:** Expo/React Native with Expo Router and development builds for native modules.
-- **Language:** TypeScript for shared domain/protocol and mobile application logic.
-- **Local data:** Expo SQLite for cache/outbox; evaluate SQLCipher for encrypted local cache.
-- **Secrets:** iOS Keychain through SecureStore/native adapter.
-- **Transport:** Versioned HTTPS/WebSocket or streaming HTTP protocol over authenticated hosted/LAN companion service.
-- **Identity:** OAuth/OIDC Authorization Code + PKCE for account mode; high-entropy, mutually verified pairing for local companion mode.
-- **Native services:** iOS notifications, files, share sheet, camera/photos, microphone/speech, local-network permission.
+- **Client:** the existing Ark React/TypeScript frontend, served as an installable PWA. No Expo, no React Native, no separate mobile codebase.
+- **Transport:** HTTP/WebSocket to the FTR-010 local companion API, LAN-only.
+- **Identity:** long-lived per-device pairing tokens issued via QR/manual code (MOB-009) — no OAuth/OIDC/PKCE, no third-party identity provider.
+- **Push:** Web Push with self-generated VAPID keys (MOB-008) — works on iOS 16.4+ for home-screen-installed PWAs, requires no Apple Developer Program enrollment.
+- **Remote access beyond the home network:** an explicit non-goal for Ark itself. A user wanting this layers their own personal VPN (Tailscale, WireGuard) entirely outside Ark's scope — the companion API doesn't need to know or care how the connection reached it.
+- **On-device inference:** dropped (MOB-010, retired). It was already gated behind product-demand evidence and a native Swift module; neither applies without a native app.
 
-React Native/Expo is chosen because it reuses React/TypeScript expertise and pure packages while delivering native navigation/accessibility/capabilities. PWA is insufficient for the strategic product. Flutter duplicates the current ecosystem. Native Swift is reserved for an evidence-backed on-device inference module.
+A PWA was rejected in this plan's original mobile strategy on the grounds that it is
+"insufficient for the strategic product" — true under a public-distribution, App-Store-present
+assumption, false under this one. ARC-002's typed `ArkClient` boundary was built specifically so
+the transport underneath is swappable; a PWA is the natural, and now correct, use of that
+boundary rather than a compromise.
 
 ### 8.2 Shared architecture now
 
@@ -2261,46 +2238,49 @@ Complete these desktop tasks before mobile feature implementation:
 2. ARC-001 application use cases.
 3. ARC-002 ArkClient/protocol schemas.
 4. ARC-006 setting/data ownership.
-5. ARC-005 migrations plus MOB-005-ready revisions.
-6. SEC-005 SecretStore.
-7. SEC-010 auth/session/sync threat model.
-8. FTR-010 companion API boundary.
+5. SEC-005 SecretStore (for server-side pairing-token storage).
+6. SEC-010 pairing/session threat model (rewritten in scope alongside this section — see SEC-010's own entry).
+7. FTR-010 companion API boundary.
 
-Only domain types, validation, state transitions, protocol, design tokens, and fixtures are shared. React DOM, Tauri invoke, desktop file paths, localStorage, sidecar launch, and CSS are not.
+Because the PWA reuses the existing frontend rather than a parallel codebase, there is
+no separate "which parts are shared vs. platform-specific" boundary to design the way a native
+client would need — the same components, state stores, and `ArkClient` interface serve both
+desktop and the PWA. Only the transport adapter (`HttpArkClient`, MOB-001) is genuinely new.
 
 ### 8.3 API and authentication
 
-MOB-002/003/004 require:
+FTR-010 (which now also serves as the PWA's companion API — see its updated description) requires:
 
-- version negotiation and capability discovery;
-- request IDs, idempotency, revision conflict handling;
-- authenticated resumable streaming;
-- short-lived tokens, refresh rotation/revocation;
-- device inventory and remote revoke;
-- TLS/authenticated pairing for LAN;
-- rate limits and audit;
-- no database/filesystem exposure.
+- the same version negotiation and typed-error envelope as the rest of the ArkClient contract;
+- authenticated, resumable streaming;
+- long-lived per-device pairing tokens (MOB-009), individually revocable, immediately on revoke;
+- no database/filesystem exposure through the API surface.
+
+There is no separate mobile authentication design (OAuth/PKCE, refresh rotation, device
+inventory beyond the pairing list) — MOB-009's pairing model is the entire authentication
+surface, by explicit decision, not by omission.
 
 ### 8.4 Offline and synchronization
 
-MOB-005/007 use:
-
-- local SQLite cache and durable outbox;
-- append-only message/branch operations where possible;
-- revisions/tombstones for mutable metadata and deletion;
-- cursor-based incremental sync;
-- explicit conflict preservation;
-- attachment chunking/hash verification;
-- clear unsent/syncing/failed/offline UX;
-- account/device delete propagation and data export.
+There is no offline sync, outbox, or conflict-resolution design (MOB-005, rewritten). The PWA is
+a live thin client to the desktop-hosted SQLite database — it has no local replica to reconcile.
+Leaving the LAN simply makes Ark unreachable, surfaced honestly (MOB-005's disconnected-state
+UX) rather than papered over with a sync engine solving a problem that doesn't exist at this
+architecture.
 
 ### 8.5 Platform-specific capabilities
 
-MOB-008 owns permission-at-use behavior, denial recovery, privacy disclosure, App Store data declarations, safe deep links, lock-screen notification privacy, share/file/camera/audio validation, and iOS background limitations.
+MOB-008 (rewritten, reduced) owns Web Push permission/delivery only. Camera, native share sheet,
+native file picker, and microphone are explicit non-goals — a PWA on iOS either lacks these or
+only partially exposes them, and building around partial support isn't worth it at this scope.
+MOB-007 owns installability/home-screen polish (manifest, safe areas, install hint).
 
 ### 8.6 On-device inference
 
-MOB-010 is a separate gate. Desktop llama-server spawning is not portable to iOS. If approved, implementation uses a custom native module and a validated device/model matrix; otherwise iPhone uses a paired desktop or secure remote provider. No on-device claim appears before measured performance, thermal, memory, license, package, and App Store feasibility pass.
+Retired (MOB-010). Desktop llama-server spawning was never portable to iOS, and the native
+module + App Store distribution path that would have made an on-device evaluation worthwhile no
+longer applies. If the Phase 8 scope decision above is ever revisited toward native distribution,
+re-open MOB-010 as part of that larger decision, not in isolation.
 
 ## 9. Testing Strategy
 
@@ -2343,7 +2323,7 @@ The implementer of a task writes its focused tests. TST tasks own shared harness
 - Cover restart during generation/import/migration/update.
 - Cover viewport matrix, themes, zoom, keyboard, screen reader checklist, and reduced motion.
 - Cover first-run through successful model response and all recovery paths.
-- Mobile simulator/physical device covers auth/pairing, offline outbox, sync conflict, stream reconnect, permissions, notifications, and deep links.
+- Real iOS Safari (PWA) covers device pairing, the disconnected-state UX, stream reconnect, and Web Push permissions — no native simulator, no offline outbox/sync-conflict testing (neither exists under the Phase 8 scope decision).
 
 ### 9.5 Performance testing
 
@@ -2375,6 +2355,16 @@ Threshold changes require benchmark evidence and review, never silent relaxation
 Every fixed audit defect receives a named regression test linked to its audit and task ID. A task cannot close while its regression test is quarantined. Flaky tests are production defects with owners and deadlines; they are not silently retried until green.
 
 ## 10. Release Strategy
+
+**This entire section describes the process for *if* Ark ever moves to public, staged
+distribution — it is not the current path.** Per the Phase 8 scope decision (recorded above
+MOB-001) and OPS-002/OPS-004's rewrite, the actual current release process is a manual
+checklist: build, smoke-test, attach to a GitHub Release, done. Signed installers, staged
+rings, canary cohorts, TestFlight, and feature-flag-gated public rollout all assume a
+public/unknown-sized audience this product does not have today. This section is retained as
+the design for that scenario, gated the same way CMP-009 gates the team/multi-user decision —
+revisit it together with OPS-002/004 if the distribution scope decision ever changes, rather
+than treating any milestone below as active.
 
 ### 10.1 Milestones
 
@@ -2459,8 +2449,8 @@ In addition to desktop production:
 - managed models, secure cloud providers, projects/prompts, branch explorer, search/organization, attachments/vision, RAG/citations, safe tools/MCP/agents, web search, voice, notifications, and approved automation/artifact scope meet their task gates;
 - the Ark Code agentic coding environment meets its task gates (CODE-001–008) on the tool/agent foundation established by CMP-003/SEC-009, without having altered the chat generation lifecycle or duplicated the provider/tool-permission frameworks;
 - every capability declares model/provider support, data route, permissions, provenance, export/delete behavior, and failure recovery;
-- Expo iPhone client meets auth, sync, offline, accessibility, native permission, notification, pairing, and App Store release requirements;
-- on-device iPhone inference has either passed MOB-010 and shipped to its support matrix or is explicitly deferred with no misleading claim;
+- the Phase 8 PWA meets its own, smaller task gates (MOB-001/005/007/008/009) — installability, disconnected-state honesty, accessibility, Web Push, and LAN pairing; there is no Expo client or App Store release requirement under the Phase 8 scope decision, and claiming either would misrepresent what was actually built;
+- on-device iPhone inference (MOB-010) is retired under the same scope decision, not deferred pending a future gate — re-opening it requires re-opening that decision first, not just this line item;
 - CMP-009 records the team/multi-user decision; no RBAC work is required if the local single-user product remains the approved scope;
 - the Audit Traceability Matrix has no unmapped, pending-without-owner, or silently waived finding.
 
@@ -2487,7 +2477,7 @@ The audit assigned explicit IDs only to C-01–C-10. This matrix assigns normali
 
 | Audit finding | Audit statement | Implementation task(s) / disposition |
 |---|---|---|
-| A-UX-01 | At 390×844 the center chat collapses to zero; no mobile breakpoint | UX-001, TST-004; native solution MOB-006 |
+| A-UX-01 | At 390×844 the center chat collapses to zero; no mobile breakpoint | UX-001, TST-004; the Phase 8 PWA (MOB-001) reuses the same responsive shell rather than a separate native solution |
 | A-UX-02 | At configured 980 px minimum, chat header actions clip | UX-001/002, TST-004 |
 | A-UX-03 | Placeholder Context/Files/Memory panel consumes 260 px | FND-001, UX-001/002; implemented content FTR-003, CMP-001/002/007 |
 | A-UX-04 | No auto-follow or jump-to-latest for streaming/long chats | UX-003, PERF-003, TST-004/005 |
@@ -2526,10 +2516,10 @@ The audit assigned explicit IDs only to C-01–C-10. This matrix assigns normali
 
 | Audit finding | Audit statement | Implementation task(s) / disposition |
 |---|---|---|
-| A-SEC-01 | Authentication/session are N/A locally but mandatory for mobile/sync; local cosmetic login would not help | SEC-010, MOB-004; no local-login action by explicit disposition |
+| A-SEC-01 | Authentication/session are N/A locally but mandatory for mobile/sync; local cosmetic login would not help | SEC-010, MOB-009; no local-login action by explicit disposition |
 | A-SEC-02 | Minimal Tauri capabilities are a strength; future tools need scopes | SEC-008/009, TST-006; retain least privilege |
-| A-SEC-03 | api_key_ref is unused and no secure credential path exists | SEC-005, ARC-006, FTR-007, MOB-004 |
-| A-SEC-04 | Arbitrary remote/LAN endpoints and local sidecar lack complete API authentication/trust boundaries | SEC-001/002/010, FTR-010, MOB-003/009 |
+| A-SEC-03 | api_key_ref is unused and no secure credential path exists | SEC-005, ARC-006, FTR-007, MOB-009 |
+| A-SEC-04 | Arbitrary remote/LAN endpoints and local sidecar lack complete API authentication/trust boundaries | SEC-001/002/010, FTR-010, MOB-009 |
 | A-SEC-05 | SQLite transcripts are plaintext | SEC-006, FTR-001, OPS-003 disclosure |
 | A-SEC-06 | File handling has unbounded import, unsafe probe, native parser/resource risks | COR-007/009, SEC-007, CMP-001 |
 | A-SEC-07 | CSP/raw-HTML baseline is good, but unsafe-inline/external links/hostile content need policy/tests | SEC-008, TST-006 |
@@ -2578,7 +2568,7 @@ The audit assigned explicit IDs only to C-01–C-10. This matrix assigns normali
 | A-CMP-08 | No voice | CMP-005, MOB-008 |
 | A-CMP-09 | No conversation content search or web search | FTR-002, CMP-004 |
 | A-CMP-10 | Branching exists but is not transparent/reproducible enough | FTR-005, UX-011 |
-| A-CMP-11 | No integration/local server API | ARC-002, FTR-010, MOB-002/003 |
+| A-CMP-11 | No integration/local server API | ARC-002, FTR-010 |
 | A-CMP-12 | No multi-user/RBAC; audit says not required for local desktop | CMP-009 explicit decision/non-action |
 | A-CMP-13 | No mobile/sync and no mobile-native capabilities/notifications | MOB-001–009, CMP-006 |
 | A-CMP-14 | No automations/artifacts | CMP-008 after safe tools |
@@ -2590,12 +2580,12 @@ The audit assigned explicit IDs only to C-01–C-10. This matrix assigns normali
 |---|---|---|
 | A-MOB-01 | Mobile readiness is 10/100; DOM/Tauri/sidecar cannot be reused as iPhone UI/runtime | MOB-001/006/010 |
 | A-MOB-02 | Extract pure domain/types/ports and shared monorepo packages now | ARC-002/006, MOB-001/002 |
-| A-MOB-03 | Need a versioned companion API rather than raw DB/Tauri access | FTR-010, MOB-002/003 |
-| A-MOB-04 | Need PKCE/device identity and Keychain/SecureStore | SEC-005/010, MOB-004 |
+| A-MOB-03 | Need a versioned companion API rather than raw DB/Tauri access | FTR-010 |
+| A-MOB-04 | Need PKCE/device identity and Keychain/SecureStore | Superseded by the Phase 8 scope decision: MOB-009's lightweight LAN pairing tokens (SEC-005-backed server-side storage), not PKCE/OAuth — an explicit, documented substitution, not an unmet finding |
 | A-MOB-05 | Need offline outbox/change log/tombstones/conflicts and safe sync | ARC-005, MOB-005/007, TST-003/005 |
 | A-MOB-06 | Need notifications, files, camera, voice, permission/denial behavior | CMP-001/005/006, MOB-008 |
-| A-MOB-07 | Need authenticated LAN discovery/pairing and network-change policy | SEC-010, MOB-003/009 |
-| A-MOB-08 | On-device inference requires separate native evaluation; desktop sidecar cannot port | MOB-010, PERF-004; explicit defer allowed if gate fails |
+| A-MOB-07 | Need authenticated LAN discovery/pairing and network-change policy | SEC-010, MOB-009 |
+| A-MOB-08 | On-device inference requires separate native evaluation; desktop sidecar cannot port | MOB-010 retired under the Phase 8 scope decision (no native app to host it); re-open only alongside that larger decision |
 
 ### Production-readiness and operations findings
 
@@ -2619,7 +2609,7 @@ The audit assigned explicit IDs only to C-01–C-10. This matrix assigns normali
 | A-RET-05 | Append-only branches and open Markdown/JSON portability are product strengths | Preserve/extend through FTR-005/008 and migration tests |
 | A-RET-06 | Lazy Chat/Settings chunks and current desktop bundle sizes are acceptable | Retain and monitor through PERF-001/005; no speculative framework rewrite |
 | A-RET-07 | UUID IDs, persisted status, narrow top-level layers are useful foundations | Preserve while implementing FND-002, ARC-001/002/005 |
-| A-RET-08 | Authentication/session/CSRF/RBAC are not required for the current single-user local desktop | Explicit no-action in Section 7; SEC-010/MOB-004 when remote; CMP-009 for team decision |
+| A-RET-08 | Authentication/session/CSRF/RBAC are not required for the current single-user local desktop | Explicit no-action in Section 7; SEC-010/MOB-009 when remote; CMP-009 for team decision |
 
 ### Traceability completion rule
 
