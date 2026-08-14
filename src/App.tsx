@@ -4,12 +4,18 @@ import { Drawer } from "./components/Drawer";
 import { RightPanel } from "./components/RightPanel";
 import { useArkController, type ArkController } from "./app/useArkController";
 import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
-import { buildWorkspaceDiagnostics, getWorkspaceRecoveryActions } from "./lib/workspaceRecovery";
+import {
+  buildBootstrapDiagnostics,
+  buildWorkspaceDiagnostics,
+  getWorkspaceRecoveryActions,
+} from "./lib/workspaceRecovery";
 import { useBreakpoint } from "./lib/useBreakpoint";
 import { entityList } from "./state/arkStores";
 import { useStore, useStoreSelector } from "./state/externalStore";
 import { useArkStores } from "./state/useArkStores";
 import { Button } from "./ui/button";
+import { StatePanel } from "./ui/statePanel";
+import type { AppErrorShape } from "./types/ark";
 
 const ChatView = React.lazy(() => import("./features/chat/ChatView").then((module) => ({ default: module.ChatView })));
 const SettingsView = React.lazy(() =>
@@ -20,6 +26,7 @@ export default function App() {
   const controller = useArkController();
   const stores = useArkStores();
   const view = useStoreSelector(stores.shell, (state) => state.view);
+  const bootstrapError = useStoreSelector(stores.shell, (state) => state.bootstrapError);
   const breakpoint = useBreakpoint();
 
   // UX-001: the sidebar is a docked column (rail or expanded, per the persisted preference) at
@@ -39,6 +46,18 @@ export default function App() {
   const [contextDrawerOpen, setContextDrawerOpen] = React.useState(false);
   const sidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const contextTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+
+  // UX-004: a total bootstrap failure means nothing else below loaded — no conversations,
+  // providers, or settings — so this replaces the entire shell rather than layering a banner on
+  // top of what would otherwise be a confusingly empty chat view. Placed after every hook above
+  // so the hook call order stays identical across renders regardless of this condition.
+  // "view !== settings": lets the panel's own "Open Settings" action actually reach Settings —
+  // otherwise this gate would keep re-showing the failure panel forever, since navigating there
+  // doesn't clear `bootstrapError` (the underlying problem is still unresolved; only a
+  // successful `bootstrap()` retry does that).
+  if (bootstrapError && view !== "settings") {
+    return <BootstrapFailurePanel error={bootstrapError} controller={controller} />;
+  }
 
   return (
     <>
@@ -225,6 +244,70 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onBack={() => controller.setView("chat")}
       onError={controller.setError}
     />
+  );
+}
+
+/**
+ * UX-004: a total bootstrap failure — `getAppBootstrap`/`getBuiltInRuntimeStatus` itself
+ * rejecting, not the narrower `workspaceOpenError` `WorkspaceRecoveryBanner` below handles —
+ * gets Retry, Open Settings (best-effort: Settings tolerates the all-defaults store state a
+ * failed bootstrap leaves behind, the same state it already renders during the brief window
+ * before a *successful* bootstrap finishes), and Copy diagnostics. There is no "Exit" action:
+ * that needs `@tauri-apps/plugin-process`, which is not currently a dependency of this app, and
+ * adding a new plugin/capability/permission surface was judged out of scope for this specific
+ * gap — Retry plus Settings covers real recovery paths already.
+ */
+function BootstrapFailurePanel({ error, controller }: { error: AppErrorShape; controller: ArkController }) {
+  const [retrying, setRetrying] = React.useState(false);
+
+  async function retry() {
+    setRetrying(true);
+    try {
+      await controller.bootstrap();
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  async function copyDiagnostics() {
+    const diagnostics = buildBootstrapDiagnostics(error, new Date().toISOString());
+    try {
+      await navigator.clipboard.writeText(diagnostics);
+      controller.setInfo("Diagnostics copied. The report contains an error code and message, not chat content.");
+    } catch {
+      controller.setError("Ark could not copy diagnostics to the clipboard.");
+    }
+  }
+
+  return (
+    <>
+      <div className="flex h-screen items-center justify-center bg-background text-foreground">
+        <StatePanel
+          role="alert"
+          tone="error"
+          title="Ark couldn't start up."
+          description={error.message ?? "Something prevented Ark from loading your conversations and settings."}
+          detail={error.code ? `Error code: ${error.code}` : undefined}
+          actions={
+            <>
+              <Button size="sm" variant="primary" onClick={() => void retry()} disabled={retrying}>
+                {retrying ? "Retrying…" : "Retry"}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => controller.setView("settings")}>
+                Open Settings
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void copyDiagnostics()}>
+                Copy diagnostics
+              </Button>
+            </>
+          }
+        />
+      </div>
+      {/* This screen replaces the normal shell entirely, so it needs its own feedback surface —
+       * `AppFeedback` otherwise only mounts inside the shell `copyDiagnostics` above renders
+       * into. */}
+      <AppFeedback controller={controller} />
+    </>
   );
 }
 

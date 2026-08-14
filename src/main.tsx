@@ -17,7 +17,9 @@ const arkClient =
         ? developmentClients!.createWorkspaceProtectionFixtureClient()
         : fixture === "long-conversation"
           ? developmentClients!.createLongConversationFixtureClient()
-          : createTauriArkClient();
+          : fixture === "bootstrap-failure"
+            ? developmentClients!.createBootstrapFailureFixtureClient()
+            : createTauriArkClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

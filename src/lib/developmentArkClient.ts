@@ -438,3 +438,19 @@ export function createLongConversationFixtureClient(): ArkClient {
     }),
   });
 }
+
+/**
+ * UX-004 browser fixture: `getAppBootstrap` rejects every call, exercising `App.tsx`'s
+ * `BootstrapFailurePanel` — the total-bootstrap-failure recovery state, distinct from the
+ * partial `workspaceOpenError` case the other fixtures' `bootstrap` objects can carry.
+ */
+export function createBootstrapFailureFixtureClient(): ArkClient {
+  return createFakeArkClient({
+    getAppBootstrap: async () => {
+      throw { code: "ipc_unavailable", message: "Ark could not reach its local runtime." };
+    },
+    getBuiltInRuntimeStatus: async () => {
+      throw { code: "ipc_unavailable", message: "Ark could not reach its local runtime." };
+    },
+  });
+}

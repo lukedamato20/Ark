@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildBootstrapDiagnostics,
   buildWorkspaceDiagnostics,
   getWorkspaceRecoveryActions,
   isKnownStorageRecoveryCode,
@@ -51,6 +52,29 @@ test("workspace diagnostics whitelist technical fields and exclude transcript co
     workspaceRoot: "C:\\Ark",
     databasePath: "C:\\Ark\\ark.sqlite3",
     configPath: "C:\\Config\\workspace.json",
+    capturedAt: "2026-08-14T00:00:00.000Z",
+  });
+});
+
+test("bootstrap diagnostics whitelist technical fields and exclude transcript content", () => {
+  const diagnostics = buildBootstrapDiagnostics(
+    { code: "ipc_unavailable", message: "no runtime", transcript: "secret chat" } as never,
+    "2026-08-14T00:00:00.000Z",
+  );
+
+  assert.equal(diagnostics.includes("secret chat"), false);
+  assert.deepEqual(JSON.parse(diagnostics), {
+    recoveryCode: "ipc_unavailable",
+    message: "no runtime",
+    capturedAt: "2026-08-14T00:00:00.000Z",
+  });
+});
+
+test("bootstrap diagnostics fall back to defaults for an empty error shape", () => {
+  const diagnostics = buildBootstrapDiagnostics({}, "2026-08-14T00:00:00.000Z");
+  assert.deepEqual(JSON.parse(diagnostics), {
+    recoveryCode: "bootstrap_error",
+    message: "Ark could not start up.",
     capturedAt: "2026-08-14T00:00:00.000Z",
   });
 });

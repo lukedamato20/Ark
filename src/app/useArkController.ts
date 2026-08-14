@@ -1,5 +1,5 @@
 import * as React from "react";
-import { getErrorMessage } from "../lib/arkErrors";
+import { getErrorMessage, normalizeError } from "../lib/arkErrors";
 import { useArkClient } from "../lib/useArkClient";
 import {
   entityCollection,
@@ -216,7 +216,7 @@ export function useArkController(): ArkController {
   );
 
   const bootstrap = React.useCallback(async () => {
-    patchStore(stores.shell, { booting: true });
+    patchStore(stores.shell, { booting: true, bootstrapError: null });
     try {
       const [data, sidecarStatus] = await Promise.all([client.getAppBootstrap(), client.getBuiltInRuntimeStatus()]);
       let conversations = data.conversationPage.items;
@@ -252,11 +252,14 @@ export function useArkController(): ArkController {
         refreshModels(await client.refreshModels(providerToRefresh.id));
       }
     } catch (error) {
-      setError(getErrorMessage(error));
+      // A total bootstrap failure gets its own dedicated recovery state (App.tsx's
+      // BootstrapFailurePanel), not just the dismissible global toast: nothing else loaded, so
+      // dismissing the toast would strand the user on an unexplained empty chat view.
+      patchStore(stores.shell, { bootstrapError: normalizeError(error) });
     } finally {
       patchStore(stores.shell, { booting: false });
     }
-  }, [client, loadConversation, refreshModels, setError, stores]);
+  }, [client, loadConversation, refreshModels, stores]);
 
   const createConversation = React.useCallback(async () => {
     try {

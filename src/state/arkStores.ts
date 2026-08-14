@@ -64,6 +64,12 @@ export interface SettingsState {
 
 export interface ShellState {
   booting: boolean;
+  /** UX-004: a total bootstrap failure (`getAppBootstrap`/`getBuiltInRuntimeStatus` itself
+   * rejecting), distinct from `SettingsState.workspaceOpenError` — which is a *partial* failure
+   * inside an otherwise-successful bootstrap response. Nothing else in the app has loaded when
+   * this is set, so it drives a dedicated full-screen recovery state rather than the global
+   * toast, which would otherwise strand the user on an empty chat view with no explanation. */
+  bootstrapError: AppErrorShape | null;
   view: ActiveView;
   sidebarCollapsed: boolean;
   rightPanelCollapsed: boolean;
@@ -117,6 +123,7 @@ export function createArkStores(initial?: {
     }),
     shell: createExternalStore<ShellState>({
       booting: true,
+      bootstrapError: null,
       view: "chat",
       sidebarCollapsed: initial?.sidebarCollapsed ?? false,
       rightPanelCollapsed: initial?.rightPanelCollapsed ?? false,

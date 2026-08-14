@@ -43,3 +43,20 @@ export function buildWorkspaceDiagnostics(
     2,
   );
 }
+
+/**
+ * UX-004: the total-bootstrap-failure counterpart to `buildWorkspaceDiagnostics` above — no
+ * `WorkspaceInfo` to include, since a failure this early means nothing (workspace included) has
+ * loaded yet. Same whitelist-only shape and reasoning: never include chat content.
+ */
+export function buildBootstrapDiagnostics(error: AppErrorShape, capturedAt: string): string {
+  return JSON.stringify(
+    {
+      recoveryCode: error.code ?? "bootstrap_error",
+      message: error.message ?? "Ark could not start up.",
+      capturedAt,
+    },
+    null,
+    2,
+  );
+}
