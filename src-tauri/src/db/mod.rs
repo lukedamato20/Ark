@@ -593,6 +593,13 @@ impl Database {
     /// it incomplete); the backup API instead reads a consistent snapshot of the live database
     /// directly, page by page, regardless of what the WAL/journal currently looks like.
     fn backup_before_migrations(&self, path: &Path) -> Result<(), AppError> {
+        // Settles this connection's WAL state before the backup reads from it. The backup API
+        // does not strictly need this to produce a complete copy (unlike the raw-copy approach
+        // this replaced), but journal_mode was switched to WAL for the very first time on this
+        // connection just before run_migrations was reached, and checkpointing first removes any
+        // possibility of the backup racing that transition rather than reading settled state.
+        self.checkpoint()?;
+
         let timestamp = now().replace([':', '.'], "-");
         let file_name = path
             .file_name()
