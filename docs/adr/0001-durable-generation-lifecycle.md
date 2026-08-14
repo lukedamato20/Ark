@@ -1,9 +1,15 @@
 # ADR 0001: Durable generation lifecycle
 
-- Status: Proposed for engineering/product approval
+- Status: Approved
 - Date: 2026-08-14
+- Approved by: Luke D'Amato, 2026-08-14
 - Owners: Ark core and client maintainers
 - Scope: desktop now; shared protocol/mobile clients must preserve these semantics
+- Process note: COR-001–005 were implemented against this ADR's content before formal approval
+  was recorded, deviating from the plan's original "approved before implementation" sequencing.
+  The approver has explicitly reviewed and accepted this as a one-time historical exception rather
+  than requiring COR-001–005 to be redone; this ADR's content is the binding contract going
+  forward regardless of the order in which it was formally signed off.
 
 ## Decision
 

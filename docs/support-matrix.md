@@ -2,9 +2,9 @@
 
 Capability set: `desktop-local-v1` (schema 1)
 
-Review status: **awaiting product and engineering approval**. These are the release candidates
+Review status: **approved** by Luke D'Amato, 2026-08-14. These are the release candidates
 encoded in `config/release-capabilities.json`; they must not be described as qualified release
-support until the review status changes and the matching CI/platform evidence is green.
+support until the matching CI/platform evidence for each declared runner is green.
 
 ## Candidate platforms and window
 

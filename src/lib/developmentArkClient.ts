@@ -307,7 +307,11 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     },
     restoreWorkspaceRecoveryKey: async (recoveryKey) => {
       if (recoveryKey !== currentRecoveryKey) {
-        throw { code: "workspace_recovery_key_invalid", message: "That recovery key does not unlock this workspace. Ark left the database and credential store untouched." };
+        throw {
+          code: "workspace_recovery_key_invalid",
+          message:
+            "That recovery key does not unlock this workspace. Ark left the database and credential store untouched.",
+        };
       }
       locked = false;
       return status("Workspace unlocked with the recovery key.");

@@ -10,7 +10,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 |---|---|---:|---|
 | cargo | `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
 | cargo | `aes` | 0.8.4 | MIT OR Apache-2.0 |
-| cargo | `ahash` | 0.8.12 | MIT OR Apache-2.0 |
 | cargo | `aho-corasick` | 1.1.4 | Unlicense OR MIT |
 | cargo | `alloc-no-stdlib` | 2.0.4 | BSD-3-Clause |
 | cargo | `alloc-stdlib` | 0.2.4 | BSD-3-Clause |
@@ -158,9 +157,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `gtk-sys` | 0.18.2 | MIT |
 | cargo | `gtk3-macros` | 0.18.2 | MIT |
 | cargo | `hashbrown` | 0.12.3 | MIT OR Apache-2.0 |
-| cargo | `hashbrown` | 0.14.5 | MIT OR Apache-2.0 |
 | cargo | `hashbrown` | 0.17.1 | MIT OR Apache-2.0 |
-| cargo | `hashlink` | 0.9.1 | MIT OR Apache-2.0 |
 | cargo | `heck` | 0.4.1 | MIT OR Apache-2.0 |
 | cargo | `heck` | 0.5.0 | MIT OR Apache-2.0 |
 | cargo | `hermit-abi` | 0.5.2 | MIT OR Apache-2.0 |
@@ -212,7 +209,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `libdbus-sys` | 0.2.7 | Apache-2.0/MIT |
 | cargo | `libloading` | 0.7.4 | ISC |
 | cargo | `libredox` | 0.1.18 | MIT |
-| cargo | `libsqlite3-sys` | 0.30.1 | MIT |
+| cargo | `libsqlite3-sys` | 0.38.2 | MIT |
 | cargo | `linux-raw-sys` | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | cargo | `litemap` | 0.8.2 | Unicode-3.0 |
 | cargo | `lock_api` | 0.4.14 | MIT OR Apache-2.0 |
@@ -257,6 +254,8 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `objc2-user-notifications` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo | `objc2-web-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo | `once_cell` | 1.21.4 | MIT OR Apache-2.0 |
+| cargo | `openssl-src` | 300.6.1+3.6.3 | MIT/Apache-2.0 |
+| cargo | `openssl-sys` | 0.9.117 | MIT |
 | cargo | `option-ext` | 0.2.0 | MPL-2.0 |
 | cargo | `ordered-stream` | 0.2.0 | MIT OR Apache-2.0 |
 | cargo | `pango` | 0.18.3 | MIT |
@@ -310,7 +309,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `reqwest` | 0.12.28 | MIT OR Apache-2.0 |
 | cargo | `reqwest` | 0.13.4 | MIT OR Apache-2.0 |
 | cargo | `ring` | 0.17.14 | Apache-2.0 AND ISC |
-| cargo | `rusqlite` | 0.32.1 | MIT |
+| cargo | `rusqlite` | 0.40.2 | MIT |
 | cargo | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 |
 | cargo | `rustc-hash` | 2.1.2 | Apache-2.0 OR MIT |
 | cargo | `rustix` | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |

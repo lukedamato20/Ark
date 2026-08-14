@@ -1,7 +1,9 @@
 {
   "schemaVersion": 1,
   "capabilitySet": "desktop-local-v1",
-  "reviewStatus": "awaiting_product_engineering_approval",
+  "reviewStatus": "approved",
+  "approvedBy": "Luke D'Amato",
+  "approvedAt": "2026-08-14",
   "artifactPlatforms": [
     {
       "id": "windows",

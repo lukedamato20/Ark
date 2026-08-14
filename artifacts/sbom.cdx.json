@@ -35,7 +35,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "373ea0e1d52f63b12527441e1bc98f18cedbb9195066ea714589367859092277"
+          "content": "d954203d6b54c43d4f9a930df160ae03afd06c3abaa4bf88369cfbfca436ac18"
         }
       ],
       "licenses": [
@@ -383,30 +383,6 @@
         {
           "type": "vcs",
           "url": "https://github.com/RustCrypto/block-ciphers"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/ahash@0.8.12",
-      "name": "ahash",
-      "version": "0.8.12",
-      "purl": "pkg:cargo/ahash@0.8.12",
-      "licenses": [
-        {
-          "expression": "MIT OR Apache-2.0"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/tkaitchuck/ahash"
         }
       ],
       "properties": [
@@ -3946,30 +3922,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/hashbrown@0.14.5",
-      "name": "hashbrown",
-      "version": "0.14.5",
-      "purl": "pkg:cargo/hashbrown@0.14.5",
-      "licenses": [
-        {
-          "expression": "MIT OR Apache-2.0"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/rust-lang/hashbrown"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:cargo/hashbrown@0.17.1",
       "name": "hashbrown",
       "version": "0.17.1",
@@ -3983,30 +3935,6 @@
         {
           "type": "vcs",
           "url": "https://github.com/rust-lang/hashbrown"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/hashlink@0.9.1",
-      "name": "hashlink",
-      "version": "0.9.1",
-      "purl": "pkg:cargo/hashlink@0.9.1",
-      "licenses": [
-        {
-          "expression": "MIT OR Apache-2.0"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/kyren/hashlink"
         }
       ],
       "properties": [
@@ -5230,10 +5158,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/libsqlite3-sys@0.30.1",
+      "bom-ref": "pkg:cargo/libsqlite3-sys@0.38.2",
       "name": "libsqlite3-sys",
-      "version": "0.30.1",
-      "purl": "pkg:cargo/libsqlite3-sys@0.30.1",
+      "version": "0.38.2",
+      "purl": "pkg:cargo/libsqlite3-sys@0.38.2",
       "licenses": [
         {
           "expression": "MIT"
@@ -6299,6 +6227,54 @@
         {
           "type": "vcs",
           "url": "https://github.com/matklad/once_cell"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/openssl-src@300.6.1+3.6.3",
+      "name": "openssl-src",
+      "version": "300.6.1+3.6.3",
+      "purl": "pkg:cargo/openssl-src@300.6.1+3.6.3",
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/alexcrichton/openssl-src-rs"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/openssl-sys@0.9.117",
+      "name": "openssl-sys",
+      "version": "0.9.117",
+      "purl": "pkg:cargo/openssl-sys@0.9.117",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-openssl/rust-openssl"
         }
       ],
       "properties": [
@@ -7582,10 +7558,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/rusqlite@0.32.1",
+      "bom-ref": "pkg:cargo/rusqlite@0.40.2",
       "name": "rusqlite",
-      "version": "0.32.1",
-      "purl": "pkg:cargo/rusqlite@0.32.1",
+      "version": "0.40.2",
+      "purl": "pkg:cargo/rusqlite@0.40.2",
       "licenses": [
         {
           "expression": "MIT"
