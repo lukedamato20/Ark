@@ -111,18 +111,33 @@ export function DiagnosticsPanel({ provider, selectedModel, onError }: Diagnosti
             />
             <Metric
               icon={<HardDrive className="h-4 w-4" />}
-              label="Disk"
+              label="Disk (workspace volume)"
               value={`${formatBytes(result.availableDiskBytes)} available / ${formatBytes(result.totalDiskBytes)}`}
             />
             <Metric icon={<Zap className="h-4 w-4" />} label="Accelerator" value={result.gpu} />
           </div>
 
+          {result.benchmarkFailure && (
+            <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm">
+              <div className="font-medium text-destructive">Benchmark failed</div>
+              <p className="mt-1 text-muted-foreground">
+                {result.benchmarkFailure.code}: {result.benchmarkFailure.message}
+              </p>
+            </div>
+          )}
+
           {result.benchmark && (
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-4">
               <Metric
                 label="First token"
                 value={
                   result.benchmark.timeToFirstTokenMs == null ? "Unknown" : `${result.benchmark.timeToFirstTokenMs} ms`
+                }
+              />
+              <Metric
+                label="Generation time"
+                value={
+                  result.benchmark.generationTimeMs == null ? "Unknown" : `${result.benchmark.generationTimeMs} ms`
                 }
               />
               <Metric label="Total time" value={`${result.benchmark.totalTimeMs} ms`} />
@@ -131,7 +146,7 @@ export function DiagnosticsPanel({ provider, selectedModel, onError }: Diagnosti
                 value={
                   result.benchmark.approximateTokensPerSecond == null
                     ? "Unknown"
-                    : `${result.benchmark.approximateTokensPerSecond.toFixed(1)} tok/s`
+                    : `${result.benchmark.approximateTokensPerSecond.toFixed(1)} tok/s (generation-only)`
                 }
               />
             </div>

@@ -119,13 +119,20 @@
       "providerHealth",
       "modelAvailable",
       "benchmark",
+      "benchmarkFailure",
       "guidance",
       "runtime"
     ],
     "RuntimeFailure": ["category", "message"],
     "RuntimeLogEntry": ["timestampMs", "stream", "message"],
     "RuntimeDiagnostics": ["state", "pid", "port", "modelConfigured", "failure", "recentLogs"],
-    "BenchmarkResult": ["timeToFirstTokenMs", "totalTimeMs", "approximateTokensPerSecond", "outputPreview"],
+    "BenchmarkResult": [
+      "timeToFirstTokenMs",
+      "generationTimeMs",
+      "totalTimeMs",
+      "approximateTokensPerSecond",
+      "outputPreview"
+    ],
     "InstalledFileProvenance": ["name", "sizeBytes", "sha256"],
     "RuntimeProvenance": [
       "schemaVersion",

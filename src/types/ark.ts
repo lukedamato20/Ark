@@ -219,6 +219,7 @@ export interface DiagnosticsResult {
   providerHealth: ProviderHealth;
   modelAvailable: boolean;
   benchmark?: BenchmarkResult | null;
+  benchmarkFailure?: AppErrorShape | null;
   guidance: string;
   runtime: RuntimeDiagnostics;
 }
@@ -263,6 +264,7 @@ export interface RuntimeDiagnostics {
 
 export interface BenchmarkResult {
   timeToFirstTokenMs?: number | null;
+  generationTimeMs?: number | null;
   totalTimeMs: number;
   approximateTokensPerSecond?: number | null;
   outputPreview: string;

@@ -451,6 +451,36 @@ export function createLongConversationFixtureClient(): ArkClient {
       conversation: { ...conversation, id: "fixture-imported-conversation", title: "Imported fixture conversation" },
       normalizedMessageCount: 0,
     }),
+    // UX-010: a failed-benchmark diagnostics result — every other fixture's runDiagnostics is
+    // unimplemented, so this is the only way to exercise the benchmarkFailure UI live.
+    runDiagnostics: async () => ({
+      os: "Windows 11",
+      cpu: "Fixture CPU",
+      cpuCores: 8,
+      totalMemoryBytes: 34_359_738_368,
+      availableMemoryBytes: 17_179_869_184,
+      totalDiskBytes: 512_110_190_592,
+      availableDiskBytes: 128_027_547_648,
+      gpu: "GPU/accelerator detection is not available in the MVP diagnostics.",
+      providerHealth: {
+        providerId: provider.id,
+        isReachable: true,
+        status: "running",
+        message: "Runtime is running.",
+      },
+      modelAvailable: true,
+      benchmark: null,
+      benchmarkFailure: { code: "stream_incomplete", message: "The provider closed the connection early." },
+      guidance: "The benchmark failed (stream_incomplete): The provider closed the connection early.",
+      runtime: {
+        state: "healthy",
+        pid: 4242,
+        port: 49152,
+        modelConfigured: true,
+        failure: null,
+        recentLogs: [],
+      },
+    }),
   });
 }
 

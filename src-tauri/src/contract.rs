@@ -388,6 +388,7 @@ fn diagnostics_result_matches_contract() {
             provider_health: sample_provider_health(),
             model_available: true,
             benchmark: Some(sample_benchmark_result()),
+            benchmark_failure: None,
             guidance: "Good for small and medium local models.".to_string(),
             runtime: sample_runtime_diagnostics(),
         },
@@ -438,6 +439,7 @@ fn runtime_diagnostics_matches_contract() {
 fn sample_benchmark_result() -> BenchmarkResult {
     BenchmarkResult {
         time_to_first_token_ms: Some(120),
+        generation_time_ms: Some(780),
         total_time_ms: 900,
         approximate_tokens_per_second: Some(12.5),
         output_preview: "Hello".to_string(),
