@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Keyboard, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from "lucide-react";
 import * as React from "react";
 import { formatDate } from "../../lib/format";
@@ -44,6 +44,9 @@ export function ConversationSidebar({
   onOpenShortcuts,
   shortcutsTriggerRef,
 }: ConversationSidebarProps) {
+  // UX-008: this AnimatePresence enter/exit previously ignored prefers-reduced-motion — only the
+  // rail/expanded width transition (plain CSS, `motion-reduce:transition-none`) was covered.
+  const reducedMotion = useReducedMotion();
   const [query, setQuery] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
   const onSearchRef = React.useRef(onSearch);
@@ -115,11 +118,11 @@ export function ConversationSidebar({
             return (
               <motion.button
                 key={conversation.id}
-                layout
+                layout={!reducedMotion}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.14 }}
+                transition={reducedMotion ? { duration: 0 } : { duration: 0.14 }}
                 aria-label={conversation.title}
                 aria-current={active ? "true" : undefined}
                 className={cn(

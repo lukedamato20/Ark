@@ -145,14 +145,17 @@ function ShellTopBar({
   // each panel's own internal toggle button lives inside that panel, which is off-canvas and
   // `inert` while its drawer is closed, so it cannot itself be the way back in.
   return (
-    <div className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-card/80 px-2">
+    // UX-008: h-12 bar (up from h-11) so the buttons below can be a full 44×44px touch target —
+    // this bar is the app's most clearly "touch-first" surface, since it only renders at
+    // phone/compact breakpoints in the first place.
+    <div className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card/80 px-2">
       {showSidebarTrigger ? (
         <Button
           ref={sidebarTriggerRef}
-          size="icon"
           variant="ghost"
           onClick={onOpenSidebar}
           aria-label="Open conversations"
+          className="h-11 w-11 p-0"
         >
           <Menu className="h-4 w-4" />
         </Button>
@@ -162,10 +165,10 @@ function ShellTopBar({
       {showContextTrigger && (
         <Button
           ref={contextTriggerRef}
-          size="icon"
           variant="ghost"
           onClick={onOpenContext}
           aria-label="Open context panel"
+          className="h-11 w-11 p-0"
         >
           <PanelRight className="h-4 w-4" />
         </Button>

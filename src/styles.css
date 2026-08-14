@@ -36,7 +36,13 @@
   --muted-foreground: 216 12% 66%;
   --accent: 218 18% 18%;
   --accent-foreground: 210 20% 92%;
-  --destructive: 0 64% 55%;
+  /* UX-008: was 0 64% 55% — measured ~4.02:1 for text-destructive against --card in dark mode,
+     just under WCAG AA's 4.5:1 for normal text. Raised lightness/saturation to ~4.96:1 against
+     --card (~5.18:1 against --background). Only `text-destructive` (and low-opacity
+     `bg-destructive/10` tint) are actually used anywhere in the app today — `bg-destructive` at
+     full opacity with `text-destructive-foreground` (the solid-button variant, which this value
+     was not re-verified against) is defined in `ui/button.tsx` but has no live caller. */
+  --destructive: 0 70% 62%;
   --destructive-foreground: 0 0% 98%;
   --border: 220 16% 18%;
   --input: 220 16% 20%;

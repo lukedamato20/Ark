@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ChevronLeft, ChevronRight, FileText, MemoryStick, Wrench } from "lucide-react";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
@@ -9,6 +9,9 @@ interface RightPanelProps {
 }
 
 export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
+  // UX-008: this AnimatePresence fade previously ignored prefers-reduced-motion entirely — only
+  // the width transition above it (plain CSS, `motion-reduce:transition-none`) was covered.
+  const reducedMotion = useReducedMotion();
   return (
     // NOTE (UX-001): plain CSS width transition, not framer-motion's `animate` prop — see
     // `Drawer.tsx` and `ConversationSidebar.tsx` for the investigation of why `animate` on a
@@ -32,7 +35,7 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.14 }}
+            transition={reducedMotion ? { duration: 0 } : { duration: 0.14 }}
             className="space-y-3 p-3"
           >
             <div className="rounded-lg border border-border bg-background p-3">
