@@ -2,6 +2,7 @@ import { AlertTriangle, Edit3, GitBranch, Loader2, RefreshCw } from "lucide-reac
 import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
+import { computeAnnouncementDelta } from "../../lib/streamAnnouncement";
 import { messageWithGenerationOverlay } from "../../state/arkStores";
 import { useStoreSelector } from "../../state/externalStore";
 import { useArkStores } from "../../state/useArkStores";
@@ -94,6 +95,34 @@ const MessageBubble = React.memo(function MessageBubble({
   const isUser = message.role === "user";
   const displayContent = renderedMessage.content;
   const isInterrupted = !isUser && renderedMessage.status === "interrupted";
+  const isStreaming = !isUser && renderedMessage.status === "streaming";
+
+  // UX-006: a throttled, sr-only live region for the streaming response — announcing every
+  // token would violate this task's own acceptance criterion, so this ticks on an interval
+  // (not on every `displayContent` change) and announces only the new slice since the last
+  // tick, not the whole accumulated text. `displayContentRef` decouples the interval's closure
+  // from the per-render `displayContent` value, since the effect intentionally does not restart
+  // on every content change (that would defeat the throttle).
+  const [streamAnnouncement, setStreamAnnouncement] = React.useState("");
+  const displayContentRef = React.useRef(displayContent);
+  displayContentRef.current = displayContent;
+  const announcedLengthRef = React.useRef(0);
+
+  React.useEffect(() => {
+    if (!isStreaming) return;
+    const flush = () => {
+      const { delta, nextLength } = computeAnnouncementDelta(displayContentRef.current, announcedLengthRef.current);
+      if (delta) {
+        announcedLengthRef.current = nextLength;
+        setStreamAnnouncement(delta);
+      }
+    };
+    const timer = window.setInterval(flush, 2000);
+    return () => {
+      window.clearInterval(timer);
+      flush(); // announce any remaining tail once streaming stops, rather than losing it
+    };
+  }, [isStreaming]);
   const [alternatives, setAlternatives] = React.useState<BranchAlternative[] | null>(null);
   const [isLoadingAlternatives, setIsLoadingAlternatives] = React.useState(false);
   const [switchingBranchId, setSwitchingBranchId] = React.useState<string | null>(null);
@@ -277,6 +306,11 @@ const MessageBubble = React.memo(function MessageBubble({
                 ))}
               </div>
             )}
+          </div>
+        )}
+        {!isUser && (
+          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {streamAnnouncement}
           </div>
         )}
         {isUser && isEditing ? (

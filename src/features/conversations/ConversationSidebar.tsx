@@ -66,6 +66,7 @@ export function ConversationSidebar({
     // investigation of the same failure mode). The list items' `motion.button`s below are
     // unaffected since those animate through `AnimatePresence`'s enter/exit path instead.
     <aside
+      aria-label="Conversations"
       style={{ width: collapsed ? 72 : 288 }}
       className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80 transition-[width] duration-200 ease-out motion-reduce:transition-none"
     >
@@ -79,7 +80,12 @@ export function ConversationSidebar({
       </div>
 
       <div className="space-y-2 p-3">
-        <Button className="w-full justify-start" variant="primary" onClick={onCreate}>
+        <Button
+          className="w-full justify-start"
+          variant="primary"
+          onClick={onCreate}
+          aria-label={collapsed ? "New Chat" : undefined}
+        >
           <Plus className="h-4 w-4" />
           {!collapsed && "New Chat"}
         </Button>
@@ -98,7 +104,7 @@ export function ConversationSidebar({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <nav aria-label="Conversation list" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         <AnimatePresence initial={false}>
           {conversations.map((conversation) => {
             const active = conversation.id === activeConversationId;
@@ -110,6 +116,8 @@ export function ConversationSidebar({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.14 }}
+                aria-label={conversation.title}
+                aria-current={active ? "true" : undefined}
                 className={cn(
                   "mb-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
                   "focus-visible:ring-2 focus-visible:ring-ring",
@@ -141,10 +149,15 @@ export function ConversationSidebar({
             {isLoading ? "Loading…" : "Load more"}
           </Button>
         )}
-      </div>
+      </nav>
 
       <div className="border-t border-border p-3">
-        <Button className="w-full justify-start" variant="ghost" onClick={onOpenSettings}>
+        <Button
+          className="w-full justify-start"
+          variant="ghost"
+          onClick={onOpenSettings}
+          aria-label={collapsed ? "Settings" : undefined}
+        >
           <Settings className="h-4 w-4" />
           {!collapsed && "Settings"}
         </Button>

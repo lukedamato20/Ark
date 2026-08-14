@@ -612,7 +612,7 @@ export function ChatView({
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col">
+    <main aria-label="Chat" className="flex min-w-0 flex-1 flex-col">
       <header className="flex min-h-14 items-center justify-between gap-3 border-b border-border px-4">
         <div className="min-w-0">
           {isRenaming ? (
@@ -775,7 +775,7 @@ export function ChatView({
           </div>
         </div>
       </footer>
-    </section>
+    </main>
   );
 }
 

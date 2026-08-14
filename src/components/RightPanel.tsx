@@ -15,6 +15,7 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
     // persistently-mounted element unreliably commits to the DOM in this app/environment. The
     // opacity fade below is unaffected: it goes through `AnimatePresence`'s enter/exit path.
     <aside
+      aria-label="Context"
       style={{ width: collapsed ? 48 : 260 }}
       className="flex h-screen shrink-0 flex-col border-l border-border bg-card/70 transition-[width] duration-200 ease-out motion-reduce:transition-none"
     >

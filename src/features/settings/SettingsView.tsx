@@ -213,7 +213,7 @@ export function SettingsView({
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col">
+    <main aria-label="Settings" className="flex min-w-0 flex-1 flex-col">
       <header className="flex h-14 items-center justify-between border-b border-border px-4">
         <div className="flex items-center gap-3">
           <Button size="icon" variant="ghost" onClick={onBack} aria-label="Back to chat">
@@ -235,11 +235,19 @@ export function SettingsView({
               <h2 className="text-sm font-semibold">Appearance</h2>
             </div>
             <div className="flex gap-2">
-              <Button variant={theme === "dark" ? "primary" : "secondary"} onClick={() => onThemeChange("dark")}>
+              <Button
+                variant={theme === "dark" ? "primary" : "secondary"}
+                aria-pressed={theme === "dark"}
+                onClick={() => onThemeChange("dark")}
+              >
                 <Moon className="h-4 w-4" />
                 Dark
               </Button>
-              <Button variant={theme === "light" ? "primary" : "secondary"} onClick={() => onThemeChange("light")}>
+              <Button
+                variant={theme === "light" ? "primary" : "secondary"}
+                aria-pressed={theme === "light"}
+                onClick={() => onThemeChange("light")}
+              >
                 <Sun className="h-4 w-4" />
                 Light
               </Button>
@@ -253,10 +261,19 @@ export function SettingsView({
                 <h2 className="text-sm font-semibold">Provider</h2>
               </div>
               {visibleProviders.length > 1 && (
-                <div className="flex items-center gap-1 rounded-md border border-border bg-muted/40 p-0.5">
+                <div
+                  role="tablist"
+                  aria-label="Providers"
+                  className="flex items-center gap-1 rounded-md border border-border bg-muted/40 p-0.5"
+                >
                   {visibleProviders.map((p) => (
                     <button
                       key={p.id}
+                      type="button"
+                      role="tab"
+                      id={`provider-tab-${p.id}`}
+                      aria-selected={p.id === selectedProviderId}
+                      aria-controls={`provider-tabpanel-${p.id}`}
                       onClick={() => setSelectedProviderId(p.id)}
                       className={cn(
                         "rounded px-2.5 py-1 text-xs font-medium transition-colors",
@@ -271,30 +288,36 @@ export function SettingsView({
                 </div>
               )}
             </div>
-            {provider?.providerType === "built_in" ? (
-              <BuiltInRuntimeForm
-                key={provider.id}
-                status={builtInStatus}
-                onStatusChange={onBuiltInStatusChange}
-                modelPath={builtInModelPath}
-                onModelPathChange={onBuiltInModelPathChange}
-                onModelsRefresh={onModelsRefresh}
-                onError={onError}
-              />
-            ) : provider ? (
-              <ProviderForm
-                key={provider.id}
-                provider={provider}
-                models={providerModels}
-                onProviderSaved={onProviderSaved}
-                onModelsRefresh={onModelsRefresh}
-                onError={onError}
-                secretStoreStatus={secretStoreStatus}
-                onSecretStoreRetry={checkSecretStore}
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">No providers configured.</p>
-            )}
+            <div
+              role="tabpanel"
+              id={provider ? `provider-tabpanel-${provider.id}` : undefined}
+              aria-labelledby={provider ? `provider-tab-${provider.id}` : undefined}
+            >
+              {provider?.providerType === "built_in" ? (
+                <BuiltInRuntimeForm
+                  key={provider.id}
+                  status={builtInStatus}
+                  onStatusChange={onBuiltInStatusChange}
+                  modelPath={builtInModelPath}
+                  onModelPathChange={onBuiltInModelPathChange}
+                  onModelsRefresh={onModelsRefresh}
+                  onError={onError}
+                />
+              ) : provider ? (
+                <ProviderForm
+                  key={provider.id}
+                  provider={provider}
+                  models={providerModels}
+                  onProviderSaved={onProviderSaved}
+                  onModelsRefresh={onModelsRefresh}
+                  onError={onError}
+                  secretStoreStatus={secretStoreStatus}
+                  onSecretStoreRetry={checkSecretStore}
+                />
+              ) : (
+                <p className="text-sm text-muted-foreground">No providers configured.</p>
+              )}
+            </div>
           </Panel>
 
           <Panel className="p-4">
@@ -506,7 +529,7 @@ export function SettingsView({
           <DiagnosticsPanel provider={provider} selectedModel={provider?.defaultModelId ?? ""} onError={onError} />
         </div>
       </div>
-    </section>
+    </main>
   );
 }
 
