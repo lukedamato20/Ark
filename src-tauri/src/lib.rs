@@ -18,6 +18,7 @@ mod secret_store;
 mod security;
 mod sidecar;
 mod supply_chain;
+mod tool_policy;
 mod validation;
 mod workspace;
 mod workspace_bootstrap;
