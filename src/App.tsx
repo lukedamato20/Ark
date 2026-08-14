@@ -372,10 +372,23 @@ function RightPanelContainer({ controller }: { controller: ArkController }) {
   return <RightPanel collapsed={collapsed} onToggle={controller.toggleRightPanel} />;
 }
 
+const INFO_TOAST_AUTO_DISMISS_MS = 6000;
+
 function AppFeedback({ controller }: { controller: ArkController }) {
   const stores = useArkStores();
   const error = useStoreSelector(stores.shell, (state) => state.error);
   const info = useStoreSelector(stores.shell, (state) => state.info);
+
+  // UX-004: info toasts auto-dismiss — they're confirmations ("import complete"), not
+  // actionable failures, so there's nothing to leave on screen waiting for a response. Errors
+  // deliberately do not auto-dismiss: an actionable failure disappearing before it's read would
+  // defeat the point of showing it at all.
+  React.useEffect(() => {
+    if (!info) return;
+    const timer = window.setTimeout(() => controller.setInfo(null), INFO_TOAST_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [info, controller]);
+
   if (error) {
     return (
       <div className="fixed bottom-4 left-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-destructive/30 bg-card p-3 shadow-lg">

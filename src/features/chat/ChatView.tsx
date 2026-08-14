@@ -575,12 +575,19 @@ export function ChatView({
       });
       const result = await client.importConversationJson(importId, json);
       onConversationImported(result.conversation);
+      // UX-004: every completed import gets a terminal summary, not only ones with something to
+      // flag — previously the toast only fired when normalizedMessageCount > 0, so a routine
+      // successful import ended in silence with just the progress indicator disappearing.
+      const messagePlural = preview.messageCount === 1 ? "message" : "messages";
+      const summary = `Import complete. "${result.conversation.title}" — ${preview.messageCount} ${messagePlural} imported.`;
       if (result.normalizedMessageCount > 0) {
         const plural = result.normalizedMessageCount === 1 ? "message was" : "messages were";
         onInfo(
-          `Import complete. ${result.normalizedMessageCount} ${plural} still mid-generation when exported and ` +
+          `${summary} ${result.normalizedMessageCount} ${plural} still mid-generation when exported and ` +
             `${result.normalizedMessageCount === 1 ? "has" : "have"} been marked interrupted — use Retry, Keep partial, or Discard on ${result.normalizedMessageCount === 1 ? "it" : "them"}.`,
         );
+      } else {
+        onInfo(summary);
       }
     } catch (error) {
       if ((error as { code?: string })?.code === "import_cancelled") {

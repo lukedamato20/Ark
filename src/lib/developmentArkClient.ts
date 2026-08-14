@@ -436,6 +436,21 @@ export function createLongConversationFixtureClient(): ArkClient {
       models: [model],
       provider,
     }),
+    // UX-004: minimal import overrides so the terminal-summary toast and its auto-dismiss timer
+    // can be exercised live — every other fixture's import methods are unimplemented.
+    previewConversationImport: async () => ({
+      conversationCount: 1,
+      messageCount: 3,
+      maximumBranchDepth: 1,
+      normalizedMessageCount: 0,
+      conflicts: [],
+      providerMappings: [],
+      estimatedStorageBytes: 2048,
+    }),
+    importConversationJson: async () => ({
+      conversation: { ...conversation, id: "fixture-imported-conversation", title: "Imported fixture conversation" },
+      normalizedMessageCount: 0,
+    }),
   });
 }
 
