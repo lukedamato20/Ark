@@ -90,9 +90,9 @@ cargo build
 
 Ark stores its local SQLite database as `ark.sqlite3` inside the active workspace folder. By default, that workspace lives under the platform app data directory.
 
-In Settings → Storage, you can enter an absolute folder path for a portable workspace. Ark validates that the folder can be created and written to, then uses it after you close and reopen the app.
+In Settings → Storage, you can enter an absolute folder path for a portable workspace. Ark validates that the folder can be created and written to, then uses it after you close and reopen the app. Check "Copy current conversation data to the new location" to seed the new workspace with a verified copy of your current database — the copy is verified before Ark switches to it, and the original is left untouched either way. Leave it unchecked to start the new workspace empty.
 
-The MVP does not automatically move an existing database into the new workspace. Export conversations first or manually copy `ark.sqlite3` if you want to move current data.
+Ark can also create a standalone, verified backup of the current workspace database at any time (Settings → Backup & Restore), independent of switching workspaces — see [docs/secrets-and-backups.md](docs/secrets-and-backups.md).
 
 ## Planning Docs
 
@@ -104,6 +104,7 @@ The MVP does not automatically move an existing database into the new workspace.
 - [Credential storage, export, and restore behavior](docs/secrets-and-backups.md)
 - [Local data-at-rest protection and threat model](docs/data-at-rest.md)
 - [Diagnostics logs and crash capture](docs/diagnostics-and-logs.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Privacy and data flow](docs/privacy-and-data-flow.md)
 - [Security policy and vulnerability reporting](SECURITY.md)
 - [Incident response](docs/incident-response.md)

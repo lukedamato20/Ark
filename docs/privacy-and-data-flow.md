@@ -12,10 +12,12 @@ page's job is to make sure nothing falls between them.
 - **Provider credentials** — never in SQLite or browser storage; only an opaque reference is
   persisted, with the real value in the OS credential store (see
   [docs/secrets-and-backups.md](secrets-and-backups.md)).
-- **Runtime/diagnostic logs** — in-memory only, bounded, redacted before being buffered at all
-  (paths, bearer tokens, and auth-shaped values never enter the buffer in the first place — see
-  [docs/runtime-diagnostics-policy.md](runtime-diagnostics-policy.md)). Nothing is written to
-  disk or sent anywhere unless the user explicitly exports a diagnostics bundle.
+- **Runtime/diagnostic logs** — bounded (a capped, single-rotation local file plus a smaller
+  in-memory copy of recent entries), redacted before being written or buffered at all (paths,
+  bearer tokens, cookies, sync tokens, and other auth-shaped values never enter either sink in the
+  first place — see [docs/runtime-diagnostics-policy.md](runtime-diagnostics-policy.md) and
+  [docs/diagnostics-and-logs.md](diagnostics-and-logs.md)). Nothing is sent anywhere unless the
+  user explicitly exports and shares a diagnostics bundle.
 - **No telemetry, no behavioral analytics, no account.** This has been true since the project's
   original MVP scope and remains an explicit, actively-preserved property — see the "Explicit
   current non-actions" list in `implementation-plan.md` Section 7.
@@ -46,9 +48,13 @@ consistent with the Phase 8 scope decision recorded in `implementation-plan.md`.
 
 ## Crash reporting
 
-Opt-in only, not yet implemented (OPS-001). Until it exists, no crash data is collected or sent
-anywhere, full stop — there is no "basic telemetry while the real feature is built," which
-would contradict the no-telemetry property above.
+Opt-in only, off by default (OPS-001). When enabled (Settings → Diagnostics bundle), an uncaught
+crash is recorded — redacted, the same as every other log line — to the local diagnostics log
+file described above, so it can be included in a diagnostics bundle after Ark restarts. There is
+no crash-report *service*: no Sentry, no telemetry endpoint, no background upload, and no "basic
+telemetry while the real feature is built" — the only way any of this data ever leaves the device
+is the manual, reviewed diagnostics bundle export, same as everything else on this page. See
+[docs/diagnostics-and-logs.md](diagnostics-and-logs.md) for the full disclosure.
 
 ## If you're not sure whether something is disclosed here
 

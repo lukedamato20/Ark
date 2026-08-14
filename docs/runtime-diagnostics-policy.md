@@ -20,3 +20,9 @@ or the bearer token.
 Redaction reduces accidental disclosure but cannot prove that arbitrary native-runtime output is
 non-sensitive. The consent control therefore remains off by default, and future diagnostic
 export/crash-report work must preserve that choice rather than enabling logs implicitly.
+
+This page covers only the managed runtime's own stdout/stderr buffer. Ark's separate, app-level
+structured log (lifecycle events, error codes — never runtime output or user content) and its
+opt-in crash capture are documented in
+[docs/diagnostics-and-logs.md](diagnostics-and-logs.md); both share the same redaction pass this
+page describes (`redaction.rs`).
