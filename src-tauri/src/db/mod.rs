@@ -2244,6 +2244,24 @@ mod tests {
         let migration_0001_only = seed_migration_0001_only_database(&path);
         let (conversation_id, marker_title) = migration_0001_only;
 
+        // Precondition check, not just a debugging aid: proves the seed step's writes are
+        // durably on disk (visible to an entirely separate connection) before Database::open
+        // ever touches the file, so a failure below can only be attributed to what open()/backup
+        // do to the file, never to an unflushed seed write.
+        {
+            let seeded =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .expect("the seeded file must already be a valid, openable SQLite database");
+            let seeded_title: String = seeded
+                .query_row(
+                    "SELECT title FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .expect("the seed step's writes must be durable before Database::open runs");
+            assert_eq!(seeded_title, marker_title);
+        }
+
         let _db =
             Database::open(&path).expect("database opens and applies the pending migration 2");
 
