@@ -1330,9 +1330,9 @@ function DiagnosticsBundlePanel({
         <h2 className="text-sm font-semibold">Diagnostics bundle</h2>
       </div>
       <p className="text-sm text-muted-foreground">
-        Generates a local, redacted support bundle — hardware info, managed-runtime status, and recent app log
-        lines. Never includes prompts, model output, or attachment content. Nothing leaves this device unless you
-        save and send the file yourself.
+        Generates a local, redacted support bundle — hardware info, managed-runtime status, and recent app log lines.
+        Never includes prompts, model output, or attachment content. Nothing leaves this device unless you save and send
+        the file yourself.
       </p>
 
       <label className="mt-3 flex items-center gap-2 text-sm">
