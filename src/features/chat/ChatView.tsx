@@ -841,7 +841,7 @@ function ProviderStatusIcon({ provider }: { provider?: ProviderConfig }) {
         className={cn(
           "pointer-events-none absolute bottom-full left-0 z-50 mb-1.5 w-56 rounded-md border border-border",
           "bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-md",
-          "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
+          "opacity-0 transition-opacity duration-fast group-hover:opacity-100",
         )}
       >
         {description}
@@ -947,7 +947,7 @@ function ProviderModelDropdown({
                     className={cn(
                       "pointer-events-none absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-border",
                       "bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-md",
-                      "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
+                      "opacity-0 transition-opacity duration-fast group-hover:opacity-100",
                     )}
                   >
                     {itemMeta.description}
@@ -972,7 +972,7 @@ function ProviderModelDropdown({
                           setOpen(false);
                         }}
                         className={cn(
-                          "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-150",
+                          "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-fast",
                           "hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring",
                           "disabled:cursor-not-allowed disabled:opacity-40",
                           selected && "bg-primary/10 font-medium text-foreground",
@@ -1072,7 +1072,7 @@ function HeaderOverflowMenu({
             role="menuitem"
             disabled={!conversationSelected}
             onClick={() => runAndClose(onExportMarkdown)}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-fast hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             <FileText className="h-4 w-4" aria-hidden="true" />
             Export as Markdown
@@ -1082,7 +1082,7 @@ function HeaderOverflowMenu({
             role="menuitem"
             disabled={!conversationSelected}
             onClick={() => runAndClose(onExportJson)}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-fast hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             <FileJson className="h-4 w-4" aria-hidden="true" />
             Export as JSON
@@ -1091,7 +1091,7 @@ function HeaderOverflowMenu({
             type="button"
             role="menuitem"
             onClick={() => runAndClose(onImportJson)}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-fast hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Download className="h-4 w-4" aria-hidden="true" />
             Import JSON
@@ -1102,7 +1102,7 @@ function HeaderOverflowMenu({
             role="menuitem"
             disabled={!conversationSelected}
             onClick={() => runAndClose(onDelete)}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive outline-none transition-colors duration-150 hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive outline-none transition-colors duration-fast hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Trash2 className="h-4 w-4" aria-hidden="true" />
             Delete conversation

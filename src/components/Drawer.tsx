@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import * as React from "react";
+import { MOTION_FAST_SECONDS } from "../lib/motionTokens";
 import { useModalKeyboardBehavior } from "../lib/useModalKeyboardBehavior";
 
 interface DrawerProps {
@@ -42,7 +43,7 @@ export function Drawer({ open, onClose, side, label, triggerRef, widthPx, childr
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={reducedMotion ? { duration: 0 } : { duration: 0.15 }}
+            transition={reducedMotion ? { duration: 0 } : { duration: MOTION_FAST_SECONDS }}
             className="fixed inset-0 z-40 bg-background/70 backdrop-blur-sm"
           />
         )}
@@ -66,7 +67,7 @@ export function Drawer({ open, onClose, side, label, triggerRef, widthPx, childr
         tabIndex={-1}
         inert={!open}
         style={{ width: widthPx, [side]: 0, transform: `translateX(${open ? 0 : offscreenX}px)` }}
-        className="fixed inset-y-0 z-50 flex flex-col bg-card shadow-2xl outline-none transition-transform duration-200 ease-out motion-reduce:transition-none"
+        className="fixed inset-y-0 z-50 flex flex-col bg-card shadow-2xl outline-none transition-transform duration-standard ease-out motion-reduce:transition-none"
       >
         {children}
       </div>

@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Keyboard, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from "lucide-react";
 import * as React from "react";
 import { formatDate } from "../../lib/format";
+import { MOTION_FAST_SECONDS } from "../../lib/motionTokens";
 import type { Conversation } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -75,7 +76,7 @@ export function ConversationSidebar({
     <aside
       aria-label="Conversations"
       style={{ width: collapsed ? 72 : 288 }}
-      className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80 transition-[width] duration-200 ease-out motion-reduce:transition-none"
+      className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80 transition-[width] duration-standard ease-out motion-reduce:transition-none"
     >
       <div className="flex h-14 items-center gap-2 border-b border-border px-3">
         {!hideCollapseToggle && (
@@ -122,7 +123,7 @@ export function ConversationSidebar({
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
-                transition={reducedMotion ? { duration: 0 } : { duration: 0.14 }}
+                transition={reducedMotion ? { duration: 0 } : { duration: MOTION_FAST_SECONDS }}
                 aria-label={conversation.title}
                 aria-current={active ? "true" : undefined}
                 className={cn(

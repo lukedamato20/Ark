@@ -52,6 +52,16 @@ const config = {
           "sans-serif",
         ],
       },
+      // UX-009: named motion tokens — before this, transitions used a mix of duration-150,
+      // duration-200, and (in framer-motion `transition` props, which don't read this Tailwind
+      // config) hardcoded 0.14/0.15/0.18 second literals for what were conceptually the same two
+      // kinds of motion. `fast` is for color/opacity micro-interactions (hover states, menu/
+      // backdrop fades); `standard` is for structural transitions (drawer slides, panel width,
+      // progress bars). See `src/lib/motionTokens.ts` for the framer-motion-side equivalents.
+      transitionDuration: {
+        fast: "150ms",
+        standard: "200ms",
+      },
     },
   },
   plugins: [],

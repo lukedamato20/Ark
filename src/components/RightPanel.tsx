@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ChevronLeft, ChevronRight, FileText, MemoryStick, Wrench } from "lucide-react";
+import { MOTION_FAST_SECONDS } from "../lib/motionTokens";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 
@@ -20,7 +21,7 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
     <aside
       aria-label="Context"
       style={{ width: collapsed ? 48 : 260 }}
-      className="flex h-screen shrink-0 flex-col border-l border-border bg-card/70 transition-[width] duration-200 ease-out motion-reduce:transition-none"
+      className="flex h-screen shrink-0 flex-col border-l border-border bg-card/70 transition-[width] duration-standard ease-out motion-reduce:transition-none"
     >
       <div className="flex h-14 items-center justify-between border-b border-border px-2">
         {!collapsed && <div className="px-2 text-sm font-semibold">Context</div>}
@@ -35,7 +36,7 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={reducedMotion ? { duration: 0 } : { duration: 0.14 }}
+            transition={reducedMotion ? { duration: 0 } : { duration: MOTION_FAST_SECONDS }}
             className="space-y-3 p-3"
           >
             <div className="rounded-lg border border-border bg-background p-3">

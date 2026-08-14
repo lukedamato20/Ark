@@ -272,7 +272,7 @@ const MessageBubble = React.memo(function MessageBubble({
                     disabled={alternative.isActive || !canSwitchBranch || Boolean(switchingBranchId)}
                     onClick={() => void handleSelectAlternative(alternative.messageId)}
                     className={cn(
-                      "flex w-full items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-150",
+                      "flex w-full items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-fast",
                       "focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default",
                       alternative.isActive
                         ? "bg-primary/10 text-foreground"

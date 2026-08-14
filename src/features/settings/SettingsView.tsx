@@ -1062,7 +1062,7 @@ function OllamaModelsPanel({
             {pullPercent !== null && (
               <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                 <div
-                  className="h-full rounded-full bg-primary transition-all duration-200"
+                  className="h-full rounded-full bg-primary transition-all duration-standard"
                   style={{ width: `${pullPercent}%` }}
                   role="progressbar"
                   aria-valuenow={pullPercent}
