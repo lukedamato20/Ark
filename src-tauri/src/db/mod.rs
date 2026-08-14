@@ -2728,6 +2728,67 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    /// Applies migrations 1–4 directly, including a pre-existing `providers` row using the
+    /// column set as it stood before migration 5 added `allow_insecure_remote` — so migration
+    /// 5's `ALTER TABLE ... ADD COLUMN ... DEFAULT 0` can be exercised against a real
+    /// already-existing row, not only one inserted after the column exists.
+    fn seed_migration_0004_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..4] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 4 as applied");
+
+        let provider_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO providers (
+                    id, name, provider_type, base_url, default_temperature, default_max_tokens,
+                    streaming_enabled, is_local, is_enabled, created_at, updated_at
+                 ) VALUES (?1, 'Release-4 provider', 'ollama', 'http://localhost:11434', 0.7, 2048, 1, 1, 1, ?2, ?2)",
+                params![&provider_id, now()],
+            )
+            .expect("seed a migration-4 provider row, without the column migration 5 adds");
+        provider_id
+    }
+
+    /// ARC-005/ARC-006 acceptance: extends the "every supported release" fixture-upgrade
+    /// requirement to migration 5, the latest at the time of this test — a pre-existing
+    /// provider row from a migration-4 workspace must survive migration 5's new column with the
+    /// documented default, not merely a row inserted after the column already existed.
+    #[test]
+    fn upgrading_a_migration_0004_workspace_adds_the_insecure_remote_exception_column() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let provider_id = seed_migration_0004_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-4 workspace succeeds");
+        let provider = db
+            .get_provider(&provider_id)
+            .expect("pre-existing provider readable after upgrade");
+        assert_eq!(provider.name, "Release-4 provider");
+        assert!(
+            !provider.allow_insecure_remote,
+            "migration 5's DEFAULT 0 must apply to pre-existing rows, not just new ones"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
