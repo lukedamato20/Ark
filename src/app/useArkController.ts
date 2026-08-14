@@ -40,6 +40,10 @@ export interface ArkController {
   setMessages: (messages: Message[]) => void;
   searchConversations: (query: string) => Promise<void>;
   loadMoreConversations: () => Promise<void>;
+  /** FTR-002: undo is calling this again with the opposite value. */
+  changeConversationArchived: (id: string, archived: boolean) => Promise<void>;
+  changeConversationPinned: (id: string, pinned: boolean) => Promise<void>;
+  setShowArchived: (showArchived: boolean) => void;
   refreshProviderModels: (providerId: string) => Promise<void>;
   saveProvider: (provider: ProviderConfig) => void;
   changeTheme: (theme: ThemeMode) => Promise<void>;
@@ -279,6 +283,8 @@ export function useArkController(): ArkController {
         search: "",
         isLoading: false,
         activeId: conversations[0]?.id,
+        searchSnippets: data.conversationPage.searchSnippets,
+        showArchived: false,
       });
       stores.providers.set({
         providers: entityCollection(data.providers),
@@ -378,12 +384,15 @@ export function useArkController(): ArkController {
     async (query: string) => {
       const normalizedQuery = query.trim();
       const sequence = ++historySequenceRef.current;
+      const showArchived = stores.catalog.getSnapshot().showArchived;
       patchStore(stores.catalog, { search: normalizedQuery, isLoading: true });
       try {
         const page = await client.listConversations({
           limit: 50,
           query: normalizedQuery || null,
-          archived: false,
+          // FTR-002: `null` includes archived conversations alongside active ones; `false`
+          // (the default) excludes them, matching the existing pre-toggle behavior.
+          archived: showArchived ? null : false,
         });
         if (!isLatestRequest(sequence, historySequenceRef.current)) return;
         const catalog = stores.catalog.getSnapshot();
@@ -398,6 +407,7 @@ export function useArkController(): ArkController {
           conversations: entityCollection(pageItems),
           nextCursor: page.nextCursor ?? null,
           isLoading: false,
+          searchSnippets: page.searchSnippets,
         });
       } catch (error) {
         if (isLatestRequest(sequence, historySequenceRef.current)) {
@@ -419,7 +429,7 @@ export function useArkController(): ArkController {
         limit: 50,
         cursor: catalog.nextCursor,
         query: catalog.search || null,
-        archived: false,
+        archived: catalog.showArchived ? null : false,
       });
       if (!isLatestRequest(sequence, historySequenceRef.current)) return;
       const current = stores.catalog.getSnapshot();
@@ -428,6 +438,7 @@ export function useArkController(): ArkController {
         conversations: entityCollection(mergeConversationPage(entityList(current.conversations), page.items)),
         nextCursor: page.nextCursor ?? null,
         isLoading: false,
+        searchSnippets: { ...current.searchSnippets, ...page.searchSnippets },
       });
     } catch (error) {
       if (isLatestRequest(sequence, historySequenceRef.current)) {
@@ -436,6 +447,59 @@ export function useArkController(): ArkController {
       }
     }
   }, [client, setError, stores]);
+
+  /** FTR-002: re-runs the current search/archived-visibility combination — the same fetch
+   * `searchConversations`/`loadMoreConversations` already know how to do, just re-triggered
+   * after a mutation (archive/pin) or a "show archived" toggle rather than a new query string. */
+  const refreshConversationList = React.useCallback(async () => {
+    await searchConversations(stores.catalog.getSnapshot().search);
+  }, [searchConversations, stores]);
+
+  const setShowArchived = React.useCallback(
+    (showArchived: boolean) => {
+      patchStore(stores.catalog, { showArchived });
+      void refreshConversationList();
+    },
+    [refreshConversationList, stores],
+  );
+
+  const changeConversationArchived = React.useCallback(
+    async (id: string, archived: boolean) => {
+      try {
+        const updated = await client.setConversationArchived(id, archived);
+        if (!stores.catalog.getSnapshot().showArchived && archived) {
+          // Archiving a conversation while the archived view is hidden removes it from the
+          // visible list immediately, rather than waiting for the next full refetch.
+          patchStore(stores.catalog, {
+            conversations: entityCollection(
+              entityList(stores.catalog.getSnapshot().conversations).filter((item) => item.id !== id),
+            ),
+          });
+        } else {
+          patchStore(stores.catalog, {
+            conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+          });
+        }
+      } catch (error) {
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
+  const changeConversationPinned = React.useCallback(
+    async (id: string, pinned: boolean) => {
+      try {
+        const updated = await client.setConversationPinned(id, pinned);
+        patchStore(stores.catalog, {
+          conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+        });
+      } catch (error) {
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
 
   const saveProvider = React.useCallback(
     (provider: ProviderConfig) =>
@@ -728,6 +792,9 @@ export function useArkController(): ArkController {
       setMessages,
       searchConversations,
       loadMoreConversations,
+      changeConversationArchived,
+      changeConversationPinned,
+      setShowArchived,
       refreshProviderModels,
       saveProvider,
       changeTheme,
@@ -747,6 +814,8 @@ export function useArkController(): ArkController {
     [
       bootstrap,
       changeBuiltInModelPath,
+      changeConversationArchived,
+      changeConversationPinned,
       changeCrashCaptureEnabled,
       changeTheme,
       createConversation,
@@ -761,6 +830,7 @@ export function useArkController(): ArkController {
       searchConversations,
       selectConversation,
       setBuiltInStatus,
+      setShowArchived,
       setError,
       setInfo,
       setMessages,

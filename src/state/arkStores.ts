@@ -25,6 +25,12 @@ export interface ConversationCatalogState {
   search: string;
   isLoading: boolean;
   activeId?: string;
+  /** FTR-002: conversation id -> matched-text excerpt, from the most recent search page's
+   * `ConversationPage.searchSnippets`. Empty whenever `search` is empty. */
+  searchSnippets: Record<string, string>;
+  /** FTR-002: when true, archived conversations are included in the fetched page alongside
+   * active ones, rather than the default active-only view. */
+  showArchived: boolean;
 }
 
 export interface TranscriptState {
@@ -104,6 +110,8 @@ export function createArkStores(initial?: {
       nextCursor: null,
       search: "",
       isLoading: false,
+      searchSnippets: {},
+      showArchived: false,
     }),
     transcript: createExternalStore<TranscriptState>({ messages: [], isLoading: false }),
     generation: createExternalStore<GenerationState>({ byMessageId: {}, activeMessageIdByConversation: {} }),

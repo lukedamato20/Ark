@@ -13,9 +13,10 @@
       "temperature",
       "maxTokens",
       "archived",
-      "projectId"
+      "projectId",
+      "pinnedAt"
     ],
-    "ConversationPage": ["items", "nextCursor"],
+    "ConversationPage": ["items", "nextCursor", "searchSnippets"],
     "Message": [
       "id",
       "conversationId",

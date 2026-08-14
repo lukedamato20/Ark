@@ -1,5 +1,17 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Keyboard, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Keyboard,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pin,
+  PinOff,
+  Plus,
+  Search,
+  Settings,
+} from "lucide-react";
 import * as React from "react";
 import { formatDate } from "../../lib/format";
 import { MOTION_FAST_SECONDS } from "../../lib/motionTokens";
@@ -18,6 +30,10 @@ interface ConversationSidebarProps {
   focusSearchSignal: number;
   hasMore: boolean;
   isLoading: boolean;
+  /** FTR-002: conversation id -> a short matched-text excerpt, shown instead of the date line
+   * while a search query is active and this conversation matched on content, not just title. */
+  searchSnippets: Record<string, string>;
+  showArchived: boolean;
   onToggleCollapsed: () => void;
   onCreate: () => void;
   onSelect: (id: string) => void;
@@ -25,6 +41,10 @@ interface ConversationSidebarProps {
   onLoadMore: () => void;
   onOpenSettings: () => void;
   onOpenShortcuts: () => void;
+  onShowArchivedChange: (showArchived: boolean) => void;
+  /** FTR-002: undo is calling this again with the opposite value. */
+  onArchive: (id: string, archived: boolean) => void;
+  onPin: (id: string, pinned: boolean) => void;
   shortcutsTriggerRef: React.RefObject<HTMLButtonElement | null>;
 }
 
@@ -36,6 +56,8 @@ export function ConversationSidebar({
   focusSearchSignal,
   hasMore,
   isLoading,
+  searchSnippets,
+  showArchived,
   onToggleCollapsed,
   onCreate,
   onSelect,
@@ -43,6 +65,9 @@ export function ConversationSidebar({
   onLoadMore,
   onOpenSettings,
   onOpenShortcuts,
+  onShowArchivedChange,
+  onArchive,
+  onPin,
   shortcutsTriggerRef,
 }: ConversationSidebarProps) {
   // UX-008: this AnimatePresence enter/exit previously ignored prefers-reduced-motion — only the
@@ -50,6 +75,7 @@ export function ConversationSidebar({
   const reducedMotion = useReducedMotion();
   const [query, setQuery] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const itemRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const onSearchRef = React.useRef(onSearch);
   React.useEffect(() => {
     onSearchRef.current = onSearch;
@@ -66,6 +92,30 @@ export function ConversationSidebar({
       searchInputRef.current?.select();
     }
   }, [collapsed, focusSearchSignal]);
+
+  // FTR-002: pinned conversations sort first within the currently-loaded page — a pure
+  // client-side re-sort of already-fetched rows, not a change to the backend's keyset-paginated
+  // ORDER BY (see `build_conversation_page_query`'s own comment on why that boundary matters for
+  // pagination correctness). Stable otherwise: everything else keeps the order the backend gave.
+  const sortedConversations = React.useMemo(() => {
+    const pinned = conversations.filter((item) => item.pinnedAt);
+    pinned.sort((a, b) => (b.pinnedAt ?? "").localeCompare(a.pinnedAt ?? ""));
+    const unpinned = conversations.filter((item) => !item.pinnedAt);
+    return [...pinned, ...unpinned];
+  }, [conversations]);
+
+  /** FTR-002: arrow-key traversal through the visible result list — a roving focus move, not a
+   * selection change (selection still happens on click/Enter, which native `<button>` semantics
+   * already provide with no extra handling needed). */
+  function handleListKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const currentIndex = itemRefs.current.findIndex((element) => element === document.activeElement);
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex =
+      currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), sortedConversations.length - 1);
+    itemRefs.current[nextIndex]?.focus();
+  }
 
   return (
     // NOTE (UX-001): plain CSS width transition, not framer-motion's `animate` prop — `animate`
@@ -98,51 +148,116 @@ export function ConversationSidebar({
           {!collapsed && "New Chat"}
         </Button>
         {!collapsed && (
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              ref={searchInputRef}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search conversations"
-              maxLength={256}
-              className="pl-8"
-            />
-          </div>
+          <>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                ref={searchInputRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" && sortedConversations.length > 0) {
+                    event.preventDefault();
+                    itemRefs.current[0]?.focus();
+                  }
+                }}
+                placeholder="Search conversations"
+                maxLength={256}
+                className="pl-8"
+              />
+            </div>
+            <label className="flex items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => onShowArchivedChange(event.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              Show archived
+            </label>
+          </>
         )}
       </div>
 
-      <nav aria-label="Conversation list" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <nav
+        aria-label="Conversation list"
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
+        onKeyDown={handleListKeyDown}
+      >
         <AnimatePresence initial={false}>
-          {conversations.map((conversation) => {
+          {sortedConversations.map((conversation, index) => {
             const active = conversation.id === activeConversationId;
+            const snippet = searchSnippets[conversation.id];
             return (
-              <motion.button
+              <motion.div
                 key={conversation.id}
                 layout={!reducedMotion}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 transition={reducedMotion ? { duration: 0 } : { duration: MOTION_FAST_SECONDS }}
-                aria-label={conversation.title}
-                aria-current={active ? "true" : undefined}
-                className={cn(
-                  "mb-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
-                  "focus-visible:ring-2 focus-visible:ring-ring",
-                  active
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-                onClick={() => onSelect(conversation.id)}
+                className="group relative mb-1"
               >
-                <MessageSquare className="h-4 w-4 shrink-0" />
+                <button
+                  ref={(element) => {
+                    itemRefs.current[index] = element;
+                  }}
+                  type="button"
+                  aria-label={conversation.title}
+                  aria-current={active ? "true" : undefined}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
+                    "focus-visible:ring-2 focus-visible:ring-ring",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                  onClick={() => onSelect(conversation.id)}
+                >
+                  <MessageSquare className="h-4 w-4 shrink-0" />
+                  {!collapsed && (
+                    <span className="min-w-0 flex-1 pr-10">
+                      <span className="flex items-center gap-1">
+                        {conversation.pinnedAt && <Pin className="h-3 w-3 shrink-0 text-primary" aria-label="Pinned" />}
+                        <span className="block truncate">{conversation.title}</span>
+                      </span>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {snippet ?? formatDate(conversation.updatedAt)}
+                      </span>
+                    </span>
+                  )}
+                </button>
                 {!collapsed && (
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">{conversation.title}</span>
-                    <span className="block text-xs text-muted-foreground">{formatDate(conversation.updatedAt)}</span>
-                  </span>
+                  <div className="absolute right-1 top-1/2 flex -translate-y-1/2 gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                    <button
+                      type="button"
+                      aria-label={conversation.pinnedAt ? "Unpin conversation" : "Pin conversation"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onPin(conversation.id, !conversation.pinnedAt);
+                      }}
+                      className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {conversation.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={conversation.archived ? "Unarchive conversation" : "Archive conversation"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onArchive(conversation.id, !conversation.archived);
+                      }}
+                      className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {conversation.archived ? (
+                        <ArchiveRestore className="h-3.5 w-3.5" />
+                      ) : (
+                        <Archive className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
                 )}
-              </motion.button>
+              </motion.div>
             );
           })}
         </AnimatePresence>

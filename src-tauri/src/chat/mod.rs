@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +62,10 @@ pub struct Conversation {
     /// so the paginated history contract can already filter by project without later changing
     /// its response shape.
     pub project_id: Option<String>,
+    /// FTR-002: `None` means unpinned. A timestamp rather than a bare boolean so pin order
+    /// among multiple pinned conversations is deterministic (most-recently-pinned first) —
+    /// see migration `0007_conversation_pinning.sql`'s doc comment.
+    pub pinned_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +85,13 @@ pub struct ConversationListRequest {
 pub struct ConversationPage {
     pub items: Vec<Conversation>,
     pub next_cursor: Option<String>,
+    /// FTR-002: conversation id -> a short plain-text excerpt of the matching title/message
+    /// content, present only for the conversations in `items` that a search query actually
+    /// matched (empty when `ConversationListRequest.query` is unset). A map keyed by id rather
+    /// than a field on `Conversation` itself, since a snippet only has meaning in the context
+    /// of a search result — `Conversation` is also returned from non-search paths (`get_conversation`,
+    /// single-conversation reads) where "which query matched this" doesn't apply.
+    pub search_snippets: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

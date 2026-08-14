@@ -8,18 +8,25 @@ export interface Conversation {
   providerId?: string | null;
   modelId?: string | null;
   currentMessageId?: string | null;
-  /** ARC-006: reserved for a future per-conversation custom-system-prompt feature; always null today. */
+  /** FTR-004: null means "no conversation-level override, inherit the provider's default." */
   systemPrompt?: string | null;
   temperature?: number | null;
   maxTokens?: number | null;
   archived: boolean;
   /** ARC-007: populated once FTR-003 project assignment exists; null for current conversations. */
   projectId?: string | null;
+  /** FTR-002: null means unpinned. An ISO timestamp (not a boolean) so pin order among
+   * multiple pinned conversations is deterministic — most-recently-pinned first. */
+  pinnedAt?: string | null;
 }
 
 export interface ConversationPage {
   items: Conversation[];
   nextCursor?: string | null;
+  /** FTR-002: conversation id -> a short plain-text excerpt of the matching title/message
+   * content. Present only for conversations a search query actually matched; empty when no
+   * query was given. */
+  searchSnippets: Record<string, string>;
 }
 
 export interface Message {

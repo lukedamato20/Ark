@@ -97,6 +97,7 @@ fn sample_conversation() -> Conversation {
         max_tokens: Some(2048),
         archived: false,
         project_id: None,
+        pinned_at: None,
     }
 }
 
@@ -181,6 +182,10 @@ fn conversation_page_matches_contract() {
         &ConversationPage {
             items: vec![sample_conversation()],
             next_cursor: Some("opaque-cursor".to_string()),
+            search_snippets: std::collections::HashMap::from([(
+                "conversation-1".to_string(),
+                "a matching …snippet…".to_string(),
+            )]),
         },
     );
 }
@@ -290,6 +295,7 @@ fn app_bootstrap_matches_contract() {
             conversation_page: ConversationPage {
                 items: vec![sample_conversation()],
                 next_cursor: None,
+                search_snippets: std::collections::HashMap::new(),
             },
             providers: vec![sample_provider_config()],
             models: vec![sample_model_info()],

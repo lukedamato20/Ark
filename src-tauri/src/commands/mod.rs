@@ -155,6 +155,26 @@ pub fn update_conversation_settings(
 }
 
 #[tauri::command]
+pub fn set_conversation_archived(
+    state: State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<crate::chat::Conversation, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Conversation ID")?;
+    lock_db(&state)?.set_conversation_archived(id, archived)
+}
+
+#[tauri::command]
+pub fn set_conversation_pinned(
+    state: State<'_, AppState>,
+    id: String,
+    pinned: bool,
+) -> Result<crate::chat::Conversation, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Conversation ID")?;
+    lock_db(&state)?.set_conversation_pinned(id, pinned)
+}
+
+#[tauri::command]
 pub fn get_conversation_messages(
     state: State<'_, AppState>,
     conversation_id: String,

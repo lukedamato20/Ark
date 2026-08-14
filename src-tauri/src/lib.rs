@@ -40,9 +40,9 @@ use commands::{
     refresh_models, regenerate_assistant_message, rename_conversation, reset_workspace,
     restore_workspace_backup, restore_workspace_recovery_key, retry_workspace_open,
     rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, send_chat_message,
-    set_workspace, start_built_in_runtime, start_pending_stream, stop_built_in_runtime,
-    switch_active_branch, update_conversation_settings, update_device_settings, update_provider,
-    upsert_provider_secret,
+    set_conversation_archived, set_conversation_pinned, set_workspace, start_built_in_runtime,
+    start_pending_stream, stop_built_in_runtime, switch_active_branch,
+    update_conversation_settings, update_device_settings, update_provider, upsert_provider_secret,
 };
 use db::Database;
 use errors::AppError;
@@ -230,6 +230,8 @@ pub fn run() {
             create_conversation,
             rename_conversation,
             update_conversation_settings,
+            set_conversation_archived,
+            set_conversation_pinned,
             delete_conversation,
             get_conversation_messages,
             get_assistant_alternatives,

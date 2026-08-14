@@ -14,6 +14,7 @@ use chrono::Utc;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -79,6 +80,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 6,
         name: "0006_remove_provider_streaming_toggle",
         sql: include_str!("../../migrations/0006_remove_provider_streaming_toggle.sql"),
+    },
+    MigrationDef {
+        version: 7,
+        name: "0007_conversation_pinning",
+        sql: include_str!("../../migrations/0007_conversation_pinning.sql"),
     },
 ];
 
@@ -900,22 +906,39 @@ impl Database {
         let (sql, values, limit) = build_conversation_page_query(request)?;
 
         let mut statement = self.connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(values.iter()), map_conversation)?;
-        let mut items = collect_rows(rows)?;
-        let has_more = items.len() > limit as usize;
+        let rows = statement.query_map(
+            params_from_iter(values.iter()),
+            map_conversation_with_snippet,
+        )?;
+        let mut rows = collect_rows(rows)?;
+        let has_more = rows.len() > limit as usize;
         if has_more {
-            items.truncate(limit as usize);
+            rows.truncate(limit as usize);
         }
         let next_cursor = if has_more {
-            items
-                .last()
-                .map(serialize_conversation_cursor)
+            rows.last()
+                .map(|(conversation, _)| serialize_conversation_cursor(conversation))
                 .transpose()?
         } else {
             None
         };
 
-        Ok(ConversationPage { items, next_cursor })
+        let mut search_snippets = HashMap::new();
+        let items = rows
+            .into_iter()
+            .map(|(conversation, snippet)| {
+                if let Some(snippet) = snippet {
+                    search_snippets.insert(conversation.id.clone(), snippet);
+                }
+                conversation
+            })
+            .collect();
+
+        Ok(ConversationPage {
+            items,
+            next_cursor,
+            search_snippets,
+        })
     }
 
     /// Rebuilds the derived FTS index from authoritative conversation/message rows. FTS data
@@ -947,7 +970,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
-                    system_prompt, temperature, max_tokens, archived, project_id
+                    system_prompt, temperature, max_tokens, archived, project_id, pinned_at
                  FROM conversations
                  WHERE id = ?1",
                 params![id],
@@ -1000,8 +1023,8 @@ impl Database {
             "UPDATE conversations
              SET created_at = ?1, updated_at = ?2, provider_id = ?3, model_id = ?4,
                  system_prompt = ?5, temperature = ?6, max_tokens = ?7, archived = ?8,
-                 project_id = ?9
-             WHERE id = ?10",
+                 project_id = ?9, pinned_at = ?10
+             WHERE id = ?11",
             params![
                 source.created_at,
                 source.updated_at,
@@ -1012,6 +1035,7 @@ impl Database {
                 source.max_tokens,
                 source.archived,
                 source.project_id,
+                source.pinned_at,
                 imported_id,
             ],
         )?;
@@ -1053,6 +1077,37 @@ impl Database {
             params![system_prompt, temperature, max_tokens, now(), id],
         )?;
 
+        self.get_conversation(id)
+    }
+
+    /// FTR-002: archive/unarchive and pin/unpin are each a single-column, single-row UPDATE —
+    /// already atomic as one SQLite statement, with no multi-step transaction to wrap. "Undo"
+    /// is simply calling the opposite method; there is no separate undo-stack mechanism because
+    /// none is needed for a mutation this cheap and reversible. None of the four touch
+    /// `updated_at` — archiving or pinning a conversation isn't "using" it, and bumping
+    /// `updated_at` would surprisingly reorder it in the recency-sorted history list.
+    pub fn set_conversation_archived(
+        &self,
+        id: &str,
+        archived: bool,
+    ) -> Result<Conversation, AppError> {
+        self.connection.execute(
+            "UPDATE conversations SET archived = ?1 WHERE id = ?2",
+            params![archived as i64, id],
+        )?;
+        self.get_conversation(id)
+    }
+
+    pub fn set_conversation_pinned(
+        &self,
+        id: &str,
+        pinned: bool,
+    ) -> Result<Conversation, AppError> {
+        let pinned_at = pinned.then(now);
+        self.connection.execute(
+            "UPDATE conversations SET pinned_at = ?1 WHERE id = ?2",
+            params![pinned_at, id],
+        )?;
         self.get_conversation(id)
     }
 
@@ -1792,7 +1847,18 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         max_tokens: row.get(9)?,
         archived: row.get::<_, i64>(10)? != 0,
         project_id: row.get(11)?,
+        pinned_at: row.get(12)?,
     })
+}
+
+/// FTR-002: used only by `list_conversations_page`, whose query always selects a trailing
+/// `match_snippet` column (real when searching, `NULL` otherwise — see
+/// `build_conversation_page_query`) in addition to every column `map_conversation` reads, so
+/// reusing it here for the shared columns is safe: it never touches index 13.
+fn map_conversation_with_snippet(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(Conversation, Option<String>)> {
+    Ok((map_conversation(row)?, row.get(13)?))
 }
 
 fn build_conversation_page_query(
@@ -1818,13 +1884,35 @@ fn build_conversation_page_query(
         .flatten();
     let project_id = normalize_project_filter(request.project_id.as_deref())?;
 
-    let mut sql = String::from(
-        "SELECT c.id, c.title, c.created_at, c.updated_at, c.provider_id, c.model_id,
-                c.current_message_id, c.system_prompt, c.temperature, c.max_tokens,
-                c.archived, c.project_id
-         FROM conversations c",
+    // FTR-002: the snippet is a scalar subquery selecting the single best-ranked matching FTS
+    // row for this conversation (`ORDER BY rank LIMIT 1`) — a plain `GROUP BY conversation_id`
+    // would let SQLite pick an arbitrary row's `snippet()` value, not the most relevant one.
+    // Column index -1 tells FTS5 to auto-select whichever indexed column (title or content)
+    // actually matched, since a hit can come from either. No highlight markup (empty
+    // prefix/suffix) rather than e.g. `<mark>` — this text reaches the frontend as plain data,
+    // and embedding HTML-like markup would need a new raw-HTML rendering path this codebase's
+    // SEC-008 CSP/markdown-safety posture deliberately does not have.
+    let mut select_columns = String::from(
+        "c.id, c.title, c.created_at, c.updated_at, c.provider_id, c.model_id,
+         c.current_message_id, c.system_prompt, c.temperature, c.max_tokens,
+         c.archived, c.project_id, c.pinned_at",
     );
     let mut values = Vec::<Value>::new();
+
+    if let Some(search_query) = &search_query {
+        select_columns.push_str(
+            ",
+            (SELECT snippet(conversation_search, -1, '', '', '…', 12)
+             FROM conversation_search
+             WHERE conversation_search MATCH ? AND conversation_id = c.id
+             ORDER BY rank LIMIT 1) AS match_snippet",
+        );
+        values.push(Value::Text(search_query.clone()));
+    } else {
+        select_columns.push_str(", NULL AS match_snippet");
+    }
+
+    let mut sql = format!("SELECT {select_columns} FROM conversations c");
 
     if let Some(search_query) = search_query {
         sql.push_str(
@@ -1853,6 +1941,12 @@ fn build_conversation_page_query(
         values.push(Value::Text(cursor.id));
     }
 
+    // FTR-002: pinned-first display ordering is applied client-side over each already-fetched
+    // page (a pure, cursor-safe re-sort of loaded rows) rather than here — folding `pinned_at`
+    // into this keyset-paginated ORDER BY would require extending the cursor to a third sort
+    // key with correct NULL handling across the pin boundary, a real pagination-correctness
+    // risk this task's acceptance criteria (mutation correctness, not display order) don't
+    // actually require taking on.
     sql.push_str(" ORDER BY c.updated_at DESC, c.id DESC LIMIT ?");
     values.push(Value::Integer(i64::from(limit) + 1));
     Ok((sql, values, limit))
@@ -2880,6 +2974,66 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    /// Applies migrations 1–6 directly, including a pre-existing `conversations` row, so
+    /// migration 7's `ADD COLUMN pinned_at` can be exercised against a real already-existing
+    /// row rather than only one inserted after the column exists.
+    fn seed_migration_0006_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..6] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 6 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-6 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-6 conversation, without the column migration 7 adds");
+        conversation_id
+    }
+
+    /// FTR-002 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 7, the current latest — a pre-existing conversation row from a migration-6
+    /// workspace must survive migration 7's new `pinned_at` column, defaulting to unpinned
+    /// (`NULL`) rather than erroring or silently dropping the row.
+    #[test]
+    fn upgrading_a_migration_0006_workspace_adds_the_pinned_at_column() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0006_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-6 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-6 conversation");
+        assert_eq!(
+            conversation.pinned_at, None,
+            "migration 7 must leave pre-existing rows unpinned by default"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -3005,6 +3159,106 @@ mod tests {
         assert_eq!(cleared.system_prompt, None);
         assert_eq!(cleared.temperature, None);
         assert_eq!(cleared.max_tokens, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_conversation_archived_toggles_independently_of_updated_at() {
+        let (db, path) = test_db();
+        let created = db
+            .create_conversation(Some("Archive me".to_string()))
+            .expect("conversation created");
+        assert!(!created.archived);
+        let original_updated_at = created.updated_at.clone();
+
+        let archived = db
+            .set_conversation_archived(&created.id, true)
+            .expect("archived");
+        assert!(archived.archived);
+        // FTR-002: archiving isn't "using" a conversation — it must not bump updated_at and
+        // silently reorder it in the recency-sorted history list.
+        assert_eq!(archived.updated_at, original_updated_at);
+
+        let refetched = db.get_conversation(&created.id).expect("refetched");
+        assert!(refetched.archived);
+
+        let unarchived = db
+            .set_conversation_archived(&created.id, false)
+            .expect("unarchived — undo is just the opposite call");
+        assert!(!unarchived.archived);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_conversation_pinned_records_and_clears_a_timestamp() {
+        let (db, path) = test_db();
+        let created = db
+            .create_conversation(Some("Pin me".to_string()))
+            .expect("conversation created");
+        assert_eq!(created.pinned_at, None);
+        let original_updated_at = created.updated_at.clone();
+
+        let pinned = db
+            .set_conversation_pinned(&created.id, true)
+            .expect("pinned");
+        assert!(pinned.pinned_at.is_some());
+        assert_eq!(pinned.updated_at, original_updated_at);
+
+        let refetched = db.get_conversation(&created.id).expect("refetched");
+        assert!(refetched.pinned_at.is_some());
+
+        let unpinned = db
+            .set_conversation_pinned(&created.id, false)
+            .expect("unpinned — undo is just the opposite call");
+        assert_eq!(unpinned.pinned_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_results_carry_a_snippet_and_non_matching_results_carry_none() {
+        let (db, path) = test_db();
+        let matching = db
+            .create_conversation(Some("Weather report".to_string()))
+            .expect("conversation created");
+        db.append_message(
+            &matching.id,
+            None,
+            None,
+            "user",
+            "will it rain tomorrow in the mountains",
+            "complete",
+            None,
+            None,
+        )
+        .expect("message appended");
+        db.create_conversation(Some("Unrelated conversation".to_string()))
+            .expect("conversation created");
+
+        let page = db
+            .list_conversations_page(&history_request(Some("mountains")))
+            .expect("search succeeds");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, matching.id);
+        let snippet = page
+            .search_snippets
+            .get(&matching.id)
+            .expect("a matching conversation must have a snippet");
+        assert!(
+            snippet.to_lowercase().contains("mountains"),
+            "snippet should contain the matched term, got: {snippet}"
+        );
+
+        // A non-search listing must never carry snippets — there is no "match" to excerpt.
+        let unfiltered = db
+            .list_conversations_page(&history_request(None))
+            .expect("unfiltered listing succeeds");
+        assert!(unfiltered.search_snippets.is_empty());
 
         drop(db);
         let _ = fs::remove_file(path);

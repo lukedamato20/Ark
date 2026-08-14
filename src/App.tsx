@@ -201,6 +201,8 @@ function ConversationSidebarContainer({
       focusSearchSignal={shell.focusSearchSignal}
       hasMore={catalog.nextCursor != null}
       isLoading={catalog.isLoading}
+      searchSnippets={catalog.searchSnippets}
+      showArchived={catalog.showArchived}
       onToggleCollapsed={controller.toggleSidebar}
       onCreate={() => void controller.createConversation()}
       onSelect={controller.selectConversation}
@@ -208,6 +210,9 @@ function ConversationSidebarContainer({
       onLoadMore={() => void controller.loadMoreConversations()}
       onOpenSettings={() => controller.setView("settings")}
       onOpenShortcuts={() => controller.setShortcutsOpen(true)}
+      onShowArchivedChange={(showArchived) => void controller.setShowArchived(showArchived)}
+      onArchive={(id, archived) => void controller.changeConversationArchived(id, archived)}
+      onPin={(id, pinned) => void controller.changeConversationPinned(id, pinned)}
       shortcutsTriggerRef={shortcutsTriggerRef}
     />
   );

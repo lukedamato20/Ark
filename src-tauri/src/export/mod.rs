@@ -240,6 +240,7 @@ mod tests {
                 max_tokens: None,
                 archived: false,
                 project_id: None,
+                pinned_at: None,
             },
             messages,
             provider: None,

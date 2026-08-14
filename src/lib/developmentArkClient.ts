@@ -107,7 +107,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     },
   };
   const bootstrap: AppBootstrap = {
-    conversationPage: { items: [conversation], nextCursor: null },
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [model],
     workspacePath: "C:\\Ark",
@@ -182,7 +182,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
     updatedAt: timestamp,
   };
   const bootstrap: AppBootstrap = {
-    conversationPage: { items: [conversation], nextCursor: null },
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [],
     workspacePath: "C:\\Ark",
@@ -262,7 +262,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     archived: false,
   };
   const bootstrap: AppBootstrap = {
-    conversationPage: { items: [conversation], nextCursor: null },
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [],
     models: [],
     workspacePath: "C:\\Ark",
@@ -421,7 +421,7 @@ export function createLongConversationFixtureClient(): ArkClient {
   });
 
   const bootstrap: AppBootstrap = {
-    conversationPage: { items: [conversation], nextCursor: null },
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [model],
     workspacePath: "C:\\Ark",
@@ -560,6 +560,213 @@ export function createLongConversationFixtureClient(): ArkClient {
             messageCount: 40,
           },
     restoreWorkspaceBackup: async () => undefined,
+  });
+}
+
+/**
+ * FTR-002 browser fixture: a stateful in-memory catalog of several conversations — some pinned,
+ * some archived, distinct enough titles/content for search to meaningfully match — so the
+ * sidebar's search-snippet, archive/unarchive, pin/unpin, and "show archived" behaviors can all
+ * be exercised live. Every other fixture's `listConversations`/`setConversationArchived`/
+ * `setConversationPinned` are either unimplemented or return a static empty page; this is the
+ * only fixture where those calls actually mutate and re-filter a list.
+ */
+export function createConversationOrganizationFixtureClient(): ArkClient {
+  const timestamp = "2026-08-14T06:24:26Z";
+  const provider: ProviderConfig = {
+    id: "built_in",
+    name: "Built-in llama.cpp",
+    providerType: "built_in",
+    baseUrl: "http://127.0.0.1:49152",
+    defaultModelId: "fixture-model",
+    defaultTemperature: 0.7,
+    defaultMaxTokens: 2048,
+    isLocal: true,
+    allowInsecureRemote: false,
+    destinationClass: "loopback",
+    capabilities: {
+      streaming: true,
+      modelListing: true,
+      modelPull: false,
+      modelDelete: false,
+      modelUnload: false,
+      requiresAuth: true,
+      reportsContextWindow: true,
+      vision: false,
+      embeddings: false,
+      tools: false,
+    },
+    isEnabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const model: ModelInfo = {
+    id: "fixture-model",
+    providerId: provider.id,
+    name: "fixture-model.gguf",
+    displayName: "Fixture model",
+    contextWindow: 4096,
+    supportsStreaming: true,
+    supportsTools: false,
+    supportsVision: false,
+    supportsEmbeddings: false,
+    isAvailable: true,
+    lastSeenAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  const searchableContent: Record<string, string> = {
+    "fixture-conv-budget": "line items for the marketing spend and the infrastructure budget for next quarter",
+    "fixture-conv-recipe": "a recipe for weekend pancakes with a note about doubling the vanilla",
+    "fixture-conv-search-bug": "the FTS5 snippet function was returning an empty match for short queries",
+    "fixture-conv-old-notes": "archived notes from the previous marketing campaign retrospective",
+    "fixture-conv-vacation": "a draft itinerary for the coastal trip including flight and hotel links",
+  };
+
+  const conversations: Conversation[] = [
+    {
+      id: "fixture-conv-budget",
+      title: "Quarterly budget planning",
+      createdAt: timestamp,
+      updatedAt: "2026-08-14T05:00:00Z",
+      providerId: provider.id,
+      modelId: model.name,
+      archived: false,
+      pinnedAt: "2026-08-14T05:30:00Z",
+    },
+    {
+      id: "fixture-conv-recipe",
+      title: "Weekend pancake recipe",
+      createdAt: timestamp,
+      updatedAt: "2026-08-14T04:00:00Z",
+      providerId: provider.id,
+      modelId: model.name,
+      archived: false,
+      pinnedAt: "2026-08-14T05:15:00Z",
+    },
+    {
+      id: "fixture-conv-search-bug",
+      title: "Debugging the search index",
+      createdAt: timestamp,
+      updatedAt: "2026-08-14T03:00:00Z",
+      providerId: provider.id,
+      modelId: model.name,
+      archived: false,
+      pinnedAt: null,
+    },
+    {
+      id: "fixture-conv-old-notes",
+      title: "Old marketing notes",
+      createdAt: timestamp,
+      updatedAt: "2026-08-14T02:00:00Z",
+      providerId: provider.id,
+      modelId: model.name,
+      archived: true,
+      pinnedAt: null,
+    },
+    {
+      id: "fixture-conv-vacation",
+      title: "Vacation itinerary draft",
+      createdAt: timestamp,
+      updatedAt: "2026-08-14T01:00:00Z",
+      providerId: provider.id,
+      modelId: model.name,
+      archived: false,
+      pinnedAt: null,
+    },
+  ];
+
+  function buildSnippet(source: string, query: string): string {
+    const index = source.toLowerCase().indexOf(query.toLowerCase());
+    if (index === -1) return source.slice(0, 60);
+    const start = Math.max(0, index - 20);
+    const end = Math.min(source.length, index + query.length + 20);
+    return `${start > 0 ? "…" : ""}${source.slice(start, end)}${end < source.length ? "…" : ""}`;
+  }
+
+  const bootstrap: AppBootstrap = {
+    conversationPage: {
+      items: conversations.filter((conversation) => !conversation.archived),
+      nextCursor: null,
+      searchSnippets: {},
+    },
+    providers: [provider],
+    models: [model],
+    workspacePath: "C:\\Ark",
+    workspace: {
+      rootPath: "C:\\Ark",
+      databasePath: "C:\\Ark\\ark.sqlite3",
+      defaultRootPath: "C:\\Ark",
+      configPath: "C:\\Ark\\workspace.json",
+      isPortable: false,
+      requiresRestart: false,
+    },
+    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    workspaceOpenError: null,
+  };
+
+  return createFakeArkClient({
+    getAppBootstrap: async () => bootstrap,
+    getConversationMessages: async () => [],
+    refreshModels: async () => ({
+      health: {
+        providerId: provider.id,
+        isReachable: true,
+        status: "running",
+        message: "Runtime is running.",
+        checkedAt: new Date().toISOString(),
+      },
+      models: [model],
+      provider,
+    }),
+    listConversations: async (input) => {
+      const query = (input.query ?? "").trim().toLowerCase();
+      let items = conversations.filter((conversation) => {
+        if (input.archived === false) return !conversation.archived;
+        if (input.archived === true) return conversation.archived;
+        return true;
+      });
+      const searchSnippets: Record<string, string> = {};
+      if (query) {
+        items = items.filter((conversation) => {
+          const titleMatch = conversation.title.toLowerCase().includes(query);
+          const content = searchableContent[conversation.id] ?? "";
+          const contentMatch = content.toLowerCase().includes(query);
+          if (!titleMatch && !contentMatch) return false;
+          searchSnippets[conversation.id] = buildSnippet(titleMatch ? conversation.title : content, query);
+          return true;
+        });
+      }
+      items = [...items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return { items, nextCursor: null, searchSnippets };
+    },
+    setConversationArchived: async (id, archived) => {
+      const conversation = conversations.find((item) => item.id === id);
+      if (!conversation) throw new Error(`fixture: conversation ${id} not found`);
+      conversation.archived = archived;
+      return { ...conversation };
+    },
+    setConversationPinned: async (id, pinned) => {
+      const conversation = conversations.find((item) => item.id === id);
+      if (!conversation) throw new Error(`fixture: conversation ${id} not found`);
+      conversation.pinnedAt = pinned ? new Date().toISOString() : null;
+      return { ...conversation };
+    },
+    createConversation: async () => {
+      const created: Conversation = {
+        id: `fixture-conv-created-${conversations.length}`,
+        title: "New conversation",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        providerId: provider.id,
+        modelId: model.name,
+        archived: false,
+        pinnedAt: null,
+      };
+      conversations.unshift(created);
+      return created;
+    },
   });
 }
 

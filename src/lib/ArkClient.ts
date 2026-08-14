@@ -142,6 +142,10 @@ export interface ArkClient {
   /** FTR-004: each field independently `null`/omitted clears that override tier back to
    * "inherit the provider default" — always send the complete current draft, not a partial patch. */
   updateConversationSettings(input: UpdateConversationSettingsInput): Promise<Conversation>;
+  /** FTR-002: undo is simply calling this again with the opposite value — no separate undo
+   * mechanism exists because none is needed for a mutation this cheap and reversible. */
+  setConversationArchived(id: string, archived: boolean): Promise<Conversation>;
+  setConversationPinned(id: string, pinned: boolean): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
   getConversationMessages(conversationId: string): Promise<Message[]>;
   getAssistantAlternatives(conversationId: string, messageId: string): Promise<BranchAlternative[]>;
@@ -257,6 +261,8 @@ export function createTauriArkClient(): ArkClient {
           maxTokens: input.maxTokens ?? null,
         },
       }),
+    setConversationArchived: (id, archived) => invoke<Conversation>("set_conversation_archived", { id, archived }),
+    setConversationPinned: (id, pinned) => invoke<Conversation>("set_conversation_pinned", { id, pinned }),
     deleteConversation: (id) => invoke<void>("delete_conversation", { id }),
     getConversationMessages: (conversationId) => invoke<Message[]>("get_conversation_messages", { conversationId }),
     getAssistantAlternatives: (conversationId, messageId) =>
@@ -402,10 +408,12 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     updateDeviceSettings: async (settings) => settings,
     openExternalUrl: async () => undefined,
 
-    listConversations: async () => ({ items: [], nextCursor: null }),
+    listConversations: async () => ({ items: [], nextCursor: null, searchSnippets: {} }),
     createConversation: notImplemented("createConversation"),
     renameConversation: notImplemented("renameConversation"),
     updateConversationSettings: notImplemented("updateConversationSettings"),
+    setConversationArchived: notImplemented("setConversationArchived"),
+    setConversationPinned: notImplemented("setConversationPinned"),
     deleteConversation: async () => undefined,
     getConversationMessages: async () => [],
     getAssistantAlternatives: async () => [],
