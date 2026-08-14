@@ -311,6 +311,13 @@ pub async fn start_built_in_runtime(
         crate::commands::lock_sidecar(state)?.mark_unavailable_model(&model_path, &error.message);
         return Err(error);
     }
+    // SEC-007: the cheap check above only validates the path's shape (extension, existence,
+    // not-a-directory). This reads the file itself — rejects a symlinked, truncated, or
+    // non-GGUF-signed file before it reaches the launch path.
+    if let Err(error) = crate::validation::validate_gguf_file(std::path::Path::new(&model_path)) {
+        crate::commands::lock_sidecar(state)?.mark_unavailable_model(&model_path, &error.message);
+        return Err(error);
+    }
 
     let binary = llama_server_binary(app);
     if !binary.exists() {

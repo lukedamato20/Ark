@@ -154,6 +154,74 @@ pub fn validate_model_path(raw_path: &str) -> Result<&str, AppError> {
     Ok(trimmed)
 }
 
+/// The GGUF format's fixed 4-byte magic number at file offset 0.
+const GGUF_MAGIC: [u8; 4] = *b"GGUF";
+
+/// A minimal valid GGUF header (magic + uint32 version + uint64 tensor count + uint64 metadata
+/// KV count) is already 24 bytes; anything smaller cannot possibly be a real GGUF file. This
+/// catches empty, truncated, or placeholder files immediately rather than handing them to
+/// `llama-server`, which would fail 30+ seconds later with an opaque process-exit code.
+const MIN_GGUF_BYTES: u64 = 32;
+
+/// A generous absolute ceiling, not a real-world model-size expectation or a hardware-fit
+/// prediction — that nuanced "does this fit this machine's RAM/VRAM/context budget" assessment
+/// is PERF-004's job ("Preflight estimates model + context memory and free disk/RAM with a
+/// confidence label"). This check exists only to refuse an adversarial or corrupted size (a
+/// sparse file, a filesystem quirk, a deliberately malformed path) before it reaches the launch
+/// path, without second-guessing legitimate large local models loaded via mmap.
+const MAX_GGUF_BYTES: u64 = 1_000 * 1024 * 1024 * 1024;
+
+/// SEC-007: deeper content validation beyond `validate_model_path`'s cheap path-shape checks —
+/// run once, immediately before the file is handed to `llama-server` as a launch argument.
+/// Deliberately a separate function so the cheap check (used wherever a path is merely being
+/// accepted or displayed) never pays the cost of opening and reading the file.
+pub fn validate_gguf_file(path: &Path) -> Result<(), AppError> {
+    // `symlink_metadata` does not follow symlinks — the point. A `.gguf`-named symlink pointing
+    // at an arbitrary file (or one whose target changes between this check and the actual
+    // read/launch — a classic TOCTOU pattern) is rejected outright rather than transparently
+    // followed.
+    let link_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        AppError::invalid_input(format!("Could not read the model file: {error}"))
+    })?;
+    if link_metadata.file_type().is_symlink() {
+        return Err(AppError::invalid_input(
+            "Model file must be a regular file, not a symlink.",
+        ));
+    }
+    if !link_metadata.is_file() {
+        return Err(AppError::invalid_input(
+            "Model file must be a regular file, not a directory, device, or pipe.",
+        ));
+    }
+
+    let size = link_metadata.len();
+    if size < MIN_GGUF_BYTES {
+        return Err(AppError::invalid_input(format!(
+            "Model file is too small ({size} bytes) to be a valid GGUF file."
+        )));
+    }
+    if size > MAX_GGUF_BYTES {
+        return Err(AppError::invalid_input(
+            "Model file size is implausible for a GGUF model file.",
+        ));
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        AppError::invalid_input(format!("Could not open the model file: {error}"))
+    })?;
+    let mut magic = [0u8; 4];
+    std::io::Read::read_exact(&mut file, &mut magic).map_err(|error| {
+        AppError::invalid_input(format!("Could not read the model file header: {error}"))
+    })?;
+    if magic != GGUF_MAGIC {
+        return Err(AppError::invalid_input(
+            "Model file does not start with the GGUF format signature.",
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +394,88 @@ mod tests {
         assert_eq!(accepted, path_str);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn gguf_temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ark-gguf-test-{name}-{}.gguf",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn validate_gguf_file_accepts_a_plausible_header() {
+        let path = gguf_temp_path("valid");
+        let mut content = b"GGUF".to_vec();
+        content.extend_from_slice(&[0u8; 60]); // padding past the minimum-size floor
+        std::fs::write(&path, content).expect("write fixture");
+
+        validate_gguf_file(&path).expect("a file starting with the GGUF magic must pass");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_gguf_file_rejects_wrong_magic_bytes() {
+        let path = gguf_temp_path("wrong-magic");
+        let mut content = b"PK\x03\x04".to_vec(); // a real zip file's magic, not GGUF's
+        content.extend_from_slice(&[0u8; 60]);
+        std::fs::write(&path, content).expect("write fixture");
+
+        let error = validate_gguf_file(&path).unwrap_err();
+        assert!(error.message.contains("GGUF format signature"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_gguf_file_rejects_a_file_too_small_to_contain_a_header() {
+        let path = gguf_temp_path("truncated");
+        std::fs::write(&path, b"GGUF").expect("write fixture"); // magic only, no header body
+
+        let error = validate_gguf_file(&path).unwrap_err();
+        assert!(error.message.contains("too small"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_gguf_file_rejects_an_empty_file() {
+        let path = gguf_temp_path("empty");
+        std::fs::write(&path, b"").expect("write fixture");
+
+        let error = validate_gguf_file(&path).unwrap_err();
+        assert!(error.message.contains("too small"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_gguf_file_rejects_a_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "ark-gguf-test-missing-{}.gguf",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(validate_gguf_file(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_gguf_file_rejects_a_symlink_even_with_a_plausible_target() {
+        use std::os::unix::fs::symlink;
+
+        let target = gguf_temp_path("symlink-target");
+        let mut content = b"GGUF".to_vec();
+        content.extend_from_slice(&[0u8; 60]);
+        std::fs::write(&target, content).expect("write real target file");
+
+        let link = gguf_temp_path("symlink");
+        symlink(&target, &link).expect("create symlink");
+
+        let error = validate_gguf_file(&link).unwrap_err();
+        assert!(error.message.contains("symlink"));
+
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
     }
 }
