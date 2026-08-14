@@ -1,18 +1,20 @@
-import { AlertTriangle, Edit3, GitBranch, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Edit3, GitBranch, Info, Loader2, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
+import { CONNECTION_METADATA } from "../../lib/destinationClass";
 import { computeAnnouncementDelta } from "../../lib/streamAnnouncement";
 import { messageWithGenerationOverlay } from "../../state/arkStores";
 import { useStoreSelector } from "../../state/externalStore";
 import { useArkStores } from "../../state/useArkStores";
-import type { BranchAlternative, Message } from "../../types/ark";
+import type { BranchAlternative, Message, ProviderConfig } from "../../types/ark";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { MarkdownMessage } from "./MarkdownMessage";
 
 interface ChatMessageListProps {
   messages: Message[];
+  providers: ProviderConfig[];
   canBranch: boolean;
   canSwitchBranch: boolean;
   editingMessageId: string | null;
@@ -34,6 +36,7 @@ interface ChatMessageListProps {
  */
 export function ChatMessageList({
   messages,
+  providers,
   canBranch,
   canSwitchBranch,
   editingMessageId,
@@ -53,6 +56,7 @@ export function ChatMessageList({
         <MessageBubble
           key={message.id}
           message={message}
+          provider={providers.find((item) => item.id === message.providerId)}
           canBranch={canBranch}
           canSwitchBranch={canSwitchBranch}
           isEditing={editingMessageId === message.id}
@@ -73,6 +77,7 @@ export function ChatMessageList({
 
 const MessageBubble = React.memo(function MessageBubble({
   message,
+  provider,
   canBranch,
   canSwitchBranch,
   isEditing,
@@ -85,7 +90,11 @@ const MessageBubble = React.memo(function MessageBubble({
   onKeepPartial,
   onDiscardInterrupted,
   onError,
-}: Omit<ChatMessageListProps, "messages" | "editingMessageId"> & { message: Message; isEditing: boolean }) {
+}: Omit<ChatMessageListProps, "messages" | "providers" | "editingMessageId"> & {
+  message: Message;
+  provider: ProviderConfig | undefined;
+  isEditing: boolean;
+}) {
   const stores = useArkStores();
   const overlay = useStoreSelector(
     stores.generation,
@@ -127,6 +136,10 @@ const MessageBubble = React.memo(function MessageBubble({
   const [isLoadingAlternatives, setIsLoadingAlternatives] = React.useState(false);
   const [switchingBranchId, setSwitchingBranchId] = React.useState<string | null>(null);
   const [recoveryAction, setRecoveryAction] = React.useState<"retry" | "keep" | "discard" | null>(null);
+  // UX-011: "useful persisted metadata is hidden" — collapsed by default per this task's own
+  // suggested-implementation-notes ("a compact disclosure row with an expandable detail view"),
+  // since always-visible per-message metadata was flagged as a clutter risk.
+  const [metadataOpen, setMetadataOpen] = React.useState(false);
   const activeAlternativeIndex = alternatives?.findIndex((alternative) => alternative.isActive) ?? -1;
   const branchLabel =
     alternatives && alternatives.length > 1 && activeAlternativeIndex >= 0
@@ -208,7 +221,21 @@ const MessageBubble = React.memo(function MessageBubble({
         )}
       >
         <div className="mb-2 flex items-center justify-between gap-3">
-          <span className="text-xs font-medium uppercase tracking-wide opacity-70">{isUser ? "You" : "Ark"}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium uppercase tracking-wide opacity-70">{isUser ? "You" : "Ark"}</span>
+            {provider && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setMetadataOpen((value) => !value)}
+                aria-expanded={metadataOpen}
+                aria-label={metadataOpen ? "Hide response details" : "Show response details"}
+                className="h-5 w-5 p-0 opacity-50 hover:opacity-100"
+              >
+                <Info className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             {renderedMessage.status !== "complete" && renderedMessage.status !== "streaming" && (
               <Badge tone={renderedMessage.status === "failed" ? "danger" : "warning"}>{renderedMessage.status}</Badge>
@@ -259,6 +286,23 @@ const MessageBubble = React.memo(function MessageBubble({
             )}
           </div>
         </div>
+        {metadataOpen && provider && (
+          <div
+            className={cn(
+              "mb-3 grid gap-1 rounded-md border px-2.5 py-2 text-xs",
+              isUser ? "border-primary-foreground/20 bg-primary-foreground/10" : "border-border/70 bg-muted/40",
+            )}
+          >
+            <MetadataRow label="Provider" value={provider.name} />
+            {message.modelId && <MetadataRow label="Model" value={message.modelId} />}
+            <MetadataRow
+              label="Route"
+              value={CONNECTION_METADATA[provider.destinationClass].label}
+              detail={CONNECTION_METADATA[provider.destinationClass].description}
+            />
+            {message.tokenCount != null && <MetadataRow label="Tokens" value={String(message.tokenCount)} />}
+          </div>
+        )}
         {alternatives && !isUser && (
           <div className="mb-3 border-t border-border/70 pt-2">
             {alternatives.length <= 1 ? (
@@ -387,6 +431,17 @@ const MessageBubble = React.memo(function MessageBubble({
     </article>
   );
 });
+
+function MetadataRow({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="opacity-60">{label}</span>
+      <span className="text-right" title={detail}>
+        {value}
+      </span>
+    </div>
+  );
+}
 
 function InlineEditor({
   initialContent,

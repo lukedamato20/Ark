@@ -1,32 +1,22 @@
 import {
   Check,
   ChevronDown,
-  Cloud,
   Download,
   FileJson,
   FileText,
   Loader2,
-  Monitor,
   MoreVertical,
-  Network,
   Send,
   Square,
   Trash2,
 } from "lucide-react";
 import * as React from "react";
 import { cn } from "../../lib/cn";
+import { CONNECTION_METADATA } from "../../lib/destinationClass";
 import { downloadText, safeFilename } from "../../lib/download";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { useArkClient } from "../../lib/useArkClient";
-import type {
-  Conversation,
-  DestinationClass,
-  Message,
-  ModelInfo,
-  ProviderConfig,
-  ProviderHealth,
-  SendChatResult,
-} from "../../types/ark";
+import type { Conversation, Message, ModelInfo, ProviderConfig, ProviderHealth, SendChatResult } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Textarea } from "../../ui/textarea";
 import { SetupBanner } from "../onboarding/SetupBanner";
@@ -736,6 +726,7 @@ export function ChatView({
         <MessageScrollContainer resetKey={conversation.id}>
           <ChatMessageList
             messages={messages}
+            providers={providers}
             canBranch={selectedModelAvailable && !activeAssistant}
             canSwitchBranch={!activeAssistant}
             editingMessageId={editingMessageId}
@@ -793,36 +784,6 @@ export function ChatView({
     </main>
   );
 }
-
-// SEC-001: classification comes from the backend (ProviderConfig.destinationClass, computed
-// in Rust by security::classify_destination) rather than being re-derived here — the frontend
-// must never be the source of truth for a privacy-relevant trust boundary.
-const CONNECTION_METADATA: Record<
-  DestinationClass,
-  { icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; label: string; tone: string; description: string }
-> = {
-  loopback: {
-    icon: Monitor,
-    label: "local",
-    tone: "text-emerald-600 dark:text-emerald-300",
-    description:
-      "Running locally on this device. User prompts, conversation history, and the configured system prompt do not leave this computer.",
-  },
-  private_lan: {
-    icon: Network,
-    label: "network",
-    tone: "text-sky-600 dark:text-sky-300",
-    description:
-      "Connecting to a server on your local network. User prompts, conversation history, and the configured system prompt leave this device but stay within your network.",
-  },
-  public: {
-    icon: Cloud,
-    label: "cloud",
-    tone: "text-amber-600 dark:text-amber-300",
-    description:
-      "Connecting to a remote server outside your network. User prompts, conversation history, and the configured system prompt are sent to this destination.",
-  },
-};
 
 function ProviderStatusIcon({ provider }: { provider?: ProviderConfig }) {
   const destinationClass = provider?.destinationClass ?? "loopback";

@@ -76,13 +76,22 @@ function MarkdownLink({ href, children, ...props }: React.AnchorHTMLAttributes<H
 }
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
-  const [copied, setCopied] = React.useState(false);
+  // UX-011: previously `copy()` had no error handling at all — a rejected `writeText` (denied
+  // permission, an unfocused document, no Clipboard API) left the button showing "Copy" forever
+  // with an uncaught promise rejection and zero indication to the user that anything went wrong.
+  // Confirmed live: this genuinely happens (`NotAllowedError: Document is not focused`) rather
+  // than being a theoretical case.
+  const [copyState, setCopyState] = React.useState<"idle" | "copied" | "failed">("idle");
   const html = React.useMemo(() => highlightCode(code, language), [code, language]);
 
   async function copy() {
-    await navigator.clipboard.writeText(code);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1200);
   }
 
   return (
@@ -95,13 +104,20 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
           onClick={copy}
           className="h-7 text-slate-300 hover:bg-white/10 hover:text-white"
         >
-          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-          {copied ? "Copied" : "Copy"}
+          {copyState === "copied" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
         </Button>
       </div>
       <pre className="m-0 overflow-auto border-0 bg-transparent p-4">
         <code dangerouslySetInnerHTML={{ __html: html }} />
       </pre>
+      {/* UX-011: the Copy/Copied swap above is visual only — a screen-reader user watching
+       * focus, not the icon, previously got no confirmation the copy happened, succeeded, or
+       * failed at all. */}
+      <div role="status" aria-live="polite" className="sr-only">
+        {copyState === "copied" && "Copied to clipboard."}
+        {copyState === "failed" && "Copy failed. Your browser or OS blocked clipboard access."}
+      </div>
     </div>
   );
 }
