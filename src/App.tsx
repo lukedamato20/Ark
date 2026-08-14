@@ -2,6 +2,7 @@ import { Menu, PanelRight } from "lucide-react";
 import * as React from "react";
 import { Drawer } from "./components/Drawer";
 import { RightPanel } from "./components/RightPanel";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useArkController, type ArkController } from "./app/useArkController";
 import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
 import {
@@ -46,6 +47,8 @@ export default function App() {
   const [contextDrawerOpen, setContextDrawerOpen] = React.useState(false);
   const sidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const contextTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const shortcutsTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const shortcutsOpen = useStoreSelector(stores.shell, (state) => state.shortcutsOpen);
 
   // UX-004: a total bootstrap failure means nothing else below loaded — no conversations,
   // providers, or settings — so this replaces the entire shell rather than layering a banner on
@@ -82,10 +85,14 @@ export default function App() {
             triggerRef={sidebarTriggerRef}
             widthPx={288}
           >
-            <ConversationSidebarContainer controller={controller} forceExpanded />
+            <ConversationSidebarContainer
+              controller={controller}
+              forceExpanded
+              shortcutsTriggerRef={shortcutsTriggerRef}
+            />
           </Drawer>
         ) : (
-          <ConversationSidebarContainer controller={controller} />
+          <ConversationSidebarContainer controller={controller} shortcutsTriggerRef={shortcutsTriggerRef} />
         )}
         <React.Suspense fallback={<MainViewFallback />}>
           {view === "settings" ? (
@@ -110,6 +117,11 @@ export default function App() {
         )}
       </div>
       <AppFeedback controller={controller} />
+      <ShortcutsDialog
+        open={shortcutsOpen}
+        onClose={() => controller.setShortcutsOpen(false)}
+        triggerRef={shortcutsTriggerRef}
+      />
     </>
   );
 }
@@ -165,12 +177,14 @@ function ShellTopBar({
 function ConversationSidebarContainer({
   controller,
   forceExpanded = false,
+  shortcutsTriggerRef,
 }: {
   controller: ArkController;
   /** Inside a phone-width drawer (App.tsx): always show full content, and hide the internal
    * rail/expanded toggle — collapsing to a 72px rail inside an already-narrow drawer doesn't
    * make sense, and this must never mutate the persisted desktop/compact collapse preference. */
   forceExpanded?: boolean;
+  shortcutsTriggerRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const stores = useArkStores();
   const catalog = useStore(stores.catalog);
@@ -190,6 +204,8 @@ function ConversationSidebarContainer({
       onSearch={(query) => void controller.searchConversations(query)}
       onLoadMore={() => void controller.loadMoreConversations()}
       onOpenSettings={() => controller.setView("settings")}
+      onOpenShortcuts={() => controller.setShortcutsOpen(true)}
+      shortcutsTriggerRef={shortcutsTriggerRef}
     />
   );
 }
@@ -202,6 +218,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
   const transcript = useStore(stores.transcript);
   const providerState = useStore(stores.providers);
   const booting = useStoreSelector(stores.shell, (state) => state.booting);
+  const focusComposerSignal = useStoreSelector(stores.shell, (state) => state.focusComposerSignal);
   return (
     <ChatView
       conversation={activeConversation}
@@ -210,6 +227,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       models={entityList(providerState.models)}
       providerHealth={providerState.health}
       isLoading={transcript.isLoading || booting}
+      focusComposerSignal={focusComposerSignal}
       onMessagesChange={controller.setMessages}
       onConversationDeleted={controller.deleteActiveConversation}
       onConversationImported={controller.importConversation}

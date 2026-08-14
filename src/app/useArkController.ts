@@ -51,12 +51,18 @@ export interface ArkController {
   toggleSidebar: () => void;
   toggleRightPanel: () => void;
   openSearch: () => void;
+  setShortcutsOpen: (open: boolean) => void;
   setError: (message: string | null) => void;
   setInfo: (message: string | null) => void;
 }
 
 function patchStore<T extends object>(store: { getSnapshot: () => T; set: (next: T) => void }, patch: Partial<T>) {
   store.set({ ...store.getSnapshot(), ...patch });
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
 }
 
 function replaceProvider(
@@ -198,7 +204,8 @@ export function useArkController(): ArkController {
       patchStore(stores.catalog, {
         activeId: id,
       });
-      patchStore(stores.shell, { view: "chat" });
+      const shell = stores.shell.getSnapshot();
+      patchStore(stores.shell, { view: "chat", focusComposerSignal: shell.focusComposerSignal + 1 });
       void loadConversation(id);
     },
     [loadConversation, stores],
@@ -272,7 +279,8 @@ export function useArkController(): ArkController {
         activeId: conversation.id,
       });
       stores.transcript.set({ conversationId: conversation.id, messages: [], isLoading: false });
-      patchStore(stores.shell, { view: "chat" });
+      const shell = stores.shell.getSnapshot();
+      patchStore(stores.shell, { view: "chat", focusComposerSignal: shell.focusComposerSignal + 1 });
     } catch (error) {
       setError(getErrorMessage(error));
     }
@@ -588,9 +596,22 @@ export function useArkController(): ArkController {
     (workspace: WorkspaceInfo) => patchStore(stores.settings, { workspace }),
     [stores],
   );
+  const setShortcutsOpen = React.useCallback(
+    (shortcutsOpen: boolean) => patchStore(stores.shell, { shortcutsOpen }),
+    [stores],
+  );
 
   React.useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // UX-007: "?" (Shift+/ on most layouts, but browsers already report it as `event.key ===
+      // "?"`) is a normal typable character, unlike the Mod-prefixed shortcuts below — it must
+      // not fire while the user is typing it into an editable field.
+      if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+        return;
+      }
+
       const modifier = event.metaKey || event.ctrlKey;
       if (!modifier || event.altKey || event.shiftKey || event.isComposing) return;
       if (event.key.toLowerCase() === "n") {
@@ -606,7 +627,7 @@ export function useArkController(): ArkController {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [createConversation, openSearch, setView]);
+  }, [createConversation, openSearch, setShortcutsOpen, setView]);
 
   return React.useMemo(
     () => ({
@@ -630,6 +651,7 @@ export function useArkController(): ArkController {
       toggleSidebar,
       toggleRightPanel,
       openSearch,
+      setShortcutsOpen,
       setError,
       setInfo,
     }),
@@ -652,6 +674,7 @@ export function useArkController(): ArkController {
       setError,
       setInfo,
       setMessages,
+      setShortcutsOpen,
       setView,
       setWorkspace,
       toggleRightPanel,

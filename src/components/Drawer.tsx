@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import * as React from "react";
+import { useModalKeyboardBehavior } from "../lib/useModalKeyboardBehavior";
 
 interface DrawerProps {
   open: boolean;
@@ -24,22 +25,7 @@ interface DrawerProps {
 export function Drawer({ open, onClose, side, label, triggerRef, widthPx, children }: DrawerProps) {
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   const reducedMotion = useReducedMotion();
-
-  React.useEffect(() => {
-    if (!open) return;
-    // Move focus into the drawer on open — the panel itself is a valid landing spot; content
-    // inside (search input, list items) remains reachable via normal tab order from there.
-    panelRef.current?.focus();
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-        triggerRef.current?.focus();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose, triggerRef]);
+  useModalKeyboardBehavior(open, panelRef, onClose, triggerRef);
 
   const offscreenX = side === "left" ? -widthPx : widthPx;
 

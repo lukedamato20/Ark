@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from "lucide-react";
+import { Keyboard, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from "lucide-react";
 import * as React from "react";
 import { formatDate } from "../../lib/format";
 import type { Conversation } from "../../types/ark";
@@ -23,6 +23,8 @@ interface ConversationSidebarProps {
   onSearch: (query: string) => void;
   onLoadMore: () => void;
   onOpenSettings: () => void;
+  onOpenShortcuts: () => void;
+  shortcutsTriggerRef: React.RefObject<HTMLButtonElement | null>;
 }
 
 export function ConversationSidebar({
@@ -39,6 +41,8 @@ export function ConversationSidebar({
   onSearch,
   onLoadMore,
   onOpenSettings,
+  onOpenShortcuts,
+  shortcutsTriggerRef,
 }: ConversationSidebarProps) {
   const [query, setQuery] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -151,7 +155,17 @@ export function ConversationSidebar({
         )}
       </nav>
 
-      <div className="border-t border-border p-3">
+      <div className="border-t border-border p-3 grid gap-1">
+        <Button
+          ref={shortcutsTriggerRef}
+          className="w-full justify-start"
+          variant="ghost"
+          onClick={onOpenShortcuts}
+          aria-label={collapsed ? "Keyboard shortcuts" : undefined}
+        >
+          <Keyboard className="h-4 w-4" />
+          {!collapsed && "Keyboard shortcuts"}
+        </Button>
         <Button
           className="w-full justify-start"
           variant="ghost"

@@ -74,6 +74,11 @@ export interface ShellState {
   sidebarCollapsed: boolean;
   rightPanelCollapsed: boolean;
   focusSearchSignal: number;
+  /** UX-007: bumped by an explicit "New Chat" or conversation-select action so `ChatView` can
+   * focus the composer — never on a passive background update (a reconciliation refetch, a
+   * provider health poll), which would steal focus from whatever the user is actually doing. */
+  focusComposerSignal: number;
+  shortcutsOpen: boolean;
   error: string | null;
   info: string | null;
 }
@@ -128,6 +133,8 @@ export function createArkStores(initial?: {
       sidebarCollapsed: initial?.sidebarCollapsed ?? false,
       rightPanelCollapsed: initial?.rightPanelCollapsed ?? false,
       focusSearchSignal: 0,
+      focusComposerSignal: 0,
+      shortcutsOpen: false,
       error: null,
       info: null,
     }),

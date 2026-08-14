@@ -51,6 +51,9 @@ interface ChatViewProps {
   models: ModelInfo[];
   providerHealth: Record<string, ProviderHealth>;
   isLoading: boolean;
+  /** UX-007: bumped by an explicit "New Chat"/conversation-select action (see `ShellState`'s own
+   * doc comment) — focuses the composer, never on a passive background update. */
+  focusComposerSignal: number;
   onMessagesChange: (messages: Message[]) => void;
   onConversationDeleted: () => void;
   onConversationImported: (conversation: Conversation) => void;
@@ -67,6 +70,7 @@ export function ChatView({
   models,
   providerHealth,
   isLoading,
+  focusComposerSignal,
   onMessagesChange,
   onConversationDeleted,
   onConversationImported,
@@ -85,8 +89,18 @@ export function ChatView({
   const [editingMessageId, setEditingMessageId] = React.useState<string | null>(null);
   const [activeImport, setActiveImport] = React.useState<ActiveImport | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const previousConversationIdRef = React.useRef<string | undefined>(undefined);
   const autoRefreshedProviderIdsRef = React.useRef<Set<string>>(new Set());
+
+  // UX-007: focuses the composer only on an explicit "New Chat"/select action (see
+  // `focusComposerSignal`'s doc comment on `ShellState`) — a plain `useEffect` on `conversation`
+  // would also fire on the initial bootstrap load and on background reconciliation, stealing
+  // focus from deliberate reading/search. `signal === 0` is the initial/no-action value, so the
+  // very first render never triggers a focus steal either.
+  React.useEffect(() => {
+    if (focusComposerSignal > 0) composerRef.current?.focus();
+  }, [focusComposerSignal]);
 
   React.useEffect(() => {
     let disposed = false;
@@ -742,6 +756,7 @@ export function ChatView({
         <div className="mx-auto max-w-3xl">
           <div className="rounded-lg border border-border bg-card p-2">
             <Textarea
+              ref={composerRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
