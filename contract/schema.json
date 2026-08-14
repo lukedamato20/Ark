@@ -51,7 +51,6 @@
       "defaultModelId",
       "defaultTemperature",
       "defaultMaxTokens",
-      "streamingEnabled",
       "isLocal",
       "allowInsecureRemote",
       "destinationClass",

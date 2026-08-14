@@ -7,6 +7,7 @@ import {
   Loader2,
   MoreVertical,
   Send,
+  SlidersHorizontal,
   Square,
   Trash2,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import { getErrorMessage } from "../../lib/arkErrors";
 import { useArkClient } from "../../lib/useArkClient";
 import type { Conversation, Message, ModelInfo, ProviderConfig, ProviderHealth, SendChatResult } from "../../types/ark";
 import { Button } from "../../ui/button";
+import { Input } from "../../ui/input";
 import { Textarea } from "../../ui/textarea";
 import { SetupBanner } from "../onboarding/SetupBanner";
 import { ChatMessageList } from "./ChatMessageList";
@@ -664,6 +666,12 @@ export function ChatView({
               setModel(nextModel);
             }}
           />
+          <ConversationSettingsButton
+            conversation={conversation}
+            provider={provider}
+            onSettingsSaved={onConversationRenamed}
+            onError={onError}
+          />
           <HeaderOverflowMenu
             conversationSelected={Boolean(conversation)}
             onExportMarkdown={() => void handleExport("markdown")}
@@ -948,6 +956,202 @@ function ProviderModelDropdown({
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const MIN_TEMPERATURE = 0;
+const MAX_TEMPERATURE = 2;
+const MIN_MAX_TOKENS = 1;
+const MAX_MAX_TOKENS = 1_000_000;
+
+/**
+ * FTR-004: the per-conversation system-prompt/temperature/max-tokens override panel — the
+ * "effective settings and their source are visible before send" acceptance criterion. Every
+ * field is independently clearable (an empty draft means "no override, inherit the provider's
+ * current default"), unlike Settings' provider-level `NumberField`, which treats empty as
+ * invalid — a conversation override genuinely has no required value, so this uses its own
+ * light validation rather than forcing that component's different semantics.
+ */
+function ConversationSettingsButton({
+  conversation,
+  provider,
+  onSettingsSaved,
+  onError,
+}: {
+  conversation?: Conversation;
+  provider?: ProviderConfig;
+  onSettingsSaved: (conversation: Conversation) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [open, setOpen] = React.useState(false);
+  const [systemPromptDraft, setSystemPromptDraft] = React.useState("");
+  const [temperatureDraft, setTemperatureDraft] = React.useState("");
+  const [maxTokensDraft, setMaxTokensDraft] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    setSystemPromptDraft(conversation?.systemPrompt ?? "");
+    setTemperatureDraft(conversation?.temperature != null ? String(conversation.temperature) : "");
+    setMaxTokensDraft(conversation?.maxTokens != null ? String(conversation.maxTokens) : "");
+  }, [open, conversation]);
+
+  React.useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const temperatureTrimmed = temperatureDraft.trim();
+  const maxTokensTrimmed = maxTokensDraft.trim();
+  const temperatureNumber = temperatureTrimmed === "" ? null : Number(temperatureTrimmed);
+  const maxTokensNumber = maxTokensTrimmed === "" ? null : Number(maxTokensTrimmed);
+  const temperatureValid =
+    temperatureTrimmed === "" ||
+    (temperatureNumber !== null &&
+      Number.isFinite(temperatureNumber) &&
+      temperatureNumber >= MIN_TEMPERATURE &&
+      temperatureNumber <= MAX_TEMPERATURE);
+  const maxTokensValid =
+    maxTokensTrimmed === "" ||
+    (maxTokensNumber !== null &&
+      Number.isInteger(maxTokensNumber) &&
+      maxTokensNumber >= MIN_MAX_TOKENS &&
+      maxTokensNumber <= MAX_MAX_TOKENS);
+
+  async function save() {
+    if (!conversation || !temperatureValid || !maxTokensValid) return;
+    setSaving(true);
+    try {
+      const updated = await client.updateConversationSettings({
+        id: conversation.id,
+        systemPrompt: systemPromptDraft.trim() || null,
+        temperature: temperatureNumber,
+        maxTokens: maxTokensNumber,
+      });
+      onSettingsSaved(updated);
+      setOpen(false);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const hasOverride = Boolean(
+    conversation?.systemPrompt || conversation?.temperature != null || conversation?.maxTokens != null,
+  );
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={hasOverride ? "Conversation settings (custom overrides active)" : "Conversation settings"}
+        onClick={() => setOpen((value) => !value)}
+        disabled={!conversation}
+        className="relative flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+        {hasOverride && (
+          <span aria-hidden="true" className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
+        )}
+      </button>
+
+      {open && conversation && (
+        <div
+          role="dialog"
+          aria-label="Conversation settings"
+          className="absolute right-0 top-full z-50 mt-1.5 w-80 rounded-lg border border-border bg-popover p-3 shadow-lg"
+        >
+          <div className="grid gap-3">
+            <label className="grid gap-1.5 text-xs font-medium">
+              System prompt
+              <Textarea
+                value={systemPromptDraft}
+                onChange={(event) => setSystemPromptDraft(event.target.value)}
+                rows={3}
+                placeholder="No override — sent without a system prompt"
+                className="text-xs"
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium">
+              Temperature
+              <Input
+                value={temperatureDraft}
+                onChange={(event) => setTemperatureDraft(event.target.value)}
+                inputMode="decimal"
+                placeholder={
+                  provider?.defaultTemperature != null
+                    ? `Provider default (${provider.defaultTemperature})`
+                    : "Provider default (none)"
+                }
+                aria-invalid={!temperatureValid}
+                className={cn(!temperatureValid && "border-destructive focus-visible:ring-destructive")}
+              />
+              {!temperatureValid && (
+                <span role="alert" className="font-normal text-destructive">
+                  Must be between {MIN_TEMPERATURE} and {MAX_TEMPERATURE}, or empty to use the provider default.
+                </span>
+              )}
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium">
+              Max tokens
+              <Input
+                value={maxTokensDraft}
+                onChange={(event) => setMaxTokensDraft(event.target.value)}
+                inputMode="numeric"
+                placeholder={
+                  provider?.defaultMaxTokens != null
+                    ? `Provider default (${provider.defaultMaxTokens})`
+                    : "Provider default (none)"
+                }
+                aria-invalid={!maxTokensValid}
+                className={cn(!maxTokensValid && "border-destructive focus-visible:ring-destructive")}
+              />
+              {!maxTokensValid && (
+                <span role="alert" className="font-normal text-destructive">
+                  Must be a whole number between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}, or empty to use the provider
+                  default.
+                </span>
+              )}
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void save()}
+                disabled={saving || !temperatureValid || !maxTokensValid}
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Save
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

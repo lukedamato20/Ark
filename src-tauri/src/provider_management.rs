@@ -28,7 +28,6 @@ pub struct UpdateProviderRequest {
     pub default_model_id: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,
-    pub streaming_enabled: bool,
     /// SEC-001: must be `true` to save a base URL that classifies as a public/remote
     /// destination. Defaults to `false` when omitted so older frontend builds fail closed.
     #[serde(default)]
@@ -97,7 +96,6 @@ pub fn update_provider(
             default_model_id: request.default_model_id.as_deref(),
             temperature,
             max_tokens,
-            streaming_enabled: request.streaming_enabled,
             acknowledge_remote_risk: request.acknowledge_remote_risk,
             convert_to_remote_provider: request.convert_to_remote_provider,
             allow_insecure_remote: request.allow_insecure_remote,
@@ -522,7 +520,6 @@ mod tests {
                 default_model_id: Some("llama3.2:latest".to_string()),
                 temperature: Some(0.5),
                 max_tokens: Some(1024),
-                streaming_enabled: true,
                 acknowledge_remote_risk: false,
                 convert_to_remote_provider: false,
                 allow_insecure_remote: false,
@@ -549,7 +546,6 @@ mod tests {
                 default_model_id: None,
                 temperature: None,
                 max_tokens: None,
-                streaming_enabled: true,
                 acknowledge_remote_risk: false,
                 convert_to_remote_provider: false,
                 allow_insecure_remote: false,

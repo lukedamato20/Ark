@@ -62,13 +62,19 @@ export interface UpdateProviderInput {
   defaultModelId?: string | null;
   temperature?: number | null;
   maxTokens?: number | null;
-  streamingEnabled: boolean;
   /** SEC-001: must be true to save a base URL that classifies as a public/remote destination. */
   acknowledgeRemoteRisk?: boolean;
   /** Explicit transition from the local-only provider class to Remote. */
   convertToRemoteProvider?: boolean;
   /** Explicit development-mode exception for non-loopback HTTP. */
   allowInsecureRemote?: boolean;
+}
+
+export interface UpdateConversationSettingsInput {
+  id: string;
+  systemPrompt?: string | null;
+  temperature?: number | null;
+  maxTokens?: number | null;
 }
 
 export interface ListConversationsInput {
@@ -133,6 +139,9 @@ export interface ArkClient {
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
   createConversation(title?: string): Promise<Conversation>;
   renameConversation(id: string, title: string): Promise<Conversation>;
+  /** FTR-004: each field independently `null`/omitted clears that override tier back to
+   * "inherit the provider default" — always send the complete current draft, not a partial patch. */
+  updateConversationSettings(input: UpdateConversationSettingsInput): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
   getConversationMessages(conversationId: string): Promise<Message[]>;
   getAssistantAlternatives(conversationId: string, messageId: string): Promise<BranchAlternative[]>;
@@ -239,6 +248,15 @@ export function createTauriArkClient(): ArkClient {
       }),
     createConversation: (title) => invoke<Conversation>("create_conversation", { title }),
     renameConversation: (id, title) => invoke<Conversation>("rename_conversation", { request: { id, title } }),
+    updateConversationSettings: (input) =>
+      invoke<Conversation>("update_conversation_settings", {
+        request: {
+          id: input.id,
+          systemPrompt: input.systemPrompt ?? null,
+          temperature: input.temperature ?? null,
+          maxTokens: input.maxTokens ?? null,
+        },
+      }),
     deleteConversation: (id) => invoke<void>("delete_conversation", { id }),
     getConversationMessages: (conversationId) => invoke<Message[]>("get_conversation_messages", { conversationId }),
     getAssistantAlternatives: (conversationId, messageId) =>
@@ -295,7 +313,6 @@ export function createTauriArkClient(): ArkClient {
           defaultModelId: input.defaultModelId ?? null,
           temperature: input.temperature ?? null,
           maxTokens: input.maxTokens ?? null,
-          streamingEnabled: input.streamingEnabled,
           acknowledgeRemoteRisk: input.acknowledgeRemoteRisk ?? false,
           convertToRemoteProvider: input.convertToRemoteProvider ?? false,
           allowInsecureRemote: input.allowInsecureRemote ?? false,
@@ -388,6 +405,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     listConversations: async () => ({ items: [], nextCursor: null }),
     createConversation: notImplemented("createConversation"),
     renameConversation: notImplemented("renameConversation"),
+    updateConversationSettings: notImplemented("updateConversationSettings"),
     deleteConversation: async () => undefined,
     getConversationMessages: async () => [],
     getAssistantAlternatives: async () => [],

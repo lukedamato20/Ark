@@ -90,6 +90,31 @@ pub fn validate_max_tokens(value: Option<i64>) -> Result<Option<i64>, AppError> 
     Ok(Some(value))
 }
 
+/// FTR-004: a generous bound, not a tuned limit — large enough for genuinely long instructions,
+/// small enough to keep a single conversation setting from becoming an unbounded-size liability
+/// (every provider request re-sends it in full on every message).
+pub const MAX_SYSTEM_PROMPT_CHARS: usize = 32_000;
+
+/// Validates a per-conversation system prompt override. `None` or a blank/whitespace-only
+/// string both mean "no override, inherit the provider default" — trimmed and normalized to
+/// `None` rather than persisting an empty string, so `Option::is_some()` is always a reliable
+/// "the user actually set one" check everywhere this field is read.
+pub fn validate_system_prompt(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_SYSTEM_PROMPT_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "System prompt must be at most {MAX_SYSTEM_PROMPT_CHARS} characters."
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Validates a workspace root path before it is persisted/probed. A NUL byte is rejected
 /// because it silently truncates the effective path in several OS filesystem APIs (a path
 /// with a NUL is not a valid Rust `&str`-derived filesystem path assumption on any supported
@@ -477,5 +502,43 @@ mod tests {
 
         let _ = std::fs::remove_file(&target);
         let _ = std::fs::remove_file(&link);
+    }
+
+    #[test]
+    fn system_prompt_none_always_passes() {
+        assert_eq!(validate_system_prompt(None).unwrap(), None);
+    }
+
+    #[test]
+    fn system_prompt_normalizes_blank_and_whitespace_only_input_to_none() {
+        assert_eq!(validate_system_prompt(Some(String::new())).unwrap(), None);
+        assert_eq!(
+            validate_system_prompt(Some("   \n\t  ".to_string())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn system_prompt_trims_surrounding_whitespace() {
+        assert_eq!(
+            validate_system_prompt(Some("  Be concise.  ".to_string())).unwrap(),
+            Some("Be concise.".to_string())
+        );
+    }
+
+    #[test]
+    fn system_prompt_accepts_up_to_the_character_limit() {
+        let value = "a".repeat(MAX_SYSTEM_PROMPT_CHARS);
+        assert_eq!(
+            validate_system_prompt(Some(value.clone())).unwrap(),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn system_prompt_rejects_over_the_character_limit() {
+        let value = "a".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
+        let error = validate_system_prompt(Some(value)).unwrap_err();
+        assert_eq!(error.code, "invalid_input");
     }
 }

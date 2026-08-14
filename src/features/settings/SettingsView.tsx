@@ -674,7 +674,6 @@ function ProviderForm({
         defaultModelId: defaultModelId || null,
         temperature: temperatureValidation.parsed,
         maxTokens: maxTokensValidation.parsed,
-        streamingEnabled: true,
         acknowledgeRemoteRisk,
         convertToRemoteProvider,
         allowInsecureRemote,

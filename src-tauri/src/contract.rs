@@ -130,7 +130,6 @@ fn sample_provider_config() -> ProviderConfig {
         default_model_id: None,
         default_temperature: Some(0.7),
         default_max_tokens: Some(2048),
-        streaming_enabled: true,
         is_local: true,
         allow_insecure_remote: false,
         destination_class: "loopback".to_string(),

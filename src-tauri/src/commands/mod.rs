@@ -22,6 +22,19 @@ pub struct RenameConversationRequest {
     pub title: String,
 }
 
+/// FTR-004: each field independently `Option` — `None`/blank clears that override tier back to
+/// "inherit the provider default," matching `validation::validate_system_prompt`'s normalization.
+/// The frontend always sends its complete, already-merged current draft (same convention as
+/// `DeviceSettings`), so there is no partial-update/merge logic here.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConversationSettingsRequest {
+    pub id: String,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<i64>,
+}
+
 pub use crate::generation::{EditUserMessageRequest, RegenerateAssistantMessageRequest};
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +135,23 @@ pub fn rename_conversation(
 pub fn delete_conversation(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let id = crate::validation::validate_entity_id(&id, "Conversation ID")?;
     lock_db(&state)?.delete_conversation(id)
+}
+
+#[tauri::command]
+pub fn update_conversation_settings(
+    state: State<'_, AppState>,
+    request: UpdateConversationSettingsRequest,
+) -> Result<crate::chat::Conversation, AppError> {
+    let id = crate::validation::validate_entity_id(&request.id, "Conversation ID")?.to_string();
+    let system_prompt = crate::validation::validate_system_prompt(request.system_prompt)?;
+    let temperature = crate::validation::validate_temperature(request.temperature)?;
+    let max_tokens = crate::validation::validate_max_tokens(request.max_tokens)?;
+    lock_db(&state)?.update_conversation_settings(
+        &id,
+        system_prompt.as_deref(),
+        temperature,
+        max_tokens,
+    )
 }
 
 #[tauri::command]

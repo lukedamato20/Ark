@@ -41,7 +41,8 @@ use commands::{
     restore_workspace_backup, restore_workspace_recovery_key, retry_workspace_open,
     rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, send_chat_message,
     set_workspace, start_built_in_runtime, start_pending_stream, stop_built_in_runtime,
-    switch_active_branch, update_device_settings, update_provider, upsert_provider_secret,
+    switch_active_branch, update_conversation_settings, update_device_settings, update_provider,
+    upsert_provider_secret,
 };
 use db::Database;
 use errors::AppError;
@@ -228,6 +229,7 @@ pub fn run() {
             list_conversations,
             create_conversation,
             rename_conversation,
+            update_conversation_settings,
             delete_conversation,
             get_conversation_messages,
             get_assistant_alternatives,

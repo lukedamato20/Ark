@@ -80,7 +80,6 @@ export interface ProviderConfig {
   defaultModelId?: string | null;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
-  streamingEnabled: boolean;
   isLocal: boolean;
   /** SEC-001: explicit development-mode exception; never inferred from the URL in the UI. */
   allowInsecureRemote: boolean;

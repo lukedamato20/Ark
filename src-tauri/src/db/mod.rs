@@ -25,7 +25,6 @@ pub struct UpdateProviderChanges<'a> {
     pub default_model_id: Option<&'a str>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,
-    pub streaming_enabled: bool,
     /// SEC-001: must be `true` to save a base URL that classifies as a public/remote
     /// destination.
     pub acknowledge_remote_risk: bool,
@@ -75,6 +74,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 5,
         name: "0005_provider_routing_policy",
         sql: include_str!("../../migrations/0005_provider_routing_policy.sql"),
+    },
+    MigrationDef {
+        version: 6,
+        name: "0006_remove_provider_streaming_toggle",
+        sql: include_str!("../../migrations/0006_remove_provider_streaming_toggle.sql"),
     },
 ];
 
@@ -868,8 +872,8 @@ impl Database {
             self.connection.execute(
                 "INSERT INTO providers (
                     id, name, provider_type, base_url, default_temperature, default_max_tokens,
-                    streaming_enabled, is_local, is_enabled, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1, 1, ?7, ?7)",
+                    is_local, is_enabled, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1, ?7, ?7)",
                 params![
                     id,
                     name,
@@ -961,23 +965,23 @@ impl Database {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "New conversation".to_string());
 
-        // ARC-006: no `streaming_enabled` column here anymore — see
-        // `conversations.streaming_enabled`'s removal in migration 0003. Whether a generation
-        // streams is a provider-level protocol question (`providers.streaming_enabled`), not a
-        // per-conversation one; the old column was a snapshot copy of the provider's value taken
-        // at creation time that nothing ever read back to make a decision.
+        // FTR-004: `temperature`/`max_tokens`/`system_prompt` start `NULL` — "no conversation-
+        // level override, inherit the provider's current default" — rather than snapshotting
+        // the provider's values at creation time. A snapshot copy would freeze in whatever the
+        // provider default happened to be at creation and never track later changes to it,
+        // which is the exact "sources of truth are duplicated" problem this task's own Reason
+        // field names. `generation.rs` resolves the real three-tier precedence (per-request
+        // override → conversation override → live provider default) at generation time instead.
         self.connection.execute(
             "INSERT INTO conversations (
-                id, title, created_at, updated_at, provider_id, model_id, temperature, max_tokens, archived
-            ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, 0)",
+                id, title, created_at, updated_at, provider_id, model_id, archived
+            ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, 0)",
             params![
                 id,
                 conversation_title,
                 timestamp,
                 provider.id,
                 provider.default_model_id,
-                provider.default_temperature,
-                provider.default_max_tokens,
             ],
         )?;
 
@@ -1025,6 +1029,28 @@ impl Database {
         self.connection.execute(
             "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3",
             params![trimmed, now(), id],
+        )?;
+
+        self.get_conversation(id)
+    }
+
+    /// FTR-004: sets this conversation's system-prompt/temperature/max-tokens override tier.
+    /// Each is independently `Option` — `None` means "no override, inherit the provider's
+    /// current default," not "unset the value to zero/empty." Callers pass already-validated
+    /// values (`validation::validate_system_prompt`/`validate_temperature`/`validate_max_tokens`
+    /// have already normalized blank input to `None`), so this is a plain, unconditional write.
+    pub fn update_conversation_settings(
+        &self,
+        id: &str,
+        system_prompt: Option<&str>,
+        temperature: Option<f64>,
+        max_tokens: Option<i64>,
+    ) -> Result<Conversation, AppError> {
+        self.connection.execute(
+            "UPDATE conversations
+             SET system_prompt = ?1, temperature = ?2, max_tokens = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![system_prompt, temperature, max_tokens, now(), id],
         )?;
 
         self.get_conversation(id)
@@ -1490,7 +1516,7 @@ impl Database {
     pub fn list_providers(&self) -> Result<Vec<ProviderConfig>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, provider_type, base_url, api_key_ref, default_model_id,
-                default_temperature, default_max_tokens, streaming_enabled, is_local,
+                default_temperature, default_max_tokens, is_local,
                 allow_insecure_remote, is_enabled, created_at, updated_at
              FROM providers
              ORDER BY name ASC",
@@ -1503,7 +1529,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, name, provider_type, base_url, api_key_ref, default_model_id,
-                    default_temperature, default_max_tokens, streaming_enabled, is_local,
+                    default_temperature, default_max_tokens, is_local,
                     allow_insecure_remote, is_enabled, created_at, updated_at
                  FROM providers
                  WHERE id = ?1",
@@ -1540,15 +1566,14 @@ impl Database {
         self.connection.execute(
             "UPDATE providers
              SET base_url = ?1, default_model_id = ?2, default_temperature = ?3,
-                default_max_tokens = ?4, streaming_enabled = ?5, is_local = ?6,
-                allow_insecure_remote = ?7, updated_at = ?8
-             WHERE id = ?9",
+                default_max_tokens = ?4, is_local = ?5,
+                allow_insecure_remote = ?6, updated_at = ?7
+             WHERE id = ?8",
             params![
                 trimmed_url,
                 changes.default_model_id,
                 changes.temperature,
                 changes.max_tokens,
-                changes.streaming_enabled as i64,
                 class.is_trusted_local() as i64,
                 changes.allow_insecure_remote as i64,
                 now(),
@@ -1938,7 +1963,7 @@ fn map_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConfig> {
     let class = base_url
         .as_deref()
         .and_then(|url| crate::security::classify_destination(url).ok());
-    let is_local = row.get::<_, i64>(9)? != 0;
+    let is_local = row.get::<_, i64>(8)? != 0;
     let destination_class = class.map(|c| c.as_str().to_string()).unwrap_or_else(|| {
         if base_url.is_none() {
             "loopback".to_string()
@@ -1959,14 +1984,13 @@ fn map_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConfig> {
         default_model_id: row.get(5)?,
         default_temperature: row.get(6)?,
         default_max_tokens: row.get(7)?,
-        streaming_enabled: row.get::<_, i64>(8)? != 0,
         is_local,
-        allow_insecure_remote: row.get::<_, i64>(10)? != 0,
+        allow_insecure_remote: row.get::<_, i64>(9)? != 0,
         destination_class,
         capabilities,
-        is_enabled: row.get::<_, i64>(11)? != 0,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        is_enabled: row.get::<_, i64>(10)? != 0,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -2789,6 +2813,73 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    /// Applies migrations 1–5 directly, including a pre-existing `providers` row that still has
+    /// the `streaming_enabled` column migration 6 drops — so the drop can be exercised against
+    /// a real row that actually has the column, not only a schema created fresh without it.
+    fn seed_migration_0005_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..5] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 5 as applied");
+
+        let provider_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO providers (
+                    id, name, provider_type, base_url, default_temperature, default_max_tokens,
+                    streaming_enabled, is_local, allow_insecure_remote, is_enabled, created_at, updated_at
+                 ) VALUES (?1, 'Release-5 provider', 'ollama', 'http://localhost:11434', 0.7, 2048, 1, 1, 0, 1, ?2, ?2)",
+                params![&provider_id, now()],
+            )
+            .expect("seed a migration-5 provider row, still carrying the column migration 6 drops");
+        provider_id
+    }
+
+    /// FTR-004 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 6, the current latest — a pre-existing provider row from a migration-5
+    /// workspace must survive the `streaming_enabled` column actually being dropped, with every
+    /// other field intact.
+    #[test]
+    fn upgrading_a_migration_0005_workspace_removes_the_streaming_toggle_column() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let provider_id = seed_migration_0005_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-5 workspace succeeds");
+        let provider = db
+            .get_provider(&provider_id)
+            .expect("pre-existing provider readable after upgrade");
+        assert_eq!(provider.name, "Release-5 provider");
+        assert!(provider.is_local);
+
+        let error = db
+            .connection
+            .prepare("SELECT streaming_enabled FROM providers LIMIT 1")
+            .expect_err("the streaming_enabled column must no longer exist after migration 6");
+        assert!(
+            error.to_string().to_lowercase().contains("no such column"),
+            "expected a 'no such column' error, got: {error}"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -2866,6 +2957,54 @@ mod tests {
             .expect("conversations list")
             .items
             .is_empty());
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn new_conversations_start_with_no_settings_override_and_inherit_the_provider_default() {
+        let (db, path) = test_db();
+
+        let created = db
+            .create_conversation(Some("Fresh".to_string()))
+            .expect("conversation created");
+        assert_eq!(created.system_prompt, None);
+        assert_eq!(created.temperature, None);
+        assert_eq!(created.max_tokens, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_conversation_settings_sets_and_clears_each_override_independently() {
+        let (db, path) = test_db();
+        let created = db
+            .create_conversation(Some("Overrides".to_string()))
+            .expect("conversation created");
+
+        let updated = db
+            .update_conversation_settings(&created.id, Some("Be terse."), Some(0.3), Some(512))
+            .expect("settings updated");
+        assert_eq!(updated.system_prompt.as_deref(), Some("Be terse."));
+        assert_eq!(updated.temperature, Some(0.3));
+        assert_eq!(updated.max_tokens, Some(512));
+
+        // Re-fetching independently proves the write was actually persisted, not just returned.
+        let refetched = db
+            .get_conversation(&created.id)
+            .expect("conversation refetched");
+        assert_eq!(refetched.system_prompt.as_deref(), Some("Be terse."));
+        assert_eq!(refetched.temperature, Some(0.3));
+        assert_eq!(refetched.max_tokens, Some(512));
+
+        let cleared = db
+            .update_conversation_settings(&created.id, None, None, None)
+            .expect("settings cleared");
+        assert_eq!(cleared.system_prompt, None);
+        assert_eq!(cleared.temperature, None);
+        assert_eq!(cleared.max_tokens, None);
 
         drop(db);
         let _ = fs::remove_file(path);
@@ -3997,7 +4136,6 @@ mod tests {
                 default_model_id: None,
                 temperature: Some(0.7),
                 max_tokens: Some(2048),
-                streaming_enabled: true,
                 acknowledge_remote_risk,
                 convert_to_remote_provider,
                 allow_insecure_remote,

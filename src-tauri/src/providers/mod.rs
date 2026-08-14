@@ -23,7 +23,6 @@ pub struct ProviderConfig {
     pub default_model_id: Option<String>,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
-    pub streaming_enabled: bool,
     pub is_local: bool,
     /// Persisted, explicitly warned development-mode exception for HTTP outside loopback.
     pub allow_insecure_remote: bool,
@@ -1178,7 +1177,6 @@ mod tests {
             default_model_id: None,
             default_temperature: Some(0.7),
             default_max_tokens: Some(2048),
-            streaming_enabled: true,
             is_local: true,
             allow_insecure_remote: false,
             destination_class: "loopback".to_string(),

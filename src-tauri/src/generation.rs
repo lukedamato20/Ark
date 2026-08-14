@@ -7,14 +7,81 @@
 //! acceptance evidence that no regression was introduced.
 
 use crate::chat::{ChatMessage, Message, SendChatRequest, SendChatResult, StreamEvent};
+use crate::db::Database;
 use crate::errors::AppError;
 use crate::providers::{ProviderChatRequest, ProviderConfig, ProviderRegistry};
 use crate::AppState;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
+
+/// FTR-004: where an effective generation setting actually came from — recorded in the
+/// assistant message's provenance so "what settings produced this response" is answerable
+/// later without re-deriving it from the conversation/provider rows as they exist *now* (which
+/// may have since changed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SettingSource {
+    /// An explicit per-request override — today only ever sent by a caller that supplies a
+    /// value distinct from both tiers below (the frontend does not currently expose one, but
+    /// the field/tier has existed since COR-003 and remains the highest-precedence override).
+    Request,
+    Conversation,
+    ProviderDefault,
+}
+
+/// FTR-004: the three-tier precedence — request override, then this conversation's own
+/// setting, then the provider's current default — resolved once per generation call, not
+/// three times with divergent logic at each of `send_chat_message`/`edit_user_message`/
+/// `regenerate_assistant_message`.
+fn resolve_setting<T>(
+    request_value: Option<T>,
+    conversation_value: Option<T>,
+    provider_value: Option<T>,
+) -> (Option<T>, Option<SettingSource>) {
+    if let Some(value) = request_value {
+        return (Some(value), Some(SettingSource::Request));
+    }
+    if let Some(value) = conversation_value {
+        return (Some(value), Some(SettingSource::Conversation));
+    }
+    if let Some(value) = provider_value {
+        return (Some(value), Some(SettingSource::ProviderDefault));
+    }
+    (None, None)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationProvenance {
+    provider_id: String,
+    model: String,
+    temperature: Option<f64>,
+    temperature_source: Option<SettingSource>,
+    max_tokens: Option<i64>,
+    max_tokens_source: Option<SettingSource>,
+    /// Whether this conversation's own system-prompt override was applied to this generation —
+    /// not the prompt text itself, which stays out of provenance metadata the same way message
+    /// content itself is never duplicated into it.
+    system_prompt_applied: bool,
+}
+
+/// FTR-004 acceptance: "effective settings ... stored in response provenance." Best-effort — a
+/// serialization/write failure here must never fail the generation itself (the message and its
+/// content remain fully usable without provenance), so this silently drops the error rather
+/// than propagating an `AppError` that would abort an otherwise-successful send/edit/regenerate.
+fn record_generation_provenance(
+    db: &Database,
+    assistant_message_id: &str,
+    provenance: &GenerationProvenance,
+) {
+    let Ok(json) = serde_json::to_string(provenance) else {
+        return;
+    };
+    let _ = db.set_message_metadata_json(assistant_message_id, &json);
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,28 +202,56 @@ pub fn send_chat_message(
                 &request.model,
             )?;
 
-            let mut provider_messages: Vec<ChatMessage> = active_messages
-                .into_iter()
-                .filter(|message| {
-                    message.role == "user"
-                        || message.role == "assistant"
-                        || message.role == "system"
-                })
-                .map(|message| ChatMessage {
-                    role: message.role,
-                    content: message.content,
-                })
-                .collect();
+            let mut provider_messages: Vec<ChatMessage> = Vec::new();
+            if let Some(system_prompt) = &conversation.system_prompt {
+                provider_messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                });
+            }
+            provider_messages.extend(active_messages.into_iter().filter_map(|message| {
+                matches!(message.role.as_str(), "user" | "assistant" | "system").then_some(
+                    ChatMessage {
+                        role: message.role,
+                        content: message.content,
+                    },
+                )
+            }));
             provider_messages.push(ChatMessage {
                 role: "user".to_string(),
                 content: content.to_string(),
             });
 
+            let (effective_temperature, temperature_source) = resolve_setting(
+                temperature,
+                conversation.temperature,
+                provider.default_temperature,
+            );
+            let (effective_max_tokens, max_tokens_source) = resolve_setting(
+                max_tokens,
+                conversation.max_tokens,
+                provider.default_max_tokens,
+            );
+
+            record_generation_provenance(
+                &db,
+                &assistant_message.id,
+                &GenerationProvenance {
+                    provider_id: request.provider_id.clone(),
+                    model: request.model.clone(),
+                    temperature: effective_temperature,
+                    temperature_source,
+                    max_tokens: effective_max_tokens,
+                    max_tokens_source,
+                    system_prompt_applied: conversation.system_prompt.is_some(),
+                },
+            );
+
             let provider_request = ProviderChatRequest {
                 model: request.model.clone(),
                 messages: provider_messages,
-                temperature: temperature.or(provider.default_temperature),
-                max_tokens: max_tokens.or(provider.default_max_tokens),
+                temperature: effective_temperature,
+                max_tokens: effective_max_tokens,
                 user_deadline: None,
             };
 
@@ -213,6 +308,7 @@ pub fn edit_user_message(
         // COR-004: the edit's new user-message revision, its assistant placeholder, and the
         // conversation pointer update must commit atomically — see send_chat_message.
         db.transaction(|| {
+            let conversation = db.get_conversation(&request.conversation_id)?;
             let provider = db.get_provider(&request.provider_id)?;
             let parent_id = original_message.parent_message_id.as_deref();
             let history = if let Some(parent_message_id) = parent_id {
@@ -250,28 +346,56 @@ pub fn edit_user_message(
                 &request.model,
             )?;
 
-            let mut provider_messages: Vec<ChatMessage> = history
-                .into_iter()
-                .filter(|message| {
-                    message.role == "user"
-                        || message.role == "assistant"
-                        || message.role == "system"
-                })
-                .map(|message| ChatMessage {
-                    role: message.role,
-                    content: message.content,
-                })
-                .collect();
+            let mut provider_messages: Vec<ChatMessage> = Vec::new();
+            if let Some(system_prompt) = &conversation.system_prompt {
+                provider_messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                });
+            }
+            provider_messages.extend(history.into_iter().filter_map(|message| {
+                matches!(message.role.as_str(), "user" | "assistant" | "system").then_some(
+                    ChatMessage {
+                        role: message.role,
+                        content: message.content,
+                    },
+                )
+            }));
             provider_messages.push(ChatMessage {
                 role: "user".to_string(),
                 content: content.to_string(),
             });
 
+            let (effective_temperature, temperature_source) = resolve_setting(
+                temperature,
+                conversation.temperature,
+                provider.default_temperature,
+            );
+            let (effective_max_tokens, max_tokens_source) = resolve_setting(
+                max_tokens,
+                conversation.max_tokens,
+                provider.default_max_tokens,
+            );
+
+            record_generation_provenance(
+                &db,
+                &assistant_message.id,
+                &GenerationProvenance {
+                    provider_id: request.provider_id.clone(),
+                    model: request.model.clone(),
+                    temperature: effective_temperature,
+                    temperature_source,
+                    max_tokens: effective_max_tokens,
+                    max_tokens_source,
+                    system_prompt_applied: conversation.system_prompt.is_some(),
+                },
+            );
+
             let provider_request = ProviderChatRequest {
                 model: request.model.clone(),
                 messages: provider_messages,
-                temperature: temperature.or(provider.default_temperature),
-                max_tokens: max_tokens.or(provider.default_max_tokens),
+                temperature: effective_temperature,
+                max_tokens: effective_max_tokens,
                 user_deadline: None,
             };
 
@@ -334,6 +458,7 @@ pub fn regenerate_assistant_message(
             ));
         }
 
+        let conversation = db.get_conversation(&request.conversation_id)?;
         let provider = db.get_provider(&request.provider_id)?;
         let history = db.get_message_path(parent_message_id)?;
 
@@ -358,24 +483,52 @@ pub fn regenerate_assistant_message(
                 &request.model,
             )?;
 
-            let provider_messages: Vec<ChatMessage> = history
-                .into_iter()
-                .filter(|message| {
-                    message.role == "user"
-                        || message.role == "assistant"
-                        || message.role == "system"
-                })
-                .map(|message| ChatMessage {
-                    role: message.role,
-                    content: message.content,
-                })
-                .collect();
+            let mut provider_messages: Vec<ChatMessage> = Vec::new();
+            if let Some(system_prompt) = &conversation.system_prompt {
+                provider_messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                });
+            }
+            provider_messages.extend(history.into_iter().filter_map(|message| {
+                matches!(message.role.as_str(), "user" | "assistant" | "system").then_some(
+                    ChatMessage {
+                        role: message.role,
+                        content: message.content,
+                    },
+                )
+            }));
+
+            let (effective_temperature, temperature_source) = resolve_setting(
+                temperature,
+                conversation.temperature,
+                provider.default_temperature,
+            );
+            let (effective_max_tokens, max_tokens_source) = resolve_setting(
+                max_tokens,
+                conversation.max_tokens,
+                provider.default_max_tokens,
+            );
+
+            record_generation_provenance(
+                &db,
+                &assistant_message.id,
+                &GenerationProvenance {
+                    provider_id: request.provider_id.clone(),
+                    model: request.model.clone(),
+                    temperature: effective_temperature,
+                    temperature_source,
+                    max_tokens: effective_max_tokens,
+                    max_tokens_source,
+                    system_prompt_applied: conversation.system_prompt.is_some(),
+                },
+            );
 
             let provider_request = ProviderChatRequest {
                 model: request.model.clone(),
                 messages: provider_messages,
-                temperature: temperature.or(provider.default_temperature),
-                max_tokens: max_tokens.or(provider.default_max_tokens),
+                temperature: effective_temperature,
+                max_tokens: effective_max_tokens,
                 user_deadline: None,
             };
 
@@ -1312,7 +1465,6 @@ mod tests {
             default_model_id: None,
             default_temperature: None,
             default_max_tokens: None,
-            streaming_enabled: true,
             is_local: true,
             allow_insecure_remote: false,
             destination_class: "loopback".to_string(),
@@ -1477,5 +1629,136 @@ mod tests {
         ] {
             let _ = fs::remove_file(candidate);
         }
+    }
+
+    // ── FTR-004: three-tier settings precedence + provenance ───────────────────────────
+
+    #[test]
+    fn resolve_setting_prefers_request_then_conversation_then_provider_default() {
+        assert_eq!(
+            resolve_setting(Some(1), Some(2), Some(3)),
+            (Some(1), Some(SettingSource::Request))
+        );
+        assert_eq!(
+            resolve_setting(None, Some(2), Some(3)),
+            (Some(2), Some(SettingSource::Conversation))
+        );
+        assert_eq!(
+            resolve_setting(None, None, Some(3)),
+            (Some(3), Some(SettingSource::ProviderDefault))
+        );
+        assert_eq!(resolve_setting::<i64>(None, None, None), (None, None));
+    }
+
+    #[test]
+    fn send_chat_message_records_provider_default_provenance_when_no_override_is_set() {
+        let (state, path) = test_state();
+        let conversation = state
+            .db
+            .lock()
+            .expect("database lock")
+            .create_conversation(Some("Provenance default".to_string()))
+            .expect("conversation created");
+
+        let result = send_chat_message(&state, basic_send_request(conversation.id, "hello"))
+            .expect("generation queued");
+
+        let db = state.db.lock().expect("database lock");
+        let provider = db
+            .get_provider(DEFAULT_PROVIDER_ID)
+            .expect("default provider readable");
+        let assistant = db
+            .get_message(&result.assistant_message_id)
+            .expect("assistant placeholder readable");
+        let metadata = assistant
+            .metadata_json
+            .expect("provenance metadata was recorded");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata).expect("provenance is valid JSON");
+        assert_eq!(parsed["temperature"].as_f64(), provider.default_temperature);
+        assert_eq!(parsed["temperatureSource"], "provider_default");
+        assert_eq!(parsed["maxTokens"].as_i64(), provider.default_max_tokens);
+        assert_eq!(parsed["maxTokensSource"], "provider_default");
+        assert_eq!(parsed["systemPromptApplied"], false);
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn send_chat_message_records_conversation_override_provenance_and_applies_the_system_prompt() {
+        let (state, path) = test_state();
+        let conversation = {
+            let db = state.db.lock().expect("database lock");
+            let conversation = db
+                .create_conversation(Some("Provenance override".to_string()))
+                .expect("conversation created");
+            db.update_conversation_settings(
+                &conversation.id,
+                Some("Be terse."),
+                Some(0.1),
+                Some(64),
+            )
+            .expect("conversation settings saved")
+        };
+
+        let result = send_chat_message(&state, basic_send_request(conversation.id, "hello"))
+            .expect("generation queued");
+
+        let db = state.db.lock().expect("database lock");
+        let assistant = db
+            .get_message(&result.assistant_message_id)
+            .expect("assistant placeholder readable");
+        let metadata = assistant
+            .metadata_json
+            .expect("provenance metadata was recorded");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata).expect("provenance is valid JSON");
+        assert_eq!(parsed["temperature"].as_f64(), Some(0.1));
+        assert_eq!(parsed["temperatureSource"], "conversation");
+        assert_eq!(parsed["maxTokens"].as_i64(), Some(64));
+        assert_eq!(parsed["maxTokensSource"], "conversation");
+        assert_eq!(parsed["systemPromptApplied"], true);
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn send_chat_message_request_override_takes_precedence_over_the_conversation_setting() {
+        let (state, path) = test_state();
+        let conversation = {
+            let db = state.db.lock().expect("database lock");
+            let conversation = db
+                .create_conversation(Some("Request wins".to_string()))
+                .expect("conversation created");
+            db.update_conversation_settings(&conversation.id, None, Some(0.1), Some(64))
+                .expect("conversation settings saved")
+        };
+
+        let mut request = basic_send_request(conversation.id, "hello");
+        request.temperature = Some(0.9);
+        request.max_tokens = Some(128);
+        let result = send_chat_message(&state, request).expect("generation queued");
+
+        let db = state.db.lock().expect("database lock");
+        let assistant = db
+            .get_message(&result.assistant_message_id)
+            .expect("assistant placeholder readable");
+        let metadata = assistant
+            .metadata_json
+            .expect("provenance metadata was recorded");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata).expect("provenance is valid JSON");
+        assert_eq!(parsed["temperature"].as_f64(), Some(0.9));
+        assert_eq!(parsed["temperatureSource"], "request");
+        assert_eq!(parsed["maxTokens"].as_i64(), Some(128));
+        assert_eq!(parsed["maxTokensSource"], "request");
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
     }
 }

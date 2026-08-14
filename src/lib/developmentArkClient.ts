@@ -33,7 +33,6 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     defaultModelId: "fixture-model",
     defaultTemperature: 0.7,
     defaultMaxTokens: 2048,
-    streamingEnabled: true,
     isLocal: true,
     allowInsecureRemote: false,
     destinationClass: "loopback",
@@ -157,7 +156,6 @@ export function createSecretStoreFixtureClient(): ArkClient {
     defaultModelId: null,
     defaultTemperature: 0.7,
     defaultMaxTokens: 2048,
-    streamingEnabled: true,
     isLocal: false,
     allowInsecureRemote: false,
     destinationClass: "public",
@@ -345,7 +343,6 @@ export function createLongConversationFixtureClient(): ArkClient {
     defaultModelId: "fixture-model",
     defaultTemperature: 0.7,
     defaultMaxTokens: 2048,
-    streamingEnabled: true,
     isLocal: true,
     allowInsecureRemote: false,
     destinationClass: "loopback",
@@ -437,6 +434,15 @@ export function createLongConversationFixtureClient(): ArkClient {
       provider,
     }),
     updateDeviceSettings: async (settings) => settings,
+    // FTR-004: every other fixture's updateConversationSettings is unimplemented — this is the
+    // only way to exercise the conversation-settings panel's save flow live.
+    updateConversationSettings: async (input) => ({
+      ...conversation,
+      systemPrompt: input.systemPrompt ?? null,
+      temperature: input.temperature ?? null,
+      maxTokens: input.maxTokens ?? null,
+      updatedAt: new Date().toISOString(),
+    }),
     // OPS-001: a static but realistic-looking bundle — every other fixture's diagnostics-bundle
     // methods are unimplemented, so this is the only way to exercise the review/save UI live.
     exportDiagnosticsBundle: async () => ({
