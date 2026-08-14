@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-08-14",
+  "runtime": {
+    "name": "llama.cpp",
+    "version": "b9859",
+    "sourceRepository": "https://github.com/ggml-org/llama.cpp",
+    "sourceCommit": "4fc4ec5541b243957ae5099edb67372f8f3b550e",
+    "license": "MIT",
+    "licenseUrl": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b9859/LICENSE",
+    "licenseSizeBytes": 1078,
+    "licenseSha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+  },
+  "artifacts": [
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "fileName": "llama-b9859-bin-win-cpu-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-win-cpu-x64.zip",
+      "sizeBytes": 17478474,
+      "sha256": "c9aa80f233a7d1749341860f11723b912d4cfd6eec19434c3d00bba0abc9f85c"
+    },
+    {
+      "platform": "win32",
+      "arch": "arm64",
+      "fileName": "llama-b9859-bin-win-cpu-arm64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-win-cpu-arm64.zip",
+      "sizeBytes": 11371301,
+      "sha256": "c591ef794cb85c1ed868922521aa162d894f141d05cfb49050034b2ea1550d08"
+    },
+    {
+      "platform": "darwin",
+      "arch": "x64",
+      "fileName": "llama-b9859-bin-macos-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-macos-x64.tar.gz",
+      "sizeBytes": 11444440,
+      "sha256": "e95bfab488b0f4ca4c92c29ac75e176042de4cee97ada4bc7903a141d227d058"
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "fileName": "llama-b9859-bin-macos-arm64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-macos-arm64.tar.gz",
+      "sizeBytes": 11134464,
+      "sha256": "21e720ac103d28d7585a52b8023fb86fc0736c90ad92c1e75053207630e90df6"
+    },
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "fileName": "llama-b9859-bin-ubuntu-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-ubuntu-x64.tar.gz",
+      "sizeBytes": 15855423,
+      "sha256": "7a434a404669534ee67f2e53363109053a54c3ee13f487cbc17a3455ac5930f4"
+    },
+    {
+      "platform": "linux",
+      "arch": "arm64",
+      "fileName": "llama-b9859-bin-ubuntu-arm64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9859/llama-b9859-bin-ubuntu-arm64.tar.gz",
+      "sizeBytes": 12858361,
+      "sha256": "1efea971dc0f05fb6f6808362b26e3a9821146a91158971bba12d84740d6529b"
+    }
+  ]
+}

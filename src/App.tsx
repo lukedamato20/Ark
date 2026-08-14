@@ -1,335 +1,211 @@
-import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
-import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
-import {
-  createConversation,
-  getAppBootstrap,
-  getBuiltInRuntimeStatus,
-  getConversationMessages,
-  getErrorMessage,
-  refreshModels,
-  setThemePreference,
-} from "./lib/api";
-import type {
-  AppBootstrap,
-  BuiltInRuntimeStatus,
-  Conversation,
-  Message,
-  ModelInfo,
-  ProviderConfig,
-  ProviderHealth,
-  StreamEvent,
-  ThemeMode,
-  WorkspaceInfo,
-} from "./types/ark";
 import { RightPanel } from "./components/RightPanel";
+import { useArkController, type ArkController } from "./app/useArkController";
+import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
+import { buildWorkspaceDiagnostics, getWorkspaceRecoveryActions } from "./lib/workspaceRecovery";
+import { entityList } from "./state/arkStores";
+import { useStore, useStoreSelector } from "./state/externalStore";
+import { useArkStores } from "./state/useArkStores";
 import { Button } from "./ui/button";
 
-const ChatView = React.lazy(() => import("./features/chat/ChatView").then((m) => ({ default: m.ChatView })));
+const ChatView = React.lazy(() => import("./features/chat/ChatView").then((module) => ({ default: module.ChatView })));
 const SettingsView = React.lazy(() =>
-  import("./features/settings/SettingsView").then((m) => ({ default: m.SettingsView })),
+  import("./features/settings/SettingsView").then((module) => ({ default: module.SettingsView })),
 );
 
-type ActiveView = "chat" | "settings";
-
 export default function App() {
-  const [booting, setBooting] = React.useState(true);
-  const [view, setView] = React.useState<ActiveView>("chat");
-  const [conversations, setConversations] = React.useState<Conversation[]>([]);
-  const [activeConversationId, setActiveConversationId] = React.useState<string | undefined>();
-  const [messages, setMessages] = React.useState<Message[]>([]);
-  const [providers, setProviders] = React.useState<ProviderConfig[]>([]);
-  const [models, setModels] = React.useState<ModelInfo[]>([]);
-  const [providerHealth, setProviderHealth] = React.useState<Record<string, ProviderHealth>>({});
-  const [workspacePath, setWorkspacePath] = React.useState("");
-  const [workspace, setWorkspace] = React.useState<WorkspaceInfo | null>(null);
-  const [theme, setTheme] = React.useState<ThemeMode>(() => getStoredTheme());
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(
-    () => localStorage.getItem("ark.sidebar") === "collapsed",
-  );
-  const [rightPanelCollapsed, setRightPanelCollapsed] = React.useState(
-    () => localStorage.getItem("ark.rightPanel") === "collapsed",
-  );
-  const [focusSearchSignal, setFocusSearchSignal] = React.useState(0);
-  const [loadingMessages, setLoadingMessages] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [builtInStatus, setBuiltInStatus] = React.useState<BuiltInRuntimeStatus>({ running: false });
-
-  const activeConversation = conversations.find((c) => c.id === activeConversationId);
-
-  React.useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    localStorage.setItem("ark.theme", theme);
-  }, [theme]);
-
-  React.useEffect(() => {
-    localStorage.setItem("ark.sidebar", sidebarCollapsed ? "collapsed" : "expanded");
-  }, [sidebarCollapsed]);
-
-  React.useEffect(() => {
-    localStorage.setItem("ark.rightPanel", rightPanelCollapsed ? "collapsed" : "expanded");
-  }, [rightPanelCollapsed]);
-
-  React.useEffect(() => {
-    void bootstrap();
-  }, []);
-
-  React.useEffect(() => {
-    if (!activeConversationId) {
-      setMessages([]);
-      return;
-    }
-
-    setLoadingMessages(true);
-    getConversationMessages(activeConversationId)
-      .then(setMessages)
-      .catch((err) => setError(getErrorMessage(err)))
-      .finally(() => setLoadingMessages(false));
-  }, [activeConversationId]);
-
-  React.useEffect(() => {
-    const unlisteners: Array<() => void> = [];
-
-    const applyEvent = (payload: StreamEvent) => {
-      setMessages((current) =>
-        current.map((m) =>
-          m.id === payload.messageId
-            ? {
-                ...m,
-                content: payload.content ?? m.content,
-                status: payload.status,
-                errorMessage: payload.error ?? m.errorMessage,
-                updatedAt: new Date().toISOString(),
-              }
-            : m,
-        ),
-      );
-    };
-
-    void listen<StreamEvent>("chat:stream-delta", (e) => applyEvent(e.payload)).then((u) => unlisteners.push(u));
-    void listen<StreamEvent>("chat:stream-complete", (e) => applyEvent(e.payload)).then((u) => unlisteners.push(u));
-    void listen<StreamEvent>("chat:stream-error", (e) => {
-      applyEvent(e.payload);
-      if (e.payload.error) setError(e.payload.error);
-    }).then((u) => unlisteners.push(u));
-    void listen<StreamEvent>("chat:stream-cancelled", (e) => applyEvent(e.payload)).then((u) => unlisteners.push(u));
-
-    return () => {
-      unlisteners.forEach((u) => u());
-    };
-  }, []);
-
-  React.useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const modifier = event.metaKey || event.ctrlKey;
-      if (!modifier || event.altKey || event.shiftKey || event.isComposing) return;
-
-      if (event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        void handleCreateConversation();
-        return;
-      }
-      if (event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        setSidebarCollapsed(false);
-        setFocusSearchSignal((v) => v + 1);
-        return;
-      }
-      if (event.key === ",") {
-        event.preventDefault();
-        setView("settings");
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
-  async function bootstrap() {
-    setBooting(true);
-    try {
-      const [data, sidecarStatus] = await Promise.all([getAppBootstrap(), getBuiltInRuntimeStatus()]);
-      setBuiltInStatus(sidecarStatus);
-      setConversations(data.conversations);
-      setProviders(data.providers);
-      setModels(data.models); // all providers' models from DB cache
-      setWorkspacePath(data.workspacePath);
-      setWorkspace(data.workspace);
-      setTheme(getStoredTheme(data.theme));
-
-      let nextConversations = data.conversations;
-      if (nextConversations.length === 0) {
-        const initial = await createConversation();
-        nextConversations = [initial];
-        setConversations(nextConversations);
-      }
-      setActiveConversationId(nextConversations[0]?.id);
-
-      const activeProviderId = nextConversations[0]?.providerId;
-      const providerToRefresh = data.providers.find((provider) => provider.id === activeProviderId) ?? data.providers[0];
-      if (providerToRefresh) {
-        const result = await refreshModels(providerToRefresh.id);
-        setProviderHealth((current) => ({ ...current, [result.health.providerId]: result.health }));
-        setModels((current) => replaceModelsForProvider(current, result.models, result.provider.id));
-        setProviders((current) => replaceProvider(current, result.provider));
-      }
-    } catch (bootstrapError) {
-      setError(getErrorMessage(bootstrapError));
-    } finally {
-      setBooting(false);
-    }
-  }
-
-  async function handleCreateConversation() {
-    try {
-      const conversation = await createConversation();
-      setConversations((current) => [conversation, ...current]);
-      setActiveConversationId(conversation.id);
-      setMessages([]);
-      setView("chat");
-    } catch (err) {
-      setError(getErrorMessage(err));
-    }
-  }
-
-  function handleConversationDeleted() {
-    setConversations((current) => {
-      const remaining = current.filter((c) => c.id !== activeConversationId);
-      setActiveConversationId(remaining[0]?.id);
-      return remaining;
-    });
-    setMessages([]);
-  }
-
-  function handleConversationImported(conversation: Conversation) {
-    setConversations((current) => [conversation, ...current]);
-    setActiveConversationId(conversation.id);
-    setView("chat");
-  }
-
-  function handleConversationRenamed(conversation: Conversation) {
-    setConversations((current) => current.map((c) => (c.id === conversation.id ? conversation : c)));
-  }
-
-  function handleMessagesChange(nextMessages: Message[]) {
-    setMessages(nextMessages);
-    const lastMessage = nextMessages[nextMessages.length - 1];
-    if (!activeConversationId || !lastMessage) return;
-
-    setConversations((current) =>
-      current.map((conversation) =>
-        conversation.id === activeConversationId
-          ? {
-              ...conversation,
-              currentMessageId: lastMessage.id,
-              providerId: lastMessage.providerId ?? conversation.providerId,
-              modelId: lastMessage.modelId ?? conversation.modelId,
-              updatedAt: lastMessage.updatedAt,
-            }
-          : conversation,
-      ),
-    );
-  }
-
-  function handleModelsRefresh(result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) {
-    setProviderHealth((current) => ({ ...current, [result.health.providerId]: result.health }));
-    setModels((current) => replaceModelsForProvider(current, result.models, result.provider.id));
-    setProviders((current) => replaceProvider(current, result.provider));
-  }
-
-  function handleProviderSaved(provider: ProviderConfig) {
-    setProviders((current) => replaceProvider(current, provider));
-  }
-
-  async function handleThemeChange(nextTheme: ThemeMode) {
-    setTheme(nextTheme);
-    try {
-      await setThemePreference(nextTheme);
-    } catch (err) {
-      setError(getErrorMessage(err));
-    }
-  }
+  const controller = useArkController();
+  const stores = useArkStores();
+  const view = useStoreSelector(stores.shell, (state) => state.view);
 
   return (
     <>
+      <WorkspaceRecoveryBanner controller={controller} />
       <div className="flex h-screen overflow-hidden bg-background text-foreground">
-        <ConversationSidebar
-          conversations={conversations}
-          activeConversationId={activeConversationId}
-          collapsed={sidebarCollapsed}
-          focusSearchSignal={focusSearchSignal}
-          onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-          onCreate={handleCreateConversation}
-          onSelect={(id) => {
-            setActiveConversationId(id);
-            setView("chat");
-          }}
-          onOpenSettings={() => setView("settings")}
-        />
-
+        <ConversationSidebarContainer controller={controller} />
         <React.Suspense fallback={<MainViewFallback />}>
           {view === "settings" ? (
-            <SettingsView
-              workspacePath={workspacePath}
-              providers={providers}
-              models={models}
-              providerHealth={providerHealth}
-              theme={theme}
-              workspace={workspace}
-              builtInStatus={builtInStatus}
-              onBuiltInStatusChange={setBuiltInStatus}
-              onThemeChange={handleThemeChange}
-              onWorkspaceChange={setWorkspace}
-              onProviderSaved={handleProviderSaved}
-              onModelsRefresh={handleModelsRefresh}
-              onBack={() => setView("chat")}
-              onError={setError}
-            />
+            <SettingsContainer controller={controller} />
           ) : (
-            <ChatView
-              conversation={activeConversation}
-              messages={messages}
-              providers={providers}
-              models={models}
-              providerHealth={providerHealth}
-              isLoading={loadingMessages || booting}
-              onMessagesChange={handleMessagesChange}
-              onConversationDeleted={handleConversationDeleted}
-              onConversationImported={handleConversationImported}
-              onConversationRenamed={handleConversationRenamed}
-              onModelsRefresh={handleModelsRefresh}
-              onError={setError}
-            />
+            <ChatContainer controller={controller} />
           )}
         </React.Suspense>
-
-        <RightPanel collapsed={rightPanelCollapsed} onToggle={() => setRightPanelCollapsed((v) => !v)} />
+        <RightPanelContainer controller={controller} />
       </div>
-
-      {error && (
-        <div className="fixed bottom-4 left-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-destructive/30 bg-card p-3 shadow-lg">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium text-destructive">Ark needs attention</div>
-              <div className="mt-1 text-sm text-muted-foreground">{error}</div>
-            </div>
-            <Button size="sm" variant="ghost" onClick={() => setError(null)}>
-              Dismiss
-            </Button>
-          </div>
-        </div>
-      )}
+      <AppFeedback controller={controller} />
     </>
   );
 }
 
-function replaceProvider(providers: ProviderConfig[], provider: ProviderConfig): ProviderConfig[] {
-  const exists = providers.some((p) => p.id === provider.id);
-  return exists ? providers.map((p) => (p.id === provider.id ? provider : p)) : [...providers, provider];
+function ConversationSidebarContainer({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const catalog = useStore(stores.catalog);
+  const shell = useStore(stores.shell);
+  return (
+    <ConversationSidebar
+      conversations={entityList(catalog.conversations)}
+      activeConversationId={catalog.activeId}
+      collapsed={shell.sidebarCollapsed}
+      focusSearchSignal={shell.focusSearchSignal}
+      hasMore={catalog.nextCursor != null}
+      isLoading={catalog.isLoading}
+      onToggleCollapsed={controller.toggleSidebar}
+      onCreate={() => void controller.createConversation()}
+      onSelect={controller.selectConversation}
+      onSearch={(query) => void controller.searchConversations(query)}
+      onLoadMore={() => void controller.loadMoreConversations()}
+      onOpenSettings={() => controller.setView("settings")}
+    />
+  );
 }
 
-function replaceModelsForProvider(current: ModelInfo[], models: ModelInfo[], providerId: string): ModelInfo[] {
-  return [...current.filter((m) => m.providerId !== providerId), ...models];
+function ChatContainer({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const activeConversation = useStoreSelector(stores.catalog, (state) =>
+    state.activeId ? state.conversations.byId[state.activeId] : undefined,
+  );
+  const transcript = useStore(stores.transcript);
+  const providerState = useStore(stores.providers);
+  const booting = useStoreSelector(stores.shell, (state) => state.booting);
+  return (
+    <ChatView
+      conversation={activeConversation}
+      messages={transcript.messages}
+      providers={entityList(providerState.providers)}
+      models={entityList(providerState.models)}
+      providerHealth={providerState.health}
+      isLoading={transcript.isLoading || booting}
+      onMessagesChange={controller.setMessages}
+      onConversationDeleted={controller.deleteActiveConversation}
+      onConversationImported={controller.importConversation}
+      onConversationRenamed={controller.renameConversation}
+      onModelsRefresh={controller.refreshModels}
+      onError={controller.setError}
+      onInfo={controller.setInfo}
+    />
+  );
+}
+
+function SettingsContainer({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const providerState = useStore(stores.providers);
+  const settings = useStore(stores.settings);
+  return (
+    <SettingsView
+      workspacePath={settings.workspacePath}
+      providers={entityList(providerState.providers)}
+      models={entityList(providerState.models)}
+      providerHealth={providerState.health}
+      theme={settings.theme}
+      workspace={settings.workspace}
+      builtInStatus={settings.builtInStatus}
+      onBuiltInStatusChange={controller.setBuiltInStatus}
+      builtInModelPath={settings.builtInModelPath}
+      onBuiltInModelPathChange={controller.changeBuiltInModelPath}
+      onThemeChange={controller.changeTheme}
+      onWorkspaceChange={controller.setWorkspace}
+      onProviderSaved={controller.saveProvider}
+      onModelsRefresh={controller.refreshModels}
+      onBack={() => controller.setView("chat")}
+      onError={controller.setError}
+    />
+  );
+}
+
+function WorkspaceRecoveryBanner({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const workspaceError = useStoreSelector(stores.settings, (state) => state.workspaceOpenError);
+  const retrying = useStoreSelector(stores.settings, (state) => state.retryingWorkspace);
+  const workspace = useStoreSelector(stores.settings, (state) => state.workspace);
+  if (!workspaceError) return null;
+  const recoveryActions = getWorkspaceRecoveryActions(workspaceError.code ?? "database_error");
+
+  const copyDiagnostics = async () => {
+    const diagnostics = buildWorkspaceDiagnostics(workspaceError, workspace, new Date().toISOString());
+    try {
+      await navigator.clipboard.writeText(diagnostics);
+      controller.setInfo(
+        "Workspace diagnostics copied. The report contains paths and error details, not chat content.",
+      );
+    } catch {
+      controller.setError("Ark could not copy workspace diagnostics to the clipboard.");
+    }
+  };
+
+  return (
+    <div
+      role="alert"
+      className="fixed inset-x-0 top-0 z-[60] border-b border-destructive/40 bg-destructive/10 px-4 py-2.5 text-sm"
+    >
+      <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3">
+        <div>
+          <span className="font-medium text-destructive">Workspace database unavailable.</span>{" "}
+          <span className="text-muted-foreground">
+            {workspaceError.message ?? "Ark could not open your workspace database."} You're viewing a temporary session
+            — nothing here will be saved.
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {recoveryActions.includes("retry") && (
+            <Button size="sm" variant="secondary" onClick={() => void controller.retryWorkspace()} disabled={retrying}>
+              {retrying ? "Retrying…" : "Retry"}
+            </Button>
+          )}
+          {recoveryActions.includes("choose-workspace") && (
+            <Button size="sm" variant="ghost" onClick={() => controller.setView("settings")}>
+              Choose workspace
+            </Button>
+          )}
+          {recoveryActions.includes("copy-diagnostics") && (
+            <Button size="sm" variant="ghost" onClick={() => void copyDiagnostics()}>
+              Copy diagnostics
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RightPanelContainer({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const collapsed = useStoreSelector(stores.shell, (state) => state.rightPanelCollapsed);
+  return <RightPanel collapsed={collapsed} onToggle={controller.toggleRightPanel} />;
+}
+
+function AppFeedback({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const error = useStoreSelector(stores.shell, (state) => state.error);
+  const info = useStoreSelector(stores.shell, (state) => state.info);
+  if (error) {
+    return (
+      <div className="fixed bottom-4 left-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-destructive/30 bg-card p-3 shadow-lg">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-destructive">Ark needs attention</div>
+            <div className="mt-1 text-sm text-muted-foreground">{error}</div>
+          </div>
+          <Button size="sm" variant="ghost" onClick={() => controller.setError(null)}>
+            Dismiss
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (!info) return null;
+  return (
+    <div
+      role="status"
+      className="fixed bottom-4 left-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-3 shadow-lg"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm text-foreground">{info}</div>
+        <Button size="sm" variant="ghost" onClick={() => controller.setInfo(null)}>
+          Dismiss
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function MainViewFallback() {
@@ -338,9 +214,4 @@ function MainViewFallback() {
       Loading Ark
     </section>
   );
-}
-
-function getStoredTheme(fallback: ThemeMode = "dark"): ThemeMode {
-  const stored = localStorage.getItem("ark.theme");
-  return stored === "light" || stored === "dark" ? stored : fallback;
 }

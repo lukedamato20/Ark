@@ -9,6 +9,7 @@ src-tauri/target
 .env.*
 ark-workspace
 .pnpm-store
+.artifacts
 
 # llama.cpp runtime binaries — downloaded via scripts/setup-llama.ps1 / setup-llama.sh
 # Run the appropriate script from the repo root before launching the dev environment.
@@ -19,3 +20,5 @@ src-tauri/binaries/llama/*.so.*
 src-tauri/binaries/llama/*.dylib
 src-tauri/binaries/llama/llama-*
 src-tauri/binaries/llama/ggml-*
+src-tauri/binaries/llama/LICENSE.llama.cpp
+src-tauri/binaries/llama/runtime-provenance.json

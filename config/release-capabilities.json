@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "capabilitySet": "desktop-local-v1",
+  "reviewStatus": "awaiting_product_engineering_approval",
+  "artifactPlatforms": [
+    {
+      "id": "windows",
+      "runner": "windows-latest",
+      "minimumVersionClaim": "Windows 10 22H2"
+    },
+    {
+      "id": "macos",
+      "runner": "macos-latest",
+      "minimumVersionClaim": "macOS 12"
+    },
+    {
+      "id": "linux",
+      "runner": "ubuntu-latest",
+      "minimumVersionClaim": "Ubuntu 22.04 LTS"
+    }
+  ],
+  "window": {
+    "minimumWidth": 980,
+    "minimumHeight": 640
+  },
+  "providers": {
+    "ollama": {
+      "visible": true,
+      "delivery": "external_install_required",
+      "networkClass": "loopback_or_user_acknowledged"
+    },
+    "local_inference_host": {
+      "visible": true,
+      "delivery": "external_server_required",
+      "networkClass": "loopback_lan_or_user_acknowledged"
+    },
+    "built_in": {
+      "visible": false,
+      "developmentVisible": true,
+      "delivery": "release_disabled_pending_upstream_http_isolation",
+      "networkClass": "loopback_auth_incomplete_upstream"
+    }
+  },
+  "modelFiles": {
+    "builtInFormat": "GGUF",
+    "managedDownload": false,
+    "manualAbsolutePathRequired": true
+  },
+  "features": {
+    "localChat": true,
+    "conversationImportExport": true,
+    "branchEditing": true,
+    "cloudProviders": false,
+    "accounts": false,
+    "sync": false,
+    "attachments": false,
+    "rag": false,
+    "tools": false,
+    "webSearch": false,
+    "voice": false,
+    "automations": false,
+    "mobileClient": false
+  }
+}

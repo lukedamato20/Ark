@@ -1,0 +1,3 @@
+- model customisation and config (mood, response style, system prompt, rules, guidlines, etc...)
+- Ark Code
+- 

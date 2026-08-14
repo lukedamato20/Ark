@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "scripts/reference-dataset.mjs",
+  "synthetic": true,
+  "files": {
+    "conversations-1000.json": {
+      "bytes": 188197,
+      "sha256": "2ddfd238bcfc6207224eba880a57c7c705c1e9cbd3e57d01a95d4437318e9af8"
+    },
+    "thread-100.json": {
+      "bytes": 33559,
+      "sha256": "70aa8d9f040bab800b24468b85be128ad3f8a30aec8534a11e9ac3784881f584"
+    },
+    "output-100000.txt": {
+      "bytes": 100000,
+      "sha256": "4446d4c62a0258cce0bfa78207a52f339ac812e44dcf32b401ee3d0127ad1591"
+    },
+    "large-import-20000.json": {
+      "bytes": 6288010,
+      "sha256": "cbce487d2abac24de8672cd6625ff136d317e6e45a0b88e3c18389e4810ab856"
+    }
+  }
+}

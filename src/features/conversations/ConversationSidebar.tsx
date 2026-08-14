@@ -12,9 +12,13 @@ interface ConversationSidebarProps {
   activeConversationId?: string;
   collapsed: boolean;
   focusSearchSignal: number;
+  hasMore: boolean;
+  isLoading: boolean;
   onToggleCollapsed: () => void;
   onCreate: () => void;
   onSelect: (id: string) => void;
+  onSearch: (query: string) => void;
+  onLoadMore: () => void;
   onOpenSettings: () => void;
 }
 
@@ -23,16 +27,26 @@ export function ConversationSidebar({
   activeConversationId,
   collapsed,
   focusSearchSignal,
+  hasMore,
+  isLoading,
   onToggleCollapsed,
   onCreate,
   onSelect,
+  onSearch,
+  onLoadMore,
   onOpenSettings,
 }: ConversationSidebarProps) {
   const [query, setQuery] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
-  const filtered = conversations.filter((conversation) =>
-    conversation.title.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const onSearchRef = React.useRef(onSearch);
+  React.useEffect(() => {
+    onSearchRef.current = onSearch;
+  }, [onSearch]);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => onSearchRef.current(query), 200);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
   React.useEffect(() => {
     if (!collapsed && focusSearchSignal > 0) {
@@ -67,6 +81,7 @@ export function ConversationSidebar({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search conversations"
+              maxLength={256}
               className="pl-8"
             />
           </div>
@@ -75,7 +90,7 @@ export function ConversationSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         <AnimatePresence initial={false}>
-          {filtered.map((conversation) => {
+          {conversations.map((conversation) => {
             const active = conversation.id === activeConversationId;
             return (
               <motion.button
@@ -88,7 +103,9 @@ export function ConversationSidebar({
                 className={cn(
                   "mb-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
                   "focus-visible:ring-2 focus-visible:ring-ring",
-                  active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  active
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
                 onClick={() => onSelect(conversation.id)}
               >
@@ -104,8 +121,15 @@ export function ConversationSidebar({
           })}
         </AnimatePresence>
 
-        {!collapsed && filtered.length === 0 && (
-          <div className="px-3 py-6 text-sm text-muted-foreground">No conversations found.</div>
+        {!collapsed && conversations.length === 0 && (
+          <div className="px-3 py-6 text-sm text-muted-foreground">
+            {isLoading ? "Searching conversations…" : "No conversations found."}
+          </div>
+        )}
+        {!collapsed && hasMore && (
+          <Button className="mt-2 w-full" size="sm" variant="ghost" disabled={isLoading} onClick={onLoadMore}>
+            {isLoading ? "Loading…" : "Load more"}
+          </Button>
         )}
       </div>
 

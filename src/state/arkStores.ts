@@ -1,0 +1,185 @@
+import type {
+  AppErrorShape,
+  BuiltInRuntimeStatus,
+  Conversation,
+  Message,
+  ModelInfo,
+  ProviderConfig,
+  ProviderHealth,
+  StreamEvent,
+  ThemeMode,
+  WorkspaceInfo,
+} from "../types/ark";
+import { createExternalStore, type ExternalStore } from "./externalStore.ts";
+
+export type ActiveView = "chat" | "settings";
+
+export interface EntityCollection<T> {
+  ids: string[];
+  byId: Record<string, T>;
+}
+
+export interface ConversationCatalogState {
+  conversations: EntityCollection<Conversation>;
+  nextCursor: string | null;
+  search: string;
+  isLoading: boolean;
+  activeId?: string;
+}
+
+export interface TranscriptState {
+  conversationId?: string;
+  messages: Message[];
+  isLoading: boolean;
+}
+
+export interface GenerationOverlay {
+  conversationId: string;
+  content: string;
+  status: string;
+  errorMessage?: string | null;
+  revision: number;
+}
+
+export interface GenerationState {
+  byMessageId: Record<string, GenerationOverlay>;
+  activeMessageIdByConversation: Record<string, string | undefined>;
+}
+
+export interface ProviderState {
+  providers: EntityCollection<ProviderConfig>;
+  models: EntityCollection<ModelInfo>;
+  health: Record<string, ProviderHealth>;
+}
+
+export interface SettingsState {
+  workspacePath: string;
+  workspace: WorkspaceInfo | null;
+  theme: ThemeMode;
+  builtInStatus: BuiltInRuntimeStatus;
+  builtInModelPath: string | null;
+  workspaceOpenError: AppErrorShape | null;
+  retryingWorkspace: boolean;
+}
+
+export interface ShellState {
+  booting: boolean;
+  view: ActiveView;
+  sidebarCollapsed: boolean;
+  rightPanelCollapsed: boolean;
+  focusSearchSignal: number;
+  error: string | null;
+  info: string | null;
+}
+
+export interface ArkStores {
+  catalog: ExternalStore<ConversationCatalogState>;
+  transcript: ExternalStore<TranscriptState>;
+  generation: ExternalStore<GenerationState>;
+  providers: ExternalStore<ProviderState>;
+  settings: ExternalStore<SettingsState>;
+  shell: ExternalStore<ShellState>;
+}
+
+export function createArkStores(initial?: {
+  theme?: ThemeMode;
+  sidebarCollapsed?: boolean;
+  rightPanelCollapsed?: boolean;
+}): ArkStores {
+  return {
+    catalog: createExternalStore<ConversationCatalogState>({
+      conversations: emptyEntityCollection(),
+      nextCursor: null,
+      search: "",
+      isLoading: false,
+    }),
+    transcript: createExternalStore<TranscriptState>({ messages: [], isLoading: false }),
+    generation: createExternalStore<GenerationState>({ byMessageId: {}, activeMessageIdByConversation: {} }),
+    providers: createExternalStore<ProviderState>({
+      providers: emptyEntityCollection(),
+      models: emptyEntityCollection(),
+      health: {},
+    }),
+    settings: createExternalStore<SettingsState>({
+      workspacePath: "",
+      workspace: null,
+      theme: initial?.theme ?? "dark",
+      builtInStatus: {
+        running: false,
+        binaryInstalled: false,
+        binaryVerified: false,
+        state: "unavailable_binary",
+        failure: null,
+      },
+      builtInModelPath: null,
+      workspaceOpenError: null,
+      retryingWorkspace: false,
+    }),
+    shell: createExternalStore<ShellState>({
+      booting: true,
+      view: "chat",
+      sidebarCollapsed: initial?.sidebarCollapsed ?? false,
+      rightPanelCollapsed: initial?.rightPanelCollapsed ?? false,
+      focusSearchSignal: 0,
+      error: null,
+      info: null,
+    }),
+  };
+}
+
+export function emptyEntityCollection<T>(): EntityCollection<T> {
+  return { ids: [], byId: {} };
+}
+
+export function entityCollection<T extends { id: string }>(items: T[]): EntityCollection<T> {
+  return {
+    ids: items.map((item) => item.id),
+    byId: Object.fromEntries(items.map((item) => [item.id, item])),
+  };
+}
+
+export function entityList<T>(collection: EntityCollection<T>): T[] {
+  return collection.ids.flatMap((id) => {
+    const entity = collection.byId[id];
+    return entity === undefined ? [] : [entity];
+  });
+}
+
+export function upsertEntity<T extends { id: string }>(
+  collection: EntityCollection<T>,
+  entity: T,
+): EntityCollection<T> {
+  return {
+    ids: collection.byId[entity.id] ? collection.ids : [...collection.ids, entity.id],
+    byId: { ...collection.byId, [entity.id]: entity },
+  };
+}
+
+export function messageWithGenerationOverlay(message: Message, overlay?: GenerationOverlay): Message {
+  if (!overlay) return message;
+  const merged: Message = {
+    ...message,
+    content: overlay.content,
+    status: overlay.status as Message["status"],
+  };
+  if (overlay.errorMessage !== undefined) merged.errorMessage = overlay.errorMessage;
+  return merged;
+}
+
+export function streamOverlayFromEvent(
+  current: GenerationOverlay | undefined,
+  baseMessage: Message,
+  event: StreamEvent,
+): GenerationOverlay {
+  return {
+    conversationId: event.conversationId,
+    content:
+      event.content ??
+      (event.delta
+        ? (current?.content ?? baseMessage.content) + event.delta
+        : (current?.content ?? baseMessage.content)),
+    status: event.status,
+    errorMessage: event.error ?? current?.errorMessage ?? baseMessage.errorMessage,
+    revision: event.revision ?? current?.revision ?? 0,
+  };
+}

@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend (lint, typecheck, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Contract check (ARC-002 — Rust/TypeScript DTO drift)
+        run: pnpm contract:check
+
+      - name: Module boundaries and circular dependencies
+        run: pnpm architecture:check
+
+      - name: Release capability/support matrix
+        run: pnpm support:check
+
+      - name: Reference dataset manifest
+        run: pnpm baseline:check
+
+      - name: Native artifact, archive-safety, SBOM, and notices checks
+        run: pnpm supply-chain:check
+
+      - name: Secret non-exposure and channel-boundary checks
+        run: pnpm secret-boundary:check
+
+      - name: Frontend unit and reconciliation tests
+        run: pnpm test:frontend
+
+      - name: Build
+        run: pnpm build
+
+      - name: Audit (fails on high/critical advisories)
+        run: pnpm audit --audit-level=high
+
+  rust:
+    name: Rust (fmt, clippy, test) — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev gnome-keyring
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Mirrors keyring-rs's own native CI setup: create and unlock an isolated login keyring so
+      # SEC-005's real Secret Service CRUD test runs instead of being skipped on a headless host.
+      - name: Start Linux Secret Service
+        if: runner.os == 'Linux'
+        shell: bash
+        run: gnome-keyring-daemon --components=secrets --daemonize --unlock <<< 'ark-ci-keyring'
+
+      - name: Test (platform credential-store CRUD included)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Install cargo-audit
+        if: runner.os == 'Linux'
+        run: cargo install cargo-audit --locked
+
+      - name: Audit
+        if: runner.os == 'Linux'
+        # No vulnerability exceptions. Maintenance/soundness warnings and real target paths are
+        # reviewed with an owner and review deadline in docs/dependency-advisory-review.md.
+        run: cargo audit --file src-tauri/Cargo.lock
+
+  build-check:
+    name: Tauri build check (non-bundled) — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    needs: [frontend, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Compile Tauri backend (no bundling — see COR-012 for the packaged-bundle blocker)
+        run: cargo build --manifest-path src-tauri/Cargo.toml

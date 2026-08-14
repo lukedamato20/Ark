@@ -2,6 +2,7 @@
   "name": "ark",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
@@ -10,7 +11,22 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "architecture:check": "node scripts/check-module-boundaries.mjs",
+    "support:check": "node scripts/check-support-matrix.mjs",
+    "baseline:check": "node scripts/reference-dataset.mjs --check",
+    "baseline:fixtures": "node scripts/reference-dataset.mjs",
+    "baseline:manifest": "node scripts/reference-dataset.mjs --print-manifest",
+    "contract:check": "node scripts/check-contract.mjs",
+    "test:state": "node --experimental-strip-types --test src/state/*.test.ts",
+    "test:frontend": "node --experimental-strip-types --test src/state/*.test.ts src/lib/*.test.ts",
+    "test:supply-chain": "node --test scripts/runtime-supply-chain.test.mjs",
+    "secret-boundary:check": "node scripts/check-secret-boundaries.mjs",
+    "supply-chain:generate": "node scripts/generate-supply-chain-artifacts.mjs",
+    "supply-chain:check": "node --test scripts/runtime-supply-chain.test.mjs && node scripts/generate-supply-chain-artifacts.mjs --check",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"*.{js,json}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{js,json}\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -26,15 +42,22 @@
     "tailwind-merge": "^2.5.5"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.49",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "globals": "^15.15.0",
+    "postcss": "^8.5.23",
+    "prettier": "^3.9.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.67.0",
     "vite": "^6.0.0"
   }
 }

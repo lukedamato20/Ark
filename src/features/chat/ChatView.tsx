@@ -1,37 +1,47 @@
-import { Download, Edit3, FileJson, FileText, GitBranch, Loader2, RefreshCw, Send, Square, Trash2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Cloud,
+  Download,
+  FileJson,
+  FileText,
+  Loader2,
+  Monitor,
+  MoreVertical,
+  Network,
+  Send,
+  Square,
+  Trash2,
+} from "lucide-react";
 import * as React from "react";
 import { cn } from "../../lib/cn";
 import { downloadText, safeFilename } from "../../lib/download";
-import {
-  cancelStream,
-  deleteConversation,
-  editUserMessage,
-  exportConversationJson,
-  exportConversationMarkdown,
-  getAssistantAlternatives,
-  getErrorMessage,
-  importConversationJson,
-  regenerateAssistantMessage,
-  refreshModels,
-  renameConversation,
-  sendChatMessage,
-  switchActiveBranch,
-} from "../../lib/api";
+import { getErrorMessage } from "../../lib/arkErrors";
+import { useArkClient } from "../../lib/useArkClient";
 import type {
-  BranchAlternative,
   Conversation,
+  DestinationClass,
   Message,
   ModelInfo,
   ProviderConfig,
   ProviderHealth,
   SendChatResult,
 } from "../../types/ark";
-import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
-import { Select } from "../../ui/select";
 import { Textarea } from "../../ui/textarea";
 import { SetupBanner } from "../onboarding/SetupBanner";
-import { MarkdownMessage } from "./MarkdownMessage";
+import { ChatMessageList } from "./ChatMessageList";
+
+/** COR-009: mirrors the authoritative limit enforced in `export::validate_conversation_export`. */
+const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
+
+interface ActiveImport {
+  id: string;
+  fileName: string;
+  completedMessages: number;
+  totalMessages: number;
+  cancelling: boolean;
+}
 
 interface ChatViewProps {
   conversation?: Conversation;
@@ -46,6 +56,7 @@ interface ChatViewProps {
   onConversationRenamed: (conversation: Conversation) => void;
   onModelsRefresh: (result: { health: ProviderHealth; models: ModelInfo[]; provider: ProviderConfig }) => void;
   onError: (message: string) => void;
+  onInfo: (message: string) => void;
 }
 
 export function ChatView({
@@ -61,7 +72,9 @@ export function ChatView({
   onConversationRenamed,
   onModelsRefresh,
   onError,
+  onInfo,
 }: ChatViewProps) {
+  const client = useArkClient();
   const [draft, setDraft] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
   const [isRenaming, setIsRenaming] = React.useState(false);
@@ -69,9 +82,36 @@ export function ChatView({
   const [providerId, setProviderId] = React.useState(providers[0]?.id ?? "");
   const [model, setModel] = React.useState("");
   const [editingMessageId, setEditingMessageId] = React.useState<string | null>(null);
+  const [activeImport, setActiveImport] = React.useState<ActiveImport | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const previousConversationIdRef = React.useRef<string | undefined>(undefined);
   const autoRefreshedProviderIdsRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void client
+      .onImportProgress((progress) => {
+        setActiveImport((current) =>
+          current?.id === progress.importId
+            ? {
+                ...current,
+                completedMessages: progress.completedMessages,
+                totalMessages: progress.totalMessages,
+              }
+            : current,
+        );
+      })
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch((error) => onError(getErrorMessage(error)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [client, onError]);
 
   const provider = providers.find((item) => item.id === providerId) ?? providers[0];
   const health = providerHealth[provider?.id ?? ""] ?? null;
@@ -81,6 +121,10 @@ export function ChatView({
     () => [...messages].reverse().find((m) => m.role === "assistant" && m.status === "streaming"),
     [messages],
   );
+  // Callbacks below intentionally depend on this boolean, not `activeAssistant` itself — they
+  // only ever check its truthiness, so depending on the derived boolean instead of the object
+  // avoids recreating the callback on every streaming-content update.
+  const hasActiveAssistant = Boolean(activeAssistant);
   const canSend =
     Boolean(conversation && provider && model && selectedModelAvailable && draft.trim()) && !activeAssistant;
 
@@ -107,6 +151,9 @@ export function ChatView({
 
     autoRefreshedProviderIdsRef.current.add(provider.id);
     void handleRefreshModels();
+    // Deliberately narrow deps: must run only when provider/model-list/health identity
+    // actually changes, not on every recreation of handleRefreshModels or health object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider?.id, providerModels.length, health?.status]);
 
   React.useEffect(() => {
@@ -129,7 +176,7 @@ export function ChatView({
 
   async function handleRefreshModels() {
     try {
-      const result = await refreshModels(provider?.id ?? "");
+      const result = await client.refreshModels(provider?.id ?? "");
       onModelsRefresh(result);
       if (!model && result.provider.defaultModelId) {
         setModel(result.provider.defaultModelId);
@@ -138,6 +185,23 @@ export function ChatView({
       onError(getErrorMessage(error));
     }
   }
+
+  const reconcileGenerationFailure = React.useCallback(
+    async (error: unknown) => {
+      const originalMessage = getErrorMessage(error);
+      if (!conversation) {
+        onError(originalMessage);
+        return;
+      }
+      try {
+        onMessagesChange(await client.getConversationMessages(conversation.id));
+        onError(originalMessage);
+      } catch (reconciliationError) {
+        onError(`${originalMessage} Refresh also failed: ${getErrorMessage(reconciliationError)}`);
+      }
+    },
+    [client, conversation, onError, onMessagesChange],
+  );
 
   async function handleSend() {
     if (!conversation || !canSend) {
@@ -149,7 +213,7 @@ export function ChatView({
     setIsSending(true);
 
     try {
-      const result: SendChatResult = await sendChatMessage({
+      const result: SendChatResult = await client.sendChatMessage({
         conversationId: conversation.id,
         content,
         providerId: provider!.id,
@@ -190,9 +254,10 @@ export function ChatView({
           modelId: model,
         },
       ]);
+      await client.startPendingStream(result.assistantMessageId);
     } catch (error) {
       setDraft(content);
-      onError(getErrorMessage(error));
+      await reconcileGenerationFailure(error);
     } finally {
       setIsSending(false);
     }
@@ -211,7 +276,7 @@ export function ChatView({
     }
 
     try {
-      const renamed = await renameConversation(conversation.id, nextTitle);
+      const renamed = await client.renameConversation(conversation.id, nextTitle);
       onConversationRenamed(renamed);
       setIsRenaming(false);
     } catch (error) {
@@ -226,7 +291,10 @@ export function ChatView({
       }
       setEditingMessageId(message.id);
     },
-    [conversation?.id, provider?.id, selectedModelAvailable, !!activeAssistant],
+    // Intentionally depends on IDs, not the full conversation/provider objects, to avoid
+    // recreating this callback on every unrelated field update (e.g. a title rename).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [conversation?.id, provider?.id, selectedModelAvailable, hasActiveAssistant],
   );
 
   const handleSaveEdit = React.useCallback(
@@ -241,7 +309,7 @@ export function ChatView({
 
       setEditingMessageId(null);
       try {
-        const result = await editUserMessage({
+        const result = await client.editUserMessage({
           conversationId: conversation.id,
           messageId: message.id,
           content: nextContent.trim(),
@@ -281,11 +349,25 @@ export function ChatView({
             modelId: model,
           },
         ]);
+        await client.startPendingStream(result.assistantMessageId);
       } catch (error) {
-        onError(getErrorMessage(error));
+        await reconcileGenerationFailure(error);
       }
     },
-    [conversation?.id, provider, model, messages, selectedModelAvailable, !!activeAssistant, onMessagesChange, onError],
+    // Depends on conversation.id, not the whole object — see handleStartEdit above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      conversation?.id,
+      provider,
+      model,
+      messages,
+      selectedModelAvailable,
+      hasActiveAssistant,
+      onMessagesChange,
+      onError,
+      client,
+      reconcileGenerationFailure,
+    ],
   );
 
   const handleCancelEdit = React.useCallback(() => setEditingMessageId(null), []);
@@ -297,7 +379,7 @@ export function ChatView({
       }
 
       try {
-        const result = await regenerateAssistantMessage({
+        const result = await client.regenerateAssistantMessage({
           conversationId: conversation.id,
           messageId: message.id,
           providerId: provider.id,
@@ -322,11 +404,24 @@ export function ChatView({
             modelId: model,
           },
         ]);
+        await client.startPendingStream(result.assistantMessageId);
       } catch (error) {
-        onError(getErrorMessage(error));
+        await reconcileGenerationFailure(error);
       }
     },
-    [conversation?.id, provider, model, messages, selectedModelAvailable, !!activeAssistant, onMessagesChange, onError],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see handleStartEdit above.
+    [
+      conversation?.id,
+      provider,
+      model,
+      messages,
+      selectedModelAvailable,
+      hasActiveAssistant,
+      onMessagesChange,
+      onError,
+      client,
+      reconcileGenerationFailure,
+    ],
   );
 
   const handleLoadAlternatives = React.useCallback(
@@ -334,9 +429,11 @@ export function ChatView({
       if (!conversation || message.role !== "assistant") {
         return [];
       }
-      return getAssistantAlternatives(conversation.id, message.id);
+      return client.getAssistantAlternatives(conversation.id, message.id);
     },
-    [conversation?.id],
+    // Depends on conversation.id, not the whole object — see handleStartEdit above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [conversation?.id, client],
   );
 
   const handleSwitchBranch = React.useCallback(
@@ -344,10 +441,43 @@ export function ChatView({
       if (!conversation || activeAssistant) {
         return;
       }
-      const nextMessages = await switchActiveBranch(conversation.id, messageId);
+      const nextMessages = await client.switchActiveBranch(conversation.id, messageId);
       onMessagesChange(nextMessages);
     },
-    [conversation?.id, !!activeAssistant, onMessagesChange],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see handleStartEdit above.
+    [conversation?.id, hasActiveAssistant, onMessagesChange, client],
+  );
+
+  const handleKeepPartial = React.useCallback(
+    async (message: Message) => {
+      if (!conversation) {
+        return;
+      }
+      try {
+        const updated = await client.keepPartialMessage(message.id);
+        onMessagesChange(messages.map((item) => (item.id === updated.id ? updated : item)));
+      } catch (error) {
+        onError(getErrorMessage(error));
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see handleStartEdit above.
+    [conversation?.id, messages, onMessagesChange, onError, client],
+  );
+
+  const handleDiscardInterrupted = React.useCallback(
+    async (message: Message) => {
+      if (!conversation) {
+        return;
+      }
+      try {
+        const nextMessages = await client.discardInterruptedMessage(conversation.id, message.id);
+        onMessagesChange(nextMessages);
+      } catch (error) {
+        onError(getErrorMessage(error));
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see handleStartEdit above.
+    [conversation?.id, onMessagesChange, onError, client],
   );
 
   async function handleCancel() {
@@ -355,7 +485,7 @@ export function ChatView({
       return;
     }
     try {
-      await cancelStream(activeAssistant.id);
+      await client.cancelStream(activeAssistant.id);
     } catch (error) {
       onError(getErrorMessage(error));
     }
@@ -372,7 +502,7 @@ export function ChatView({
     }
 
     try {
-      await deleteConversation(conversation.id);
+      await client.deleteConversation(conversation.id);
       onConversationDeleted();
     } catch (error) {
       onError(getErrorMessage(error));
@@ -386,10 +516,10 @@ export function ChatView({
 
     try {
       if (format === "markdown") {
-        const markdown = await exportConversationMarkdown(conversation.id);
+        const markdown = await client.exportConversationMarkdown(conversation.id);
         downloadText(`${safeFilename(conversation.title)}.md`, markdown, "text/markdown;charset=utf-8");
       } else {
-        const json = await exportConversationJson(conversation.id);
+        const json = await client.exportConversationJson(conversation.id);
         downloadText(`${safeFilename(conversation.title)}.json`, json, "application/json;charset=utf-8");
       }
     } catch (error) {
@@ -403,12 +533,72 @@ export function ChatView({
     if (!file) {
       return;
     }
+    if (activeImport) {
+      onError("Wait for the current import to finish or cancel it before starting another.");
+      return;
+    }
+
+    // COR-009: reject an oversized file before loading it into memory as a JS string.
+    // This is a fast-fail UX nicety only — the Rust side enforces the authoritative limit
+    // (see export::validate_conversation_export) regardless of what the frontend checks.
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      onError(
+        `"${file.name}" is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds the ${MAX_IMPORT_FILE_BYTES / (1024 * 1024)} MB import limit.`,
+      );
+      return;
+    }
 
     try {
       const json = await file.text();
-      const imported = await importConversationJson(json);
-      onConversationImported(imported);
+      const preview = await client.previewConversationImport(json);
+      const mappings = preview.providerMappings
+        .map((mapping) => `${mapping.sourceProviderId ?? "unspecified"} → ${mapping.targetProviderId}`)
+        .join(", ");
+      const confirmed = window.confirm(
+        `Import ${preview.conversationCount} conversation with ${preview.messageCount} messages?\n\n` +
+          `Maximum branch depth: ${preview.maximumBranchDepth}\n` +
+          `Transient states normalized: ${preview.normalizedMessageCount}\n` +
+          `Conflicts: ${preview.conflicts.length}\n` +
+          `Provider mapping: ${mappings}\n` +
+          `Estimated storage: ${(preview.estimatedStorageBytes / 1024).toFixed(1)} KiB`,
+      );
+      if (!confirmed) return;
+
+      const importId = crypto.randomUUID();
+      setActiveImport({
+        id: importId,
+        fileName: file.name,
+        completedMessages: 0,
+        totalMessages: preview.messageCount,
+        cancelling: false,
+      });
+      const result = await client.importConversationJson(importId, json);
+      onConversationImported(result.conversation);
+      if (result.normalizedMessageCount > 0) {
+        const plural = result.normalizedMessageCount === 1 ? "message was" : "messages were";
+        onInfo(
+          `Import complete. ${result.normalizedMessageCount} ${plural} still mid-generation when exported and ` +
+            `${result.normalizedMessageCount === 1 ? "has" : "have"} been marked interrupted — use Retry, Keep partial, or Discard on ${result.normalizedMessageCount === 1 ? "it" : "them"}.`,
+        );
+      }
     } catch (error) {
+      if ((error as { code?: string })?.code === "import_cancelled") {
+        onInfo("Import cancelled. No conversation data was written.");
+      } else {
+        onError(getErrorMessage(error));
+      }
+    } finally {
+      setActiveImport(null);
+    }
+  }
+
+  async function handleCancelImport() {
+    if (!activeImport || activeImport.cancelling) return;
+    setActiveImport({ ...activeImport, cancelling: true });
+    try {
+      await client.cancelImport(activeImport.id);
+    } catch (error) {
+      setActiveImport((current) => (current ? { ...current, cancelling: false } : current));
       onError(getErrorMessage(error));
     }
   }
@@ -445,71 +635,37 @@ export function ChatView({
             </button>
           )}
           <div className="mt-0.5 flex flex-wrap items-center gap-2">
-            <Badge tone={provider?.isLocal ? "success" : "warning"}>{provider?.isLocal ? "local" : "cloud"}</Badge>
+            <ProviderStatusIcon provider={provider} />
             <span className="text-xs text-muted-foreground">{health?.message ?? "Runtime status unknown"}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Select
-            value={providerId}
-            onChange={(event) => {
-              setProviderId(event.target.value);
-              setModel("");
+          <ProviderModelDropdown
+            providers={providers}
+            models={models}
+            providerHealth={providerHealth}
+            providerId={providerId}
+            model={model}
+            onSelect={(nextProviderId, nextModel) => {
+              setProviderId(nextProviderId);
+              setModel(nextModel);
             }}
-            aria-label="Provider"
-          >
-            {providers.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            aria-label="Model"
-            disabled={!providerModels.length}
-            className="max-w-56"
-          >
-            {!providerModels.length && <option value="">No models</option>}
-            {providerModels.map((item) => (
-              <option key={item.id} value={item.name}>
-                {item.displayName ?? item.name}
-              </option>
-            ))}
-          </Select>
-          <Button size="sm" variant="ghost" onClick={() => handleExport("markdown")} disabled={!conversation}>
-            <FileText className="h-4 w-4" />
-            Export
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => handleExport("json")}
-            disabled={!conversation}
-            aria-label="Export JSON"
-          >
-            <FileJson className="h-4 w-4" />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => fileInputRef.current?.click()}
-            aria-label="Import JSON"
-          >
-            <Download className="h-4 w-4" />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={handleDelete}
-            disabled={!conversation}
-            aria-label="Delete conversation"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-          <input ref={fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImport} />
+          />
+          <HeaderOverflowMenu
+            conversationSelected={Boolean(conversation)}
+            onExportMarkdown={() => void handleExport("markdown")}
+            onExportJson={() => void handleExport("json")}
+            onImportJson={() => fileInputRef.current?.click()}
+            onDelete={() => void handleDelete()}
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={handleImport}
+          />
         </div>
       </header>
 
@@ -521,6 +677,24 @@ export function ChatView({
           selectedModel={model}
           onRefresh={handleRefreshModels}
         />
+        {activeImport && (
+          <div
+            className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="min-w-0 text-sm">
+              <div className="truncate font-medium">Importing {activeImport.fileName}</div>
+              <div className="text-xs text-muted-foreground">
+                {activeImport.completedMessages} of {activeImport.totalMessages} messages
+              </div>
+            </div>
+            <Button variant="secondary" onClick={() => void handleCancelImport()} disabled={activeImport.cancelling}>
+              {activeImport.cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+              {activeImport.cancelling ? "Cancelling" : "Cancel import"}
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
@@ -534,24 +708,21 @@ export function ChatView({
         ) : messages.length === 0 ? (
           <EmptyChat />
         ) : (
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-            {messages.map((message) => (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                canBranch={selectedModelAvailable && !activeAssistant}
-                canSwitchBranch={!activeAssistant}
-                isEditing={editingMessageId === message.id}
-                onStartEdit={handleStartEdit}
-                onSaveEdit={handleSaveEdit}
-                onCancelEdit={handleCancelEdit}
-                onRegenerate={handleRegenerateMessage}
-                onLoadAlternatives={handleLoadAlternatives}
-                onSwitchBranch={handleSwitchBranch}
-                onError={onError}
-              />
-            ))}
-          </div>
+          <ChatMessageList
+            messages={messages}
+            canBranch={selectedModelAvailable && !activeAssistant}
+            canSwitchBranch={!activeAssistant}
+            editingMessageId={editingMessageId}
+            onStartEdit={handleStartEdit}
+            onSaveEdit={handleSaveEdit}
+            onCancelEdit={handleCancelEdit}
+            onRegenerate={handleRegenerateMessage}
+            onLoadAlternatives={handleLoadAlternatives}
+            onSwitchBranch={handleSwitchBranch}
+            onKeepPartial={handleKeepPartial}
+            onDiscardInterrupted={handleDiscardInterrupted}
+            onError={onError}
+          />
         )}
       </div>
 
@@ -596,259 +767,321 @@ export function ChatView({
   );
 }
 
-const MessageBubble = React.memo(function MessageBubble({
-  message,
-  canBranch,
-  canSwitchBranch,
-  isEditing,
-  onStartEdit,
-  onSaveEdit,
-  onCancelEdit,
-  onRegenerate,
-  onLoadAlternatives,
-  onSwitchBranch,
-  onError,
-}: {
-  message: Message;
-  canBranch: boolean;
-  canSwitchBranch: boolean;
-  isEditing: boolean;
-  onStartEdit: (message: Message) => void;
-  onSaveEdit: (message: Message, content: string) => void;
-  onCancelEdit: () => void;
-  onRegenerate: (message: Message) => void;
-  onLoadAlternatives: (message: Message) => Promise<BranchAlternative[]>;
-  onSwitchBranch: (messageId: string) => Promise<void>;
-  onError: (message: string) => void;
-}) {
-  const isUser = message.role === "user";
-  const displayContent = message.content;
-  const [alternatives, setAlternatives] = React.useState<BranchAlternative[] | null>(null);
-  const [isLoadingAlternatives, setIsLoadingAlternatives] = React.useState(false);
-  const [switchingBranchId, setSwitchingBranchId] = React.useState<string | null>(null);
-  const activeAlternativeIndex = alternatives?.findIndex((alternative) => alternative.isActive) ?? -1;
-  const branchLabel =
-    alternatives && alternatives.length > 1 && activeAlternativeIndex >= 0
-      ? `${activeAlternativeIndex + 1}/${alternatives.length}`
-      : "Branches";
+// SEC-001: classification comes from the backend (ProviderConfig.destinationClass, computed
+// in Rust by security::classify_destination) rather than being re-derived here — the frontend
+// must never be the source of truth for a privacy-relevant trust boundary.
+const CONNECTION_METADATA: Record<
+  DestinationClass,
+  { icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; label: string; tone: string; description: string }
+> = {
+  loopback: {
+    icon: Monitor,
+    label: "local",
+    tone: "text-emerald-600 dark:text-emerald-300",
+    description:
+      "Running locally on this device. User prompts, conversation history, and the configured system prompt do not leave this computer.",
+  },
+  private_lan: {
+    icon: Network,
+    label: "network",
+    tone: "text-sky-600 dark:text-sky-300",
+    description:
+      "Connecting to a server on your local network. User prompts, conversation history, and the configured system prompt leave this device but stay within your network.",
+  },
+  public: {
+    icon: Cloud,
+    label: "cloud",
+    tone: "text-amber-600 dark:text-amber-300",
+    description:
+      "Connecting to a remote server outside your network. User prompts, conversation history, and the configured system prompt are sent to this destination.",
+  },
+};
 
-  async function handleToggleAlternatives() {
-    if (isUser) {
-      return;
-    }
-
-    if (alternatives) {
-      setAlternatives(null);
-      return;
-    }
-
-    setIsLoadingAlternatives(true);
-    try {
-      setAlternatives(await onLoadAlternatives(message));
-    } catch (error) {
-      onError(getErrorMessage(error));
-    } finally {
-      setIsLoadingAlternatives(false);
-    }
-  }
-
-  async function handleSelectAlternative(messageId: string) {
-    if (messageId === message.id || switchingBranchId) {
-      return;
-    }
-
-    setSwitchingBranchId(messageId);
-    try {
-      await onSwitchBranch(messageId);
-      setAlternatives(null);
-    } catch (error) {
-      onError(getErrorMessage(error));
-    } finally {
-      setSwitchingBranchId(null);
-    }
-  }
+function ProviderStatusIcon({ provider }: { provider?: ProviderConfig }) {
+  const destinationClass = provider?.destinationClass ?? "loopback";
+  const { icon: Icon, label, tone, description } = CONNECTION_METADATA[destinationClass];
+  const tooltipId = `provider-status-${provider?.id ?? "none"}`;
 
   return (
-    <article className={cn("flex", isUser ? "justify-end" : "justify-start")}>
-      <div
+    <span className="group relative inline-flex items-center gap-1">
+      <span className={cn("inline-flex items-center gap-1 text-xs font-medium", tone)} aria-describedby={tooltipId}>
+        <Icon className="h-3 w-3" aria-hidden="true" />
+        {label}
+      </span>
+      <span
+        id={tooltipId}
+        role="tooltip"
         className={cn(
-          "max-w-[88%] rounded-lg border px-4 py-3",
-          isUser ? "border-primary/25 bg-primary text-primary-foreground" : "border-border bg-card",
-          isEditing && "w-full max-w-full",
+          "pointer-events-none absolute bottom-full left-0 z-50 mb-1.5 w-56 rounded-md border border-border",
+          "bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-md",
+          "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
         )}
       >
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <span className="text-xs font-medium uppercase tracking-wide opacity-70">{isUser ? "You" : "Ark"}</span>
-          <div className="flex items-center gap-2">
-            {message.status !== "complete" && message.status !== "streaming" && (
-              <Badge tone={message.status === "failed" ? "danger" : "warning"}>{message.status}</Badge>
-            )}
-            {isUser ? (
-              !isEditing && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => onStartEdit(message)}
-                  disabled={!canBranch}
-                  aria-label="Edit message"
-                  className="h-6 px-1.5 text-xs opacity-70"
-                >
-                  <Edit3 className="h-3.5 w-3.5" />
-                  Edit
-                </Button>
-              )
-            ) : (
-              <>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void handleToggleAlternatives()}
-                  disabled={!canSwitchBranch || message.status === "streaming" || isLoadingAlternatives}
-                  aria-label="Show response branches"
-                  className="h-6 px-1.5 text-xs opacity-70"
-                >
-                  {isLoadingAlternatives ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <GitBranch className="h-3.5 w-3.5" />
-                  )}
-                  {branchLabel}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => onRegenerate(message)}
-                  disabled={!canBranch || message.status === "streaming"}
-                  aria-label="Regenerate response"
-                  className="h-6 px-1.5 text-xs opacity-70"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Retry
-                </Button>
-              </>
-            )}
-          </div>
-        </div>
-        {alternatives && !isUser && (
-          <div className="mb-3 border-t border-border/70 pt-2">
-            {alternatives.length <= 1 ? (
-              <div className="text-xs text-muted-foreground">No alternate responses saved yet.</div>
-            ) : (
-              <div className="space-y-1">
-                {alternatives.map((alternative, index) => (
-                  <button
-                    key={alternative.messageId}
-                    type="button"
-                    disabled={alternative.isActive || !canSwitchBranch || Boolean(switchingBranchId)}
-                    onClick={() => void handleSelectAlternative(alternative.messageId)}
-                    className={cn(
-                      "flex w-full items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-150",
-                      "focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default",
-                      alternative.isActive
-                        ? "bg-primary/10 text-foreground"
-                        : "hover:bg-accent hover:text-accent-foreground",
-                    )}
-                  >
-                    <span className="min-w-0">
-                      <span className="block font-medium">Response {index + 1}</span>
-                      <span className="mt-0.5 block truncate text-muted-foreground">{alternative.contentPreview}</span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-1.5">
-                      {switchingBranchId === alternative.messageId && <Loader2 className="h-3 w-3 animate-spin" />}
-                      {alternative.hasDescendants && !alternative.isActive && (
-                        <span className="text-[10px] text-muted-foreground">+ history</span>
-                      )}
-                      <Badge
-                        tone={
-                          alternative.isActive
-                            ? "success"
-                            : alternative.status === "failed"
-                              ? "danger"
-                              : alternative.status === "streaming"
-                                ? "warning"
-                                : "muted"
-                        }
-                      >
-                        {alternative.isActive ? "active" : alternative.status}
-                      </Badge>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        {isUser && isEditing ? (
-          <InlineEditor
-            initialContent={message.content}
-            onSave={(content) => onSaveEdit(message, content)}
-            onCancel={onCancelEdit}
-          />
-        ) : displayContent ? (
-          isUser ? (
-            <div className="whitespace-pre-wrap text-sm leading-6">{displayContent}</div>
-          ) : (
-            <MarkdownMessage content={displayContent} />
-          )
-        ) : (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Thinking
-          </div>
-        )}
-        {message.errorMessage && <div className="mt-2 text-xs text-destructive">{message.errorMessage}</div>}
-      </div>
-    </article>
+        {description}
+      </span>
+    </span>
   );
-});
+}
 
-function InlineEditor({
-  initialContent,
-  onSave,
-  onCancel,
+/**
+ * UX-002: a single interactive control for switching provider/model in place, without
+ * navigating to Settings. Each entry's icon/tooltip is derived from the backend-computed
+ * destinationClass (see ProviderStatusIcon) — never re-derived on the frontend.
+ */
+function ProviderModelDropdown({
+  providers,
+  models,
+  providerHealth,
+  providerId,
+  model,
+  onSelect,
 }: {
-  initialContent: string;
-  onSave: (content: string) => void;
-  onCancel: () => void;
+  providers: ProviderConfig[];
+  models: ModelInfo[];
+  providerHealth: Record<string, ProviderHealth>;
+  providerId: string;
+  model: string;
+  onSelect: (providerId: string, model: string) => void;
 }) {
-  const [content, setContent] = React.useState(initialContent);
-  const unchanged = content.trim() === initialContent.trim();
+  const [open, setOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const provider = providers.find((item) => item.id === providerId);
+  const destinationClass = provider?.destinationClass ?? "loopback";
+  const { icon: Icon, label: classLabel, tone } = CONNECTION_METADATA[destinationClass];
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const triggerLabel = provider
+    ? `Provider and model: ${provider.name}, ${model || "no model selected"}, ${classLabel} connection`
+    : "Select a provider and model";
 
   return (
-    <div className="space-y-2">
-      <textarea
-        value={content}
-        onChange={(event) => setContent(event.target.value)}
-        autoFocus
-        rows={Math.max(3, content.split("\n").length)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onCancel();
-          }
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            if (!unchanged && content.trim()) {
-              onSave(content.trim());
-            }
-          }
-        }}
-        className="w-full resize-none rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm leading-6 text-primary-foreground placeholder:text-primary-foreground/50 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      />
-      <div className="flex items-center gap-2">
-        <Button
-          size="sm"
-          variant="primary"
-          onClick={() => onSave(content.trim())}
-          disabled={unchanged || !content.trim()}
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={triggerLabel}
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-9 items-center gap-1.5 rounded-md border border-input bg-background px-2.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Icon className={cn("h-3.5 w-3.5 shrink-0", tone)} aria-hidden="true" />
+        <span className="max-w-[140px] truncate">{provider?.name ?? "No provider"}</span>
+        <span className="max-w-[120px] truncate text-muted-foreground">{model || "No model"}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Providers and models"
+          className="absolute left-0 top-full z-50 mt-1.5 max-h-96 w-72 overflow-y-auto rounded-lg border border-border bg-popover p-1.5 shadow-lg"
         >
-          Save &amp; Regenerate
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onCancel} className="opacity-70">
-          Cancel
-        </Button>
-        <span className="ml-auto text-xs opacity-50">Ctrl/Cmd+Enter to save · Esc to cancel</span>
-      </div>
+          {providers.map((item) => {
+            const itemHealth = providerHealth[item.id];
+            const itemModels = models.filter((entry) => entry.providerId === item.id);
+            const itemMeta = CONNECTION_METADATA[item.destinationClass];
+            const ItemIcon = itemMeta.icon;
+            const tooltipId = `provider-option-${item.id}`;
+
+            return (
+              <div key={item.id} className="mb-1 last:mb-0">
+                <div className="group relative flex items-center gap-1.5 px-2 py-1">
+                  <ItemIcon className={cn("h-3 w-3 shrink-0", itemMeta.tone)} aria-hidden="true" />
+                  <span className="text-xs font-semibold text-foreground">{item.name}</span>
+                  <span className={cn("ml-auto text-[10px] font-medium", itemMeta.tone)} aria-describedby={tooltipId}>
+                    {itemMeta.label}
+                  </span>
+                  <span
+                    id={tooltipId}
+                    role="tooltip"
+                    className={cn(
+                      "pointer-events-none absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-border",
+                      "bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-md",
+                      "opacity-0 transition-opacity duration-150 group-hover:opacity-100",
+                    )}
+                  >
+                    {itemMeta.description}
+                  </span>
+                </div>
+                {itemModels.length === 0 ? (
+                  <div className="px-2 py-1 text-xs text-muted-foreground">
+                    {itemHealth && !itemHealth.isReachable ? "Unavailable — check Settings" : "No models found"}
+                  </div>
+                ) : (
+                  itemModels.map((modelItem) => {
+                    const selected = item.id === providerId && modelItem.name === model;
+                    return (
+                      <button
+                        key={modelItem.id}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        disabled={!modelItem.isAvailable}
+                        onClick={() => {
+                          onSelect(item.id, modelItem.name);
+                          setOpen(false);
+                        }}
+                        className={cn(
+                          "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-150",
+                          "hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring",
+                          "disabled:cursor-not-allowed disabled:opacity-40",
+                          selected && "bg-primary/10 font-medium text-foreground",
+                        )}
+                      >
+                        <span className="truncate">{modelItem.displayName ?? modelItem.name}</span>
+                        {selected && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * UX-002: moves export/import/delete out of the always-visible header (freeing up compact-
+ * width space) into an accessible overflow menu, with the destructive action (delete)
+ * visually separated by a divider and styled distinctly from the safe actions above it.
+ */
+function HeaderOverflowMenu({
+  conversationSelected,
+  onExportMarkdown,
+  onExportJson,
+  onImportJson,
+  onDelete,
+}: {
+  conversationSelected: boolean;
+  onExportMarkdown: () => void;
+  onExportJson: () => void;
+  onImportJson: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        // Return focus to the trigger, matching standard menu/dialog keyboard patterns —
+        // closing a menu must not strand focus on a now-hidden element.
+        triggerRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  function runAndClose(action: () => void) {
+    setOpen(false);
+    action();
+  }
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More conversation actions"
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <MoreVertical className="h-4 w-4" />
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          aria-label="Conversation actions"
+          className="absolute right-0 top-full z-50 mt-1.5 w-52 rounded-lg border border-border bg-popover p-1.5 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!conversationSelected}
+            onClick={() => runAndClose(onExportMarkdown)}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <FileText className="h-4 w-4" aria-hidden="true" />
+            Export as Markdown
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!conversationSelected}
+            onClick={() => runAndClose(onExportJson)}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <FileJson className="h-4 w-4" aria-hidden="true" />
+            Export as JSON
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => runAndClose(onImportJson)}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Download className="h-4 w-4" aria-hidden="true" />
+            Import JSON
+          </button>
+          <div role="separator" className="my-1.5 border-t border-border" />
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!conversationSelected}
+            onClick={() => runAndClose(onDelete)}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive outline-none transition-colors duration-150 hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+            Delete conversation
+          </button>
+        </div>
+      )}
     </div>
   );
 }

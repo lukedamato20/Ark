@@ -11,9 +11,11 @@ export function downloadText(filename: string, content: string, type: string) {
 }
 
 export function safeFilename(value: string) {
-  return value
-    .trim()
-    .replace(/[^a-z0-9-_]+/gi, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase() || "conversation";
+  return (
+    value
+      .trim()
+      .replace(/[^a-z0-9-_]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "conversation"
+  );
 }

@@ -26,9 +26,18 @@ Install these before running Ark:
 - Node.js and pnpm
 - Rust
 - Tauri desktop prerequisites for your operating system
-- Ollama, installed separately from Ark
+- At least one supported local runtime: Ollama or an OpenAI-compatible local server
 
-Ark does not bundle Ollama or model files in the MVP.
+Ark does not bundle Ollama, llama.cpp, or model files. The setup-script-installed llama.cpp
+launcher remains available for development, but is hidden and disabled in release builds until
+the pinned upstream server can meet Ark's complete endpoint-authentication and browser-origin
+isolation requirements. See the [support matrix](docs/support-matrix.md) for exact artifact
+claims.
+
+The development setup scripts read only `config/native-artifacts.json`, verify the pinned
+artifact's checked-in size and SHA-256 before extraction, reject unsafe archive entries, and
+atomically install it with per-file provenance. `pnpm supply-chain:check` verifies the archive
+safety tests plus the checked-in CycloneDX SBOM and third-party notices.
 
 ## Ollama Setup
 
@@ -57,7 +66,13 @@ pnpm tauri:dev
 Run frontend validation:
 
 ```powershell
+pnpm format:check
+pnpm lint
 pnpm typecheck
+pnpm architecture:check
+pnpm support:check
+pnpm contract:check
+pnpm test:frontend
 pnpm build
 ```
 
@@ -65,7 +80,10 @@ Run Rust validation:
 
 ```powershell
 cd src-tauri
-cargo check
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build
 ```
 
 ## Workspace Storage
@@ -79,6 +97,12 @@ The MVP does not automatically move an existing database into the new workspace.
 ## Planning Docs
 
 - [Implementation plan](implementation-plan.md)
+- [Architecture and module ownership](docs/architecture/README.md)
+- [Versioned desktop support and capability matrix](docs/support-matrix.md)
+- [Quality and performance evidence baseline](docs/quality-baseline.md)
+- [Conversation import format and limits](docs/import-format.md)
+- [Credential storage, export, and restore behavior](docs/secrets-and-backups.md)
+- [Local data-at-rest protection and threat model](docs/data-at-rest.md)
 - [Remaining features](docs/remaining-features.md)
 
 ## Keyboard Shortcuts
@@ -90,19 +114,20 @@ The MVP does not automatically move an existing database into the new workspace.
 
 ## Known MVP Limitations
 
-- Ollama is the only implemented provider.
+- Ark supports Ollama, an OpenAI-compatible local inference host, and the setup-script-installed
+  managed llama.cpp host. No cloud provider is enabled.
 - Cloud providers, RAG, document chat, memory, agents, voice, image generation, and local tools are intentionally not implemented.
 - Command palette is deferred.
 - GPU detection is not implemented; diagnostics use observed benchmark results and basic system information.
 - Workspace path changes require an app restart and do not automatically migrate existing data.
 - Edit and retry create append-only branches. Branch browsing/switching beyond the active branch is still limited.
 - Conversation JSON import validates schema, message roles/statuses, and branch references, but full workspace backup/restore is later-phase work.
-- API keys are not needed for the MVP.
+- API keys are not needed by the current local providers. Ark's credential boundary is ready for
+  future authenticated providers: values are stored in the operating-system credential store,
+  never SQLite, localStorage, conversation exports, diagnostics, or automatic clipboard writes.
 
-## Recommended Next Steps
+## Roadmap
 
-1. Complete validation and fix any platform-specific Tauri build issues.
-2. Improve branch browsing/switching on top of the existing append-only message model.
-3. Add focused diagnostics result tests and provider integration tests.
-4. Improve long-history chat performance with virtualization or incremental loading.
-5. Expand provider abstraction in Phase 2 without changing the chat UI contract.
+The [implementation plan](implementation-plan.md) is the source of truth for remaining hardening,
+feature, performance, mobile, and release work. The support matrix deliberately does not claim
+roadmap capabilities before their acceptance evidence exists.
