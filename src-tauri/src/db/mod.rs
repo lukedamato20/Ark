@@ -587,12 +587,12 @@ impl Database {
     /// ARC-005: copies the database file to a timestamped sibling path before any pending
     /// migration runs, and independently verifies the copy (`PRAGMA integrity_check` on a fresh
     /// connection to the *backup* file, not the live one) before allowing migrations to proceed.
-    /// `checkpoint()` first folds the WAL back into the main file — without it, a plain file
-    /// copy of a WAL-mode database can miss committed data that only exists in the `-wal`
-    /// sidecar file, producing a backup that looks complete but silently isn't.
+    /// Uses SQLite's own Online Backup API rather than a raw file copy. A checkpoint-then-copy
+    /// approach only produces a complete backup if the checkpoint fully drains the WAL back into
+    /// the main file at that exact moment (SQLite itself documents that a busy reader can leave
+    /// it incomplete); the backup API instead reads a consistent snapshot of the live database
+    /// directly, page by page, regardless of what the WAL/journal currently looks like.
     fn backup_before_migrations(&self, path: &Path) -> Result<(), AppError> {
-        self.checkpoint()?;
-
         let timestamp = now().replace([':', '.'], "-");
         let file_name = path
             .file_name()
@@ -600,7 +600,7 @@ impl Database {
             .unwrap_or("workspace.sqlite3");
         let backup_path = path.with_file_name(format!("{file_name}.pre-migration-{timestamp}.bak"));
 
-        std::fs::copy(path, &backup_path).map_err(|error| {
+        let backup_failed = |error: rusqlite::Error| {
             AppError::new(
                 "migration_backup_failed",
                 format!(
@@ -609,7 +609,23 @@ impl Database {
                     backup_path.display()
                 ),
             )
-        })?;
+        };
+
+        let mut destination = Connection::open(&backup_path).map_err(backup_failed)?;
+        // Propagates its own well-formed AppError (e.g. a credential-store problem) directly
+        // rather than being papered over with a generic backup-failed message.
+        apply_encryption_key(
+            &destination,
+            self.encryption_key.as_deref().map(String::as_str),
+        )?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut destination)
+                .map_err(backup_failed)?;
+            backup
+                .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                .map_err(backup_failed)?;
+        }
+        drop(destination);
 
         crate::file_permissions::harden_file(&backup_path)?;
         let verify = Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {

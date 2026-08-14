@@ -294,9 +294,15 @@ fn prepare_workspace_root(root: &Path) -> Result<(), AppError> {
     }
 
     fs::create_dir_all(root)?;
-    crate::file_permissions::harden_directory(root)?;
+    // Probe writability before hardening, not after: on Unix, chmod only requires ownership,
+    // not existing write access, so hardening first would silently re-open a directory whose
+    // owner (or a prior process) deliberately restricted it, defeating this exact check. Probing
+    // first means a genuinely restricted directory is correctly rejected; hardening afterward
+    // still leaves a successfully-probed directory at the intended least-privilege permissions.
     let probe_name = format!(".ark-probe-{}", Uuid::new_v4());
-    probe_workspace_root(root, &probe_name)
+    probe_workspace_root(root, &probe_name)?;
+    crate::file_permissions::harden_directory(root)?;
+    Ok(())
 }
 
 fn probe_workspace_root(root: &Path, probe_name: &str) -> Result<(), AppError> {
