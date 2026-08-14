@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppBootstrap,
   BranchAlternative,
@@ -97,6 +98,16 @@ export interface ArkClient {
   /** ARC-006: theme and the built-in runtime's model path — device-scoped, not workspace-scoped. */
   updateDeviceSettings(settings: DeviceSettings): Promise<DeviceSettings>;
 
+  /**
+   * SEC-008: opens a URL through the OS's default browser/handler via the Tauri opener plugin,
+   * never by navigating the app's own webview. Callers must validate the URL themselves first
+   * (see `src/lib/externalLinks.ts`) — this method is a thin pass-through with no orchestration,
+   * matching every other method on this interface; the opener plugin's own capability grant
+   * (`opener:allow-default-urls`, `src-tauri/capabilities/default.json`) is a second, independent
+   * scheme allowlist enforced natively as defense in depth.
+   */
+  openExternalUrl(url: string): Promise<void>;
+
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
   createConversation(title?: string): Promise<Conversation>;
   renameConversation(id: string, title: string): Promise<Conversation>;
@@ -185,6 +196,7 @@ export function createTauriArkClient(): ArkClient {
         request: { recoveryKey },
       }),
     updateDeviceSettings: (settings) => invoke<DeviceSettings>("update_device_settings", { settings }),
+    openExternalUrl: (url) => openUrl(url),
 
     listConversations: (input) =>
       invoke<ConversationPage>("list_conversations", {
@@ -337,6 +349,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     disableWorkspaceEncryption: notImplemented("disableWorkspaceEncryption"),
     restoreWorkspaceRecoveryKey: notImplemented("restoreWorkspaceRecoveryKey"),
     updateDeviceSettings: async (settings) => settings,
+    openExternalUrl: async () => undefined,
 
     listConversations: async () => ({ items: [], nextCursor: null }),
     createConversation: notImplemented("createConversation"),

@@ -1,43 +1,11 @@
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import c from "highlight.js/lib/languages/c";
-import cpp from "highlight.js/lib/languages/cpp";
-import css from "highlight.js/lib/languages/css";
-import go from "highlight.js/lib/languages/go";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import sql from "highlight.js/lib/languages/sql";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { checkExternalLink } from "../../lib/externalLinks";
+import { highlightCode } from "../../lib/highlightCode";
+import { useArkClient } from "../../lib/useArkClient";
 import { Button } from "../../ui/button";
-
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("sh", bash);
-hljs.registerLanguage("shell", bash);
-hljs.registerLanguage("c", c);
-hljs.registerLanguage("cpp", cpp);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("js", javascript);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("py", python);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("ts", typescript);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("html", xml);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
-hljs.registerLanguage("yml", yaml);
 
 export function MarkdownMessage({ content }: { content: string }) {
   return (
@@ -59,6 +27,13 @@ export function MarkdownMessage({ content }: { content: string }) {
 
           return <CodeBlock code={code} language={match[1]} />;
         },
+        a({ href, children, ...props }) {
+          return (
+            <MarkdownLink href={href} {...props}>
+              {children}
+            </MarkdownLink>
+          );
+        },
       }}
     >
       {content}
@@ -66,15 +41,43 @@ export function MarkdownMessage({ content }: { content: string }) {
   );
 }
 
+/**
+ * SEC-008: every Markdown link renders through this component rather than react-markdown's
+ * default `<a>` — model output and imported content are untrusted, so a link's destination is
+ * independently re-validated here regardless of what react-markdown/remark already permitted.
+ * A link with an unsupported scheme (javascript:, data:, file:, a relative path, ...) renders as
+ * inert text, never a clickable or navigable element. A supported link never navigates the app's
+ * own window: the click is always intercepted and handed to the OS's default browser through
+ * `ArkClient.openExternalUrl`, and the real destination is shown via `title` so link text cannot
+ * silently point somewhere other than what it displays.
+ */
+function MarkdownLink({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const client = useArkClient();
+  const check = href ? checkExternalLink(href) : { safe: false as const, url: "", reason: "not a supported link" };
+
+  if (!check.safe) {
+    return <span title={check.reason}>{children}</span>;
+  }
+
+  return (
+    <a
+      {...props}
+      href={check.url}
+      title={check.url}
+      rel="noopener noreferrer"
+      onClick={(event) => {
+        event.preventDefault();
+        void client.openExternalUrl(check.url);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 function CodeBlock({ code, language }: { code: string; language: string }) {
   const [copied, setCopied] = React.useState(false);
-  const html = React.useMemo(() => {
-    const known = hljs.getLanguage(language);
-    if (!known) {
-      return escapeHtml(code);
-    }
-    return hljs.highlight(code, { language }).value;
-  }, [code, language]);
+  const html = React.useMemo(() => highlightCode(code, language), [code, language]);
 
   async function copy() {
     await navigator.clipboard.writeText(code);
@@ -101,13 +104,4 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
       </pre>
     </div>
   );
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }

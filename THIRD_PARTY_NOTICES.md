@@ -190,6 +190,8 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `infer` | 0.19.0 | MIT |
 | cargo | `inout` | 0.1.4 | MIT OR Apache-2.0 |
 | cargo | `ipnet` | 2.12.0 | MIT OR Apache-2.0 |
+| cargo | `is-docker` | 0.2.0 | MIT |
+| cargo | `is-wsl` | 0.4.0 | MIT |
 | cargo | `itoa` | 1.0.18 | MIT OR Apache-2.0 |
 | cargo | `javascriptcore-rs` | 1.1.2 | MIT |
 | cargo | `javascriptcore-rs-sys` | 1.1.1 | MIT |
@@ -254,6 +256,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `objc2-user-notifications` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo | `objc2-web-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo | `once_cell` | 1.21.4 | MIT OR Apache-2.0 |
+| cargo | `open` | 5.4.1 | MIT |
 | cargo | `openssl-src` | 300.6.1+3.6.3 | MIT/Apache-2.0 |
 | cargo | `openssl-sys` | 0.9.117 | MIT |
 | cargo | `option-ext` | 0.2.0 | MPL-2.0 |
@@ -375,6 +378,8 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `tauri-build` | 2.6.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-codegen` | 2.6.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-macros` | 2.6.3 | Apache-2.0 OR MIT |
+| cargo | `tauri-plugin` | 2.6.3 | Apache-2.0 OR MIT |
+| cargo | `tauri-plugin-opener` | 2.5.4 | Apache-2.0 OR MIT |
 | cargo | `tauri-runtime` | 2.11.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-runtime-wry` | 2.11.4 | Apache-2.0 OR MIT |
 | cargo | `tauri-utils` | 2.9.3 | Apache-2.0 OR MIT |
@@ -584,6 +589,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | npm | `@rolldown/pluginutils` | 1.0.0-beta.27 | MIT |
 | npm | `@tauri-apps/api` | 2.11.1 | Apache-2.0 OR MIT |
 | npm | `@tauri-apps/cli` | 2.11.4 | Apache-2.0 OR MIT |
+| npm | `@tauri-apps/plugin-opener` | 2.5.4 | MIT OR Apache-2.0 |
 | npm | `@types/babel__core` | 7.20.5 | MIT |
 | npm | `@types/babel__generator` | 7.27.0 | MIT |
 | npm | `@types/babel__template` | 7.4.4 | MIT |

@@ -4714,6 +4714,54 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/is-docker@0.2.0",
+      "name": "is-docker",
+      "version": "0.2.0",
+      "purl": "pkg:cargo/is-docker@0.2.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/TheLarkInn/is-docker"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/is-wsl@0.4.0",
+      "name": "is-wsl",
+      "version": "0.4.0",
+      "purl": "pkg:cargo/is-wsl@0.4.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/TheLarkInn/is-wsl"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/itoa@1.0.18",
       "name": "itoa",
       "version": "1.0.18",
@@ -6227,6 +6275,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/matklad/once_cell"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/open@5.4.1",
+      "name": "open",
+      "version": "5.4.1",
+      "purl": "pkg:cargo/open@5.4.1",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Byron/open-rs"
         }
       ],
       "properties": [
@@ -9098,6 +9170,54 @@
       "name": "tauri-macros",
       "version": "2.6.3",
       "purl": "pkg:cargo/tauri-macros@2.6.3",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/tauri"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/tauri-plugin-opener@2.5.4",
+      "name": "tauri-plugin-opener",
+      "version": "2.5.4",
+      "purl": "pkg:cargo/tauri-plugin-opener@2.5.4",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/plugins-workspace"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/tauri-plugin@2.6.3",
+      "name": "tauri-plugin",
+      "version": "2.6.3",
+      "purl": "pkg:cargo/tauri-plugin@2.6.3",
       "licenses": [
         {
           "expression": "Apache-2.0 OR MIT"
@@ -14147,6 +14267,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/tauri-apps/tauri.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "npm"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40tauri-apps/plugin-opener@2.5.4",
+      "name": "@tauri-apps/plugin-opener",
+      "version": "2.5.4",
+      "purl": "pkg:npm/%40tauri-apps/plugin-opener@2.5.4",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/plugins-workspace"
         }
       ],
       "properties": [

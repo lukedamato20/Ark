@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default permissions for Ark",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
+  ]
 }

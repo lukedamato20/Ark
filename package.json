@@ -23,6 +23,8 @@
     "test:frontend": "node --experimental-strip-types --test src/state/*.test.ts src/lib/*.test.ts",
     "test:supply-chain": "node --test scripts/runtime-supply-chain.test.mjs",
     "secret-boundary:check": "node scripts/check-secret-boundaries.mjs",
+    "csp:check": "node scripts/check-csp.mjs",
+    "markdown-safety:check": "node scripts/check-markdown-safety.mjs",
     "supply-chain:generate": "node scripts/generate-supply-chain-artifacts.mjs",
     "supply-chain:check": "node --test scripts/runtime-supply-chain.test.mjs && node scripts/generate-supply-chain-artifacts.mjs --check",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"*.{js,json}\"",
@@ -30,6 +32,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-opener": "^2.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.0.0",

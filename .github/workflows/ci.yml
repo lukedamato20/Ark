@@ -53,6 +53,12 @@ jobs:
       - name: Secret non-exposure and channel-boundary checks
         run: pnpm secret-boundary:check
 
+      - name: Content-Security-Policy regression check
+        run: pnpm csp:check
+
+      - name: Markdown/webview raw-HTML and external-link safety check
+        run: pnpm markdown-safety:check
+
       - name: Frontend unit and reconciliation tests
         run: pnpm test:frontend
 

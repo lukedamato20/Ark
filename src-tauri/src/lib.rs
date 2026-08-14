@@ -115,6 +115,7 @@ pub(crate) fn open_database_pair_with_key(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let (workspace, workspace_resolution_error) =
                 workspace::resolve_workspace_for_startup(app.handle())?;
