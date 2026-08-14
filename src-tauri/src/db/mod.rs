@@ -619,12 +619,24 @@ impl Database {
         };
 
         let mut destination = Connection::open(&backup_path).map_err(backup_failed)?;
-        // Propagates its own well-formed AppError (e.g. a credential-store problem) directly
-        // rather than being papered over with a generic backup-failed message.
-        apply_encryption_key(
-            &destination,
-            self.encryption_key.as_deref().map(String::as_str),
-        )?;
+        // Only the key pragma, deliberately not the full apply_encryption_key: that function
+        // also runs a verifying SELECT against sqlite_master, which is right for opening an
+        // *existing* database but wrong here. This destination is a brand-new, still-empty file
+        // about to be populated by the backup below; querying it first is unnecessary (there is
+        // nothing to "unlock" yet) and risks committing SQLite to page-level state before the
+        // backup API gets to establish it, which is the likely cause of the destination
+        // occasionally ending up an invalid ("file is not a database") file.
+        if let Some(key) = self.encryption_key.as_deref() {
+            destination.pragma_update(None, "key", key).map_err(|error| {
+                AppError::new(
+                    "migration_backup_failed",
+                    format!(
+                        "Could not prepare the encrypted backup at {}: {error}. Migration was not attempted.",
+                        backup_path.display()
+                    ),
+                )
+            })?;
+        }
         {
             let backup = rusqlite::backup::Backup::new(&self.connection, &mut destination)
                 .map_err(backup_failed)?;
