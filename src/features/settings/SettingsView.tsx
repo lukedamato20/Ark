@@ -19,6 +19,7 @@ import {
 import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
 import { getErrorMessage } from "../../lib/arkErrors";
+import { validateNumberInput } from "../../lib/numberField";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
   AppErrorShape,
@@ -36,6 +37,7 @@ import type {
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { NumberField } from "../../ui/numberField";
 import { Panel } from "../../ui/panel";
 import { Select } from "../../ui/select";
 import { DiagnosticsPanel } from "../diagnostics/DiagnosticsPanel";
@@ -607,15 +609,20 @@ function ProviderForm({
     }
   }
 
+  const temperatureValidation = validateNumberInput(temperature, 0, 2, "Temperature");
+  const maxTokensValidation = validateNumberInput(maxTokens, 1, 1_000_000, "Max tokens");
+  const numericFieldsValid = temperatureValidation.valid && maxTokensValidation.valid;
+
   async function saveProvider(acknowledgeRemoteRisk = false) {
+    if (!temperatureValidation.valid || !maxTokensValidation.valid) return;
     setSaving(true);
     try {
       const saved = await client.updateProvider({
         providerId: provider.id,
         baseUrl,
         defaultModelId: defaultModelId || null,
-        temperature: Number.parseFloat(temperature),
-        maxTokens: Number.parseInt(maxTokens, 10),
+        temperature: temperatureValidation.parsed,
+        maxTokens: maxTokensValidation.parsed,
         streamingEnabled: true,
         acknowledgeRemoteRisk,
         convertToRemoteProvider,
@@ -712,14 +719,24 @@ function ProviderForm({
         </Select>
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1.5 text-sm">
-          Temperature
-          <Input value={temperature} onChange={(event) => setTemperature(event.target.value)} inputMode="decimal" />
-        </label>
-        <label className="grid gap-1.5 text-sm">
-          Max tokens
-          <Input value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} inputMode="numeric" />
-        </label>
+        <NumberField
+          id={`${provider.id}-temperature`}
+          label="Temperature"
+          value={temperature}
+          onChange={setTemperature}
+          min={0}
+          max={2}
+          help="Controls response randomness — lower is more focused, higher is more varied."
+        />
+        <NumberField
+          id={`${provider.id}-max-tokens`}
+          label="Max tokens"
+          value={maxTokens}
+          onChange={setMaxTokens}
+          min={1}
+          max={1_000_000}
+          help="Upper bound on response length."
+        />
       </div>
       {supportsCredential && (
         <div className="grid gap-2 rounded-md border border-border bg-muted/20 p-3">
@@ -831,7 +848,8 @@ function ProviderForm({
                 !convertToRemoteProvider ||
                 !riskAcknowledged ||
                 (insecureHttpDestination && !allowInsecureRemote) ||
-                saving
+                saving ||
+                !numericFieldsValid
               }
             >
               Save anyway
@@ -843,7 +861,7 @@ function ProviderForm({
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => void saveProvider()} disabled={saving}>
+        <Button onClick={() => void saveProvider()} disabled={saving || !numericFieldsValid}>
           <Save className="h-4 w-4" />
           Save provider
         </Button>
