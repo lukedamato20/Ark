@@ -141,6 +141,7 @@ fn harden(_path: &Path, _directory: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn permission_error(path: &Path, error: std::io::Error) -> AppError {
     AppError::new(
         "workspace_permissions_failed",

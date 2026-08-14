@@ -559,7 +559,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | npm | `@babel/template` | 7.29.7 | MIT |
 | npm | `@babel/traverse` | 7.29.7 | MIT |
 | npm | `@babel/types` | 7.29.7 | MIT |
-| npm | `@esbuild/win32-x64` | 0.25.12 | MIT |
 | npm | `@eslint-community/eslint-utils` | 4.10.1 | MIT |
 | npm | `@eslint-community/regexpp` | 4.12.2 | MIT |
 | npm | `@eslint/config-array` | 0.21.2 | Apache-2.0 |
@@ -583,11 +582,8 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | npm | `@nodelib/fs.stat` | 2.0.5 | MIT |
 | npm | `@nodelib/fs.walk` | 1.2.8 | MIT |
 | npm | `@rolldown/pluginutils` | 1.0.0-beta.27 | MIT |
-| npm | `@rollup/rollup-win32-x64-gnu` | 4.62.2 | MIT |
-| npm | `@rollup/rollup-win32-x64-msvc` | 4.62.2 | MIT |
 | npm | `@tauri-apps/api` | 2.11.1 | Apache-2.0 OR MIT |
 | npm | `@tauri-apps/cli` | 2.11.4 | Apache-2.0 OR MIT |
-| npm | `@tauri-apps/cli-win32-x64-msvc` | 2.11.4 | Apache-2.0 OR MIT |
 | npm | `@types/babel__core` | 7.20.5 | MIT |
 | npm | `@types/babel__generator` | 7.27.0 | MIT |
 | npm | `@types/babel__template` | 7.4.4 | MIT |

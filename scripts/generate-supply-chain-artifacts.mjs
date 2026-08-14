@@ -79,6 +79,12 @@ async function npmComponents() {
     try {
       const info = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8"));
       if (!info.name || !info.version || info.name === "ark") continue;
+      // `os`/`cpu` are npm's own standard fields for platform-gated optional dependencies
+      // (used by rollup/esbuild/lightningcss/etc. native binaries). Which of these physically
+      // install varies by host OS/CPU, so including them here would make this artifact differ
+      // depending on which machine generated it — exactly the drift this check exists to catch.
+      // Excluding them keeps the SBOM to packages that install identically on every platform.
+      if (info.os || info.cpu) continue;
       packages.set(`${info.name}@${info.version}`, info);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;

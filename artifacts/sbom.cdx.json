@@ -13558,30 +13558,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40esbuild/win32-x64@0.25.12",
-      "name": "@esbuild/win32-x64",
-      "version": "0.25.12",
-      "purl": "pkg:npm/%40esbuild/win32-x64@0.25.12",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/evanw/esbuild.git"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "npm"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/%40eslint-community/eslint-utils@4.10.1",
       "name": "@eslint-community/eslint-utils",
       "version": "4.10.1",
@@ -14134,82 +14110,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rollup/rollup-win32-x64-gnu@4.62.2",
-      "name": "@rollup/rollup-win32-x64-gnu",
-      "version": "4.62.2",
-      "purl": "pkg:npm/%40rollup/rollup-win32-x64-gnu@4.62.2",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/rollup/rollup.git"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "npm"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40rollup/rollup-win32-x64-msvc@4.62.2",
-      "name": "@rollup/rollup-win32-x64-msvc",
-      "version": "4.62.2",
-      "purl": "pkg:npm/%40rollup/rollup-win32-x64-msvc@4.62.2",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/rollup/rollup.git"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "npm"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/%40tauri-apps/api@2.11.1",
       "name": "@tauri-apps/api",
       "version": "2.11.1",
       "purl": "pkg:npm/%40tauri-apps/api@2.11.1",
-      "licenses": [
-        {
-          "expression": "Apache-2.0 OR MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/tauri-apps/tauri.git"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "npm"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.11.4",
-      "name": "@tauri-apps/cli-win32-x64-msvc",
-      "version": "2.11.4",
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.11.4",
       "licenses": [
         {
           "expression": "Apache-2.0 OR MIT"
