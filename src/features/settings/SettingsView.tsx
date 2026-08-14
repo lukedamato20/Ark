@@ -23,11 +23,13 @@ import { validateNumberInput } from "../../lib/numberField";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
   AppErrorShape,
+  BackupResult,
   BuiltInRuntimeStatus,
   ModelInfo,
   OllamaPullProgress,
   ProviderConfig,
   ProviderHealth,
+  RestorePreview,
   SecretMetadata,
   SecretStoreStatus,
   ThemeMode,
@@ -88,6 +90,7 @@ export function SettingsView({
   const [selectedProviderId, setSelectedProviderId] = React.useState(visibleProviders[0]?.id ?? "");
   const [workspaceDraft, setWorkspaceDraft] = React.useState(workspace?.rootPath ?? "");
   const [workspaceSaving, setWorkspaceSaving] = React.useState(false);
+  const [copyWorkspaceData, setCopyWorkspaceData] = React.useState(false);
   const [secretStoreStatus, setSecretStoreStatus] = React.useState<SecretStoreStatus | null>(null);
   const [secretStoreChecking, setSecretStoreChecking] = React.useState(false);
   const [protectionStatus, setProtectionStatus] = React.useState<WorkspaceProtectionStatus | null>(null);
@@ -154,7 +157,7 @@ export function SettingsView({
 
     setWorkspaceSaving(true);
     try {
-      const result = await client.setWorkspace(nextPath);
+      const result = await client.setWorkspace(nextPath, copyWorkspaceData);
       onWorkspaceChange(result);
     } catch (error) {
       onError(getErrorMessage(error));
@@ -345,10 +348,20 @@ export function SettingsView({
                 {workspace?.requiresRestart && <Badge tone="warning">restart required</Badge>}
               </div>
               {workspace?.requiresRestart && (
-                <p className="text-sm text-muted-foreground">
-                  Close and reopen Ark to use the selected workspace. Existing data is not moved automatically.
-                </p>
+                <p className="text-sm text-muted-foreground">Close and reopen Ark to use the selected workspace.</p>
               )}
+              <label className="flex items-start gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={copyWorkspaceData}
+                  onChange={(event) => setCopyWorkspaceData(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                />
+                <span>
+                  Copy current conversation data to the new location. The original is left untouched — nothing is ever
+                  deleted automatically. Leave unchecked to start the new location empty.
+                </span>
+              </label>
               <div className="flex flex-wrap gap-2">
                 <Button
                   onClick={saveWorkspace}
@@ -487,6 +500,8 @@ export function SettingsView({
               </div>
             </div>
           </Panel>
+
+          <BackupRestorePanel onError={onError} />
 
           <Panel className="p-4">
             <div className="mb-2 flex items-center gap-2">
@@ -1075,6 +1090,180 @@ function OllamaModelsPanel({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * FTR-001: create/preview/restore all reuse typed paths, not native pickers — the same
+ * UX-005-established deferral (native file/folder dialogs need a new `@tauri-apps/plugin-dialog`
+ * dependency, judged out of scope for that task and unchanged here).
+ */
+function BackupRestorePanel({ onError }: { onError: (message: string) => void }) {
+  const client = useArkClient();
+  const [backupDestination, setBackupDestination] = React.useState("");
+  const [creatingBackup, setCreatingBackup] = React.useState(false);
+  const [backupResult, setBackupResult] = React.useState<BackupResult | null>(null);
+
+  const [restorePath, setRestorePath] = React.useState("");
+  const [previewing, setPreviewing] = React.useState(false);
+  const [preview, setPreview] = React.useState<RestorePreview | null>(null);
+  const [restoreTarget, setRestoreTarget] = React.useState("");
+  const [restoring, setRestoring] = React.useState(false);
+  const [restoreSuccess, setRestoreSuccess] = React.useState<string | null>(null);
+
+  async function createBackup() {
+    if (!backupDestination.trim()) {
+      onError("Choose a backup destination folder.");
+      return;
+    }
+    setCreatingBackup(true);
+    setBackupResult(null);
+    try {
+      setBackupResult(await client.createWorkspaceBackup(backupDestination.trim()));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setCreatingBackup(false);
+    }
+  }
+
+  async function previewRestore() {
+    if (!restorePath.trim()) {
+      onError("Enter the path to a backup file.");
+      return;
+    }
+    setPreviewing(true);
+    setPreview(null);
+    setRestoreSuccess(null);
+    try {
+      setPreview(await client.previewWorkspaceRestore(restorePath.trim()));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function restore() {
+    if (!preview || !restoreTarget.trim()) return;
+    setRestoring(true);
+    try {
+      await client.restoreWorkspaceBackup(restorePath.trim(), restoreTarget.trim());
+      setRestoreSuccess(restoreTarget.trim());
+      setPreview(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setRestoring(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Database className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Backup &amp; Restore</h2>
+      </div>
+      <div className="grid gap-4">
+        <div className="grid gap-2">
+          <div className="text-sm font-medium">Create a backup</div>
+          <div className="flex flex-wrap gap-2">
+            <Input
+              value={backupDestination}
+              onChange={(event) => setBackupDestination(event.target.value)}
+              placeholder="C:\Backups\Ark"
+              className="min-w-64 flex-1"
+              aria-label="Backup destination folder"
+            />
+            <Button onClick={() => void createBackup()} disabled={creatingBackup}>
+              {creatingBackup ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Create backup
+            </Button>
+          </div>
+          {backupResult && (
+            <div role="status" className="rounded-md border border-border bg-muted/30 p-2.5 text-xs">
+              <div className="font-medium text-foreground">Backup created</div>
+              <div className="mt-1 break-all text-muted-foreground">{backupResult.backupPath}</div>
+              <div className="mt-1 text-muted-foreground">
+                {formatBytes(backupResult.manifest.databaseSizeBytes)} · SHA-256{" "}
+                {backupResult.manifest.databaseSha256.slice(0, 12)}…
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-2 border-t border-border pt-3">
+          <div className="text-sm font-medium">Restore from a backup</div>
+          <label className="grid gap-1.5 text-sm">
+            Backup file
+            <Input
+              value={restorePath}
+              onChange={(event) => {
+                setRestorePath(event.target.value);
+                setPreview(null);
+              }}
+              placeholder="C:\Backups\Ark\ark.sqlite3"
+            />
+          </label>
+          <Button variant="secondary" onClick={() => void previewRestore()} disabled={previewing} className="w-fit">
+            {previewing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Preview
+          </Button>
+          {preview && (
+            <div className="grid gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={preview.schemaSupported ? "success" : "danger"}>
+                  {preview.schemaSupported ? "compatible" : "unsupported schema"}
+                </Badge>
+                <span className="text-muted-foreground">
+                  {preview.conversationCount} conversation{preview.conversationCount === 1 ? "" : "s"},{" "}
+                  {preview.messageCount} messages
+                </span>
+              </div>
+              {preview.manifest && (
+                <div className="text-muted-foreground">
+                  Created {preview.manifest.createdAt} · Ark {preview.manifest.appVersion}
+                </div>
+              )}
+              {preview.schemaSupported ? (
+                <>
+                  <label className="grid gap-1.5 text-sm text-foreground">
+                    Restore to (must be an empty or new folder)
+                    <Input
+                      value={restoreTarget}
+                      onChange={(event) => setRestoreTarget(event.target.value)}
+                      placeholder="C:\Ark-restored"
+                    />
+                  </label>
+                  <p className="text-muted-foreground">
+                    This never touches your current workspace. Once restored, use "Workspace folder" above to switch to
+                    it.
+                  </p>
+                  <Button
+                    onClick={() => void restore()}
+                    disabled={restoring || !restoreTarget.trim()}
+                    className="w-fit"
+                  >
+                    {restoring ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    Restore to new workspace
+                  </Button>
+                </>
+              ) : (
+                <p className="text-destructive">
+                  This backup was made by a newer version of Ark than this build supports. Update Ark before restoring
+                  it.
+                </p>
+              )}
+            </div>
+          )}
+          {restoreSuccess && (
+            <p role="status" className="text-sm text-emerald-600 dark:text-emerald-300">
+              Restored to {restoreSuccess}.
+            </p>
+          )}
+        </div>
+      </div>
+    </Panel>
   );
 }
 

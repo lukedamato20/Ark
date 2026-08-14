@@ -78,6 +78,17 @@ const MIGRATIONS: &[MigrationDef] = &[
     },
 ];
 
+/// FTR-001: the highest schema version this build knows how to open/migrate — used by the
+/// backup/restore workflow to tell a backup made by a *newer* Ark build (whose migration this
+/// build has never seen) apart from one this build can safely restore and, if needed, migrate.
+pub fn latest_schema_version() -> i64 {
+    MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0)
+}
+
 const DEFAULT_CONVERSATION_PAGE_SIZE: u32 = 50;
 const MAX_CONVERSATION_PAGE_SIZE: u32 = 100;
 const MAX_HISTORY_SEARCH_CHARS: usize = 256;
@@ -176,7 +187,10 @@ fn connection_uri(path: &Path) -> String {
     }
 }
 
-fn apply_encryption_key(connection: &Connection, key: Option<&str>) -> Result<(), AppError> {
+pub(crate) fn apply_encryption_key(
+    connection: &Connection,
+    key: Option<&str>,
+) -> Result<(), AppError> {
     // SQLite does not validate the file header until the first real statement executes, and
     // SQLCipher validates a key lazily in exactly the same way: `PRAGMA key` itself cannot fail
     // on a wrong key, only a real read against the keyed pages can. This probe forces that
@@ -671,6 +685,106 @@ impl Database {
                     "The pre-migration backup at {} failed its integrity check ({integrity}). Migration was not attempted \
                      — the original workspace database is untouched.",
                     backup_path.display()
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// FTR-001: the user-initiated counterpart to `backup_before_migrations` above — same
+    /// checkpoint-then-Online-Backup-API-then-verify sequence (a raw file copy only produces a
+    /// complete backup if a checkpoint happens to fully drain the WAL at that exact moment; the
+    /// backup API reads a consistent snapshot regardless), kept as a separate method with its own
+    /// error codes/messages rather than sharing `backup_before_migrations` directly, so a change
+    /// to the well-tested pre-migration safety path can never accidentally affect user-triggered
+    /// backups or vice versa. `destination_path` must not already exist — this method creates a
+    /// new file, it never overwrites one.
+    pub fn create_verified_backup(&self, destination_path: &Path) -> Result<(), AppError> {
+        if destination_path.exists() {
+            return Err(AppError::new(
+                "backup_destination_exists",
+                format!(
+                    "{} already exists. Choose a different backup destination.",
+                    destination_path.display()
+                ),
+            ));
+        }
+        self.checkpoint()?;
+
+        let backup_failed = |error: rusqlite::Error| {
+            AppError::new(
+                "backup_failed",
+                format!(
+                    "Could not create a backup at {}: {error}.",
+                    destination_path.display()
+                ),
+            )
+        };
+
+        let mut destination = Connection::open(destination_path).map_err(backup_failed)?;
+        // See `backup_before_migrations`'s identical comment: only the key pragma, not the full
+        // `apply_encryption_key`, since this destination is a brand-new empty file with nothing
+        // to verify yet.
+        if let Some(key) = self.encryption_key.as_deref() {
+            destination
+                .pragma_update(None, "key", key)
+                .map_err(|error| {
+                    AppError::new(
+                        "backup_failed",
+                        format!(
+                            "Could not prepare the encrypted backup at {}: {error}.",
+                            destination_path.display()
+                        ),
+                    )
+                })?;
+        }
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut destination)
+                .map_err(backup_failed)?;
+            backup
+                .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                .map_err(backup_failed)?;
+        }
+        drop(destination);
+
+        crate::file_permissions::harden_file(destination_path)?;
+        let verify = Connection::open_with_flags(
+            destination_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|error| {
+            AppError::new(
+                "backup_verification_failed",
+                format!(
+                    "Created a backup at {} but could not open it to verify it: {error}.",
+                    destination_path.display()
+                ),
+            )
+        })?;
+        apply_encryption_key(&verify, self.encryption_key.as_deref().map(String::as_str))?;
+        let integrity: String = verify
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .map_err(|error| {
+                AppError::new(
+                    "backup_verification_failed",
+                    format!(
+                        "Created a backup at {} but could not verify its integrity: {error}.",
+                        destination_path.display()
+                    ),
+                )
+            })?;
+        if integrity.to_lowercase() != "ok" {
+            drop(verify);
+            // Best-effort: a failed cleanup here doesn't change the fact that the backup is
+            // invalid and must not be trusted — the returned error is what matters, not whether
+            // the broken file happens to still be on disk afterward.
+            let _ = std::fs::remove_file(destination_path);
+            return Err(AppError::new(
+                "backup_verification_failed",
+                format!(
+                    "The backup at {} failed its integrity check ({integrity}) and was removed.",
+                    destination_path.display()
                 ),
             ));
         }

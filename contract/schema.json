@@ -104,6 +104,15 @@
     ],
     "DeviceSettings": ["theme", "builtInModelPath"],
     "WorkspaceInfo": ["rootPath", "databasePath", "defaultRootPath", "configPath", "isPortable", "requiresRestart"],
+    "BackupManifest": ["appVersion", "createdAt", "databaseSha256", "databaseSizeBytes"],
+    "BackupResult": ["backupPath", "manifest"],
+    "RestorePreview": [
+      "manifest",
+      "detectedSchemaVersion",
+      "schemaSupported",
+      "conversationCount",
+      "messageCount"
+    ],
     "SendChatResult": ["conversationId", "userMessageId", "assistantMessageId"],
     "StreamEvent": ["conversationId", "messageId", "delta", "content", "status", "error", "revision", "schemaVersion"],
     "RefreshModelsResult": ["health", "models", "provider"],

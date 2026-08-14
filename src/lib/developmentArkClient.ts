@@ -481,6 +481,45 @@ export function createLongConversationFixtureClient(): ArkClient {
         recentLogs: [],
       },
     }),
+    // FTR-001: exercises BackupRestorePanel's UI wiring live — the real filesystem/SQLite
+    // behavior itself is covered by src-tauri/src/backup.rs's own integration tests, not by this
+    // fixture, which only proves the React side calls these methods and renders their results.
+    createWorkspaceBackup: async (destinationDir) => ({
+      backupPath: `${destinationDir}\\ark.sqlite3`,
+      manifest: {
+        appVersion: "0.1.0",
+        createdAt: timestamp,
+        databaseSha256: "b".repeat(64),
+        databaseSizeBytes: 2_500_000,
+      },
+    }),
+    previewWorkspaceRestore: async (backupPath) =>
+      backupPath.includes("future")
+        ? {
+            manifest: {
+              appVersion: "9.9.9",
+              createdAt: timestamp,
+              databaseSha256: "c".repeat(64),
+              databaseSizeBytes: 1000,
+            },
+            detectedSchemaVersion: 999,
+            schemaSupported: false,
+            conversationCount: 3,
+            messageCount: 40,
+          }
+        : {
+            manifest: {
+              appVersion: "0.1.0",
+              createdAt: timestamp,
+              databaseSha256: "b".repeat(64),
+              databaseSizeBytes: 2_500_000,
+            },
+            detectedSchemaVersion: 5,
+            schemaSupported: true,
+            conversationCount: 3,
+            messageCount: 40,
+          },
+    restoreWorkspaceBackup: async () => undefined,
   });
 }
 

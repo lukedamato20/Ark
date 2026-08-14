@@ -331,6 +331,45 @@ fn workspace_info_matches_contract() {
     assert_matches_contract("WorkspaceInfo", &sample_workspace_info());
 }
 
+fn sample_backup_manifest() -> crate::backup::BackupManifest {
+    crate::backup::BackupManifest {
+        app_version: "0.1.0".to_string(),
+        created_at: "2026-08-14T00:00:00Z".to_string(),
+        database_sha256: "a".repeat(64),
+        database_size_bytes: 4096,
+    }
+}
+
+#[test]
+fn backup_manifest_matches_contract() {
+    assert_matches_contract("BackupManifest", &sample_backup_manifest());
+}
+
+#[test]
+fn backup_result_matches_contract() {
+    assert_matches_contract(
+        "BackupResult",
+        &crate::backup::BackupResult {
+            backup_path: "C:\\backups\\ark.sqlite3".to_string(),
+            manifest: sample_backup_manifest(),
+        },
+    );
+}
+
+#[test]
+fn restore_preview_matches_contract() {
+    assert_matches_contract(
+        "RestorePreview",
+        &crate::backup::RestorePreview {
+            manifest: Some(sample_backup_manifest()),
+            detected_schema_version: 5,
+            schema_supported: true,
+            conversation_count: 12,
+            message_count: 340,
+        },
+    );
+}
+
 #[test]
 fn send_chat_result_matches_contract() {
     assert_matches_contract(

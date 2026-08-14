@@ -44,6 +44,11 @@ pub use crate::secret_store::{SecretMetadata, SecretStoreStatus};
 #[serde(rename_all = "camelCase")]
 pub struct SetWorkspaceRequest {
     pub root_path: String,
+    /// FTR-001: when `true`, seeds the new location with a verified copy of the current
+    /// workspace database before repointing to it — "start empty" (the pre-existing default
+    /// behavior) is `false`/omitted. There is deliberately no "move" option; see
+    /// `backup.rs`'s module doc comment for why deleting the original isn't implemented.
+    pub copy_data: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,14 +276,45 @@ pub fn update_device_settings(
 #[tauri::command]
 pub fn set_workspace(
     app: AppHandle,
+    state: State<'_, AppState>,
     request: SetWorkspaceRequest,
 ) -> Result<WorkspaceInfo, AppError> {
-    crate::workspace::set_workspace_root(&app, &request.root_path)
+    crate::workspace::set_workspace_root(
+        &app,
+        &state,
+        &request.root_path,
+        request.copy_data.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
 pub fn reset_workspace(app: AppHandle) -> Result<WorkspaceInfo, AppError> {
     crate::workspace::reset_workspace_root(&app)
+}
+
+#[tauri::command]
+pub fn create_workspace_backup(
+    state: State<'_, AppState>,
+    destination_dir: String,
+) -> Result<crate::backup::BackupResult, AppError> {
+    crate::backup::create_backup(&state, destination_dir)
+}
+
+#[tauri::command]
+pub fn preview_workspace_restore(
+    state: State<'_, AppState>,
+    backup_path: String,
+) -> Result<crate::backup::RestorePreview, AppError> {
+    crate::backup::preview_restore(&state, backup_path)
+}
+
+#[tauri::command]
+pub fn restore_workspace_backup(
+    state: State<'_, AppState>,
+    backup_path: String,
+    target_root: String,
+) -> Result<(), AppError> {
+    crate::backup::restore_backup(&state, backup_path, target_root)
 }
 
 #[tauri::command]

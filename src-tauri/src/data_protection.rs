@@ -68,7 +68,10 @@ impl ProtectionMetadata {
     }
 }
 
-struct MaintenanceGuard<'a>(&'a AppState);
+/// FTR-001 reuses this exact guard for backup/restore/workspace-change — those operations need
+/// the same exclusivity (no concurrent database mutation, no active stream/import) this was
+/// originally built for SEC-006's protection-mode changes.
+pub(crate) struct MaintenanceGuard<'a>(&'a AppState);
 
 impl Drop for MaintenanceGuard<'_> {
     fn drop(&mut self) {
@@ -76,7 +79,7 @@ impl Drop for MaintenanceGuard<'_> {
     }
 }
 
-fn begin_maintenance(state: &AppState) -> Result<MaintenanceGuard<'_>, AppError> {
+pub(crate) fn begin_maintenance(state: &AppState) -> Result<MaintenanceGuard<'_>, AppError> {
     state
         .storage_maintenance
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -106,7 +109,7 @@ fn begin_maintenance(state: &AppState) -> Result<MaintenanceGuard<'_>, AppError>
     Ok(guard)
 }
 
-fn current_database_path(state: &AppState) -> Result<PathBuf, AppError> {
+pub(crate) fn current_database_path(state: &AppState) -> Result<PathBuf, AppError> {
     let open_error = state
         .workspace_open_error
         .lock()

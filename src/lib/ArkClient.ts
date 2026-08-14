@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppBootstrap,
+  BackupResult,
   BranchAlternative,
   BuiltInRuntimeStatus,
   Conversation,
@@ -16,6 +17,7 @@ import type {
   OllamaPullProgress,
   ProviderConfig,
   RefreshModelsResult,
+  RestorePreview,
   SendChatResult,
   SecretMetadata,
   SecretStoreStatus,
@@ -88,8 +90,21 @@ export interface ListConversationsInput {
 export interface ArkClient {
   getAppBootstrap(): Promise<AppBootstrap>;
   retryWorkspaceOpen(): Promise<AppBootstrap>;
-  setWorkspace(rootPath: string): Promise<WorkspaceInfo>;
+  /** FTR-001: `copyData` seeds the new location with a verified copy of the current workspace
+   * database before repointing to it — omitted/`false` is "start empty" (the pre-existing
+   * behavior). There is deliberately no "move" option; see `backup.rs`'s doc comment. */
+  setWorkspace(rootPath: string, copyData?: boolean): Promise<WorkspaceInfo>;
   resetWorkspace(): Promise<WorkspaceInfo>;
+  /** FTR-001: creates a verified, hash-manifested backup of the current workspace database at
+   * `destinationDir`, which must not already contain one. Never touches the live workspace. */
+  createWorkspaceBackup(destinationDir: string): Promise<BackupResult>;
+  /** FTR-001: read-only inspection of a backup file — integrity, schema compatibility, and
+   * conversation/message counts — without touching the live workspace or the backup itself. */
+  previewWorkspaceRestore(backupPath: string): Promise<RestorePreview>;
+  /** FTR-001: restores `backupPath` into a brand-new directory at `targetRoot` (must not already
+   * contain a workspace database). Never touches the live workspace; use `setWorkspace` after to
+   * actually switch to it. */
+  restoreWorkspaceBackup(backupPath: string, targetRoot: string): Promise<void>;
   getWorkspaceProtectionStatus(): Promise<WorkspaceProtectionStatus>;
   enableWorkspaceEncryption(): Promise<WorkspaceProtectionChange>;
   rotateWorkspaceEncryption(): Promise<WorkspaceProtectionChange>;
@@ -185,8 +200,12 @@ export function createTauriArkClient(): ArkClient {
   return {
     getAppBootstrap: () => invoke<AppBootstrap>("get_app_bootstrap"),
     retryWorkspaceOpen: () => invoke<AppBootstrap>("retry_workspace_open"),
-    setWorkspace: (rootPath) => invoke<WorkspaceInfo>("set_workspace", { request: { rootPath } }),
+    setWorkspace: (rootPath, copyData) => invoke<WorkspaceInfo>("set_workspace", { request: { rootPath, copyData } }),
     resetWorkspace: () => invoke<WorkspaceInfo>("reset_workspace"),
+    createWorkspaceBackup: (destinationDir) => invoke<BackupResult>("create_workspace_backup", { destinationDir }),
+    previewWorkspaceRestore: (backupPath) => invoke<RestorePreview>("preview_workspace_restore", { backupPath }),
+    restoreWorkspaceBackup: (backupPath, targetRoot) =>
+      invoke<void>("restore_workspace_backup", { backupPath, targetRoot }),
     getWorkspaceProtectionStatus: () => invoke<WorkspaceProtectionStatus>("get_workspace_protection_status"),
     enableWorkspaceEncryption: () => invoke<WorkspaceProtectionChange>("enable_workspace_encryption"),
     rotateWorkspaceEncryption: () => invoke<WorkspaceProtectionChange>("rotate_workspace_encryption"),
@@ -337,6 +356,9 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     retryWorkspaceOpen: notImplemented("retryWorkspaceOpen"),
     setWorkspace: notImplemented("setWorkspace"),
     resetWorkspace: notImplemented("resetWorkspace"),
+    createWorkspaceBackup: notImplemented("createWorkspaceBackup"),
+    previewWorkspaceRestore: notImplemented("previewWorkspaceRestore"),
+    restoreWorkspaceBackup: notImplemented("restoreWorkspaceBackup"),
     getWorkspaceProtectionStatus: async () => ({
       mode: "plaintext",
       locked: false,

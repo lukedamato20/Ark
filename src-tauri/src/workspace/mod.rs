@@ -86,13 +86,25 @@ pub fn resolve_workspace_for_startup(
     Ok((workspace, None))
 }
 
-pub fn set_workspace_root(app: &AppHandle, root: &str) -> Result<WorkspaceInfo, AppError> {
+/// FTR-001's `copy_data` seeds the new location with a verified copy of the current workspace
+/// database (via `backup::copy_workspace_data`) before repointing to it — "start empty" (the
+/// pre-existing behavior) when `false`. Copying happens *before* the config is written, so a
+/// failed copy leaves the current workspace selection completely unchanged.
+pub fn set_workspace_root(
+    app: &AppHandle,
+    state: &crate::AppState,
+    root: &str,
+    copy_data: bool,
+) -> Result<WorkspaceInfo, AppError> {
     // COR-008: centralized validator (also rejects embedded NUL bytes, which the previous
     // inline check here did not).
     let validated = crate::validation::validate_workspace_path(root)?;
     let path = PathBuf::from(validated);
 
     prepare_workspace_root(&path)?;
+    if copy_data {
+        crate::backup::copy_workspace_data(state, &path)?;
+    }
 
     let default_root = default_workspace_root(app)?;
     let config_path = workspace_config_path(app)?;

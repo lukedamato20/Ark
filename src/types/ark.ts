@@ -176,6 +176,26 @@ export interface WorkspaceInfo {
   requiresRestart: boolean;
 }
 
+export interface BackupManifest {
+  appVersion: string;
+  createdAt: string;
+  databaseSha256: string;
+  databaseSizeBytes: number;
+}
+
+export interface BackupResult {
+  backupPath: string;
+  manifest: BackupManifest;
+}
+
+export interface RestorePreview {
+  manifest?: BackupManifest | null;
+  detectedSchemaVersion: number;
+  schemaSupported: boolean;
+  conversationCount: number;
+  messageCount: number;
+}
+
 export type ThemeMode = "dark" | "light";
 
 export interface SendChatResult {
