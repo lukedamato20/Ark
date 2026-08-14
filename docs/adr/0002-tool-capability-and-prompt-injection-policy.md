@@ -1,7 +1,8 @@
 # ADR 0002: Tool capability scopes and prompt-injection controls
 
-- Status: Proposed — awaiting engineering/product approval (see "Approval" below)
+- Status: Approved
 - Date: 2026-08-14
+- Approved by: Luke D'Amato, 2026-08-14
 - Owners: Ark core maintainers
 - Scope: the policy every current and future tool-calling feature must follow — CMP-003
   (chat tools/MCP/agents), CMP-004 (web search), CMP-002 (RAG/retrieval), and the Ark Code phase
@@ -129,8 +130,6 @@ without them, matching TST-006's ownership of adversarial testing generally:
 
 ## Approval
 
-This ADR requires the same explicit engineering/product sign-off already established for ADR
-0001 (FND-002) — recorded here as pending, not self-approved. Unlike ADR 0001, no
-implementation is being built against this ADR yet, so there is no "approved after
-implementation" sequencing tension to resolve; approval can and should happen before CMP-003 or
-Ark Code CODE-004 begin.
+Approved by Luke D'Amato, 2026-08-14, before any implementation was built against it — no
+"approved after implementation" sequencing tension to record, unlike ADR 0001. This ADR is
+binding on CMP-002/003/004 and Ark Code's CODE-004/CODE-005 from this date forward.
