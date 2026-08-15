@@ -21,6 +21,7 @@ use crate::import_export::{
     ImportConversationPreview, ImportConversationResult, ImportProviderMapping,
     WorkspaceImportPreview, WorkspaceImportPreviewEntry, WorkspaceImportResult,
 };
+use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview};
 use crate::provider_management::{BuiltInRuntimeStatus, RefreshModelsResult};
 use crate::providers::{
@@ -101,6 +102,7 @@ fn sample_conversation() -> Conversation {
         archived: false,
         project_id: None,
         pinned_at: None,
+        persona_id: None,
     }
 }
 
@@ -230,6 +232,51 @@ fn project_deletion_preview_matches_contract() {
     );
 }
 
+fn sample_persona() -> Persona {
+    Persona {
+        id: "persona-1".to_string(),
+        name: "Terse reviewer".to_string(),
+        instructions: "Be terse and cite line numbers.".to_string(),
+        default_temperature: Some(0.2),
+        default_max_tokens: Some(512),
+        version_number: 2,
+        archived_at: None,
+        created_at: "2026-08-13T00:00:00Z".to_string(),
+        updated_at: "2026-08-13T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn persona_matches_contract() {
+    assert_matches_contract("Persona", &sample_persona());
+}
+
+#[test]
+fn persona_version_summary_matches_contract() {
+    assert_matches_contract(
+        "PersonaVersionSummary",
+        &PersonaVersionSummary {
+            id: "persona-version-1".to_string(),
+            version_number: 2,
+            instructions: "Be terse and cite line numbers.".to_string(),
+            default_temperature: Some(0.2),
+            default_max_tokens: Some(512),
+            created_at: "2026-08-13T00:00:00Z".to_string(),
+        },
+    );
+}
+
+#[test]
+fn persona_deletion_preview_matches_contract() {
+    assert_matches_contract(
+        "PersonaDeletionPreview",
+        &PersonaDeletionPreview {
+            persona: sample_persona(),
+            conversation_count: 2,
+        },
+    );
+}
+
 #[test]
 fn branch_alternative_matches_contract() {
     assert_matches_contract(
@@ -336,6 +383,7 @@ fn app_bootstrap_matches_contract() {
             providers: vec![sample_provider_config()],
             models: vec![sample_model_info()],
             projects: vec![sample_project()],
+            personas: vec![sample_persona()],
             workspace_path: "C:\\workspace\\ark.sqlite3".to_string(),
             workspace: sample_workspace_info(),
             device_settings: crate::device_settings::DeviceSettings {

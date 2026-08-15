@@ -339,6 +339,7 @@ mod tests {
                 archived: false,
                 project_id: None,
                 pinned_at: None,
+                persona_id: None,
             },
             messages,
             provider: None,

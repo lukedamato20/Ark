@@ -22,6 +22,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Persona,
   Project,
   ProviderConfig,
   ProviderHealth,
@@ -54,6 +55,8 @@ interface ChatViewProps {
   /** FTR-003: for the project picker in the conversation settings panel — expected to stay
    * small, so passed as a plain list rather than paginated like conversations. */
   projects: Project[];
+  /** FTR-003: for the persona picker in the conversation settings panel — mirrors `projects`. */
+  personas: Persona[];
   isLoading: boolean;
   /** UX-007: bumped by an explicit "New Chat"/conversation-select action (see `ShellState`'s own
    * doc comment) — focuses the composer, never on a passive background update. */
@@ -63,6 +66,7 @@ interface ChatViewProps {
   onConversationImported: (conversation: Conversation) => void;
   onConversationRenamed: (conversation: Conversation) => void;
   onConversationProjectChange: (id: string, projectId: string | null) => Promise<void>;
+  onConversationPersonaChange: (id: string, personaId: string | null) => Promise<void>;
   /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) rather than
    * this component fetching and applying a result itself — see `useArkController.ts`'s
    * `refreshProviderModels` doc comment. */
@@ -78,6 +82,7 @@ export function ChatView({
   models,
   providerHealth,
   projects,
+  personas,
   isLoading,
   focusComposerSignal,
   onMessagesChange,
@@ -85,6 +90,7 @@ export function ChatView({
   onConversationImported,
   onConversationRenamed,
   onConversationProjectChange,
+  onConversationPersonaChange,
   onRefreshProviderModels,
   onError,
   onInfo,
@@ -728,6 +734,8 @@ export function ChatView({
             provider={provider}
             projects={projects}
             onProjectChange={onConversationProjectChange}
+            personas={personas}
+            onPersonaChange={onConversationPersonaChange}
             onSettingsSaved={onConversationRenamed}
             onError={onError}
           />
@@ -1050,6 +1058,8 @@ function ConversationSettingsButton({
   provider,
   projects,
   onProjectChange,
+  personas,
+  onPersonaChange,
   onSettingsSaved,
   onError,
 }: {
@@ -1057,6 +1067,8 @@ function ConversationSettingsButton({
   provider?: ProviderConfig;
   projects: Project[];
   onProjectChange: (id: string, projectId: string | null) => Promise<void>;
+  personas: Persona[];
+  onPersonaChange: (id: string, personaId: string | null) => Promise<void>;
   onSettingsSaved: (conversation: Conversation) => void;
   onError: (message: string) => void;
 }) {
@@ -1067,6 +1079,7 @@ function ConversationSettingsButton({
   const [maxTokensDraft, setMaxTokensDraft] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [projectChanging, setProjectChanging] = React.useState(false);
+  const [personaChanging, setPersonaChanging] = React.useState(false);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
@@ -1183,6 +1196,31 @@ function ConversationSettingsButton({
                   .map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium">
+              Persona
+              <select
+                value={conversation.personaId ?? ""}
+                disabled={personaChanging}
+                onChange={async (event) => {
+                  setPersonaChanging(true);
+                  try {
+                    await onPersonaChange(conversation.id, event.target.value || null);
+                  } finally {
+                    setPersonaChanging(false);
+                  }
+                }}
+                className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">No persona</option>
+                {personas
+                  .filter((persona) => !persona.archivedAt || persona.id === conversation.personaId)
+                  .map((persona) => (
+                    <option key={persona.id} value={persona.id}>
+                      {persona.name}
                     </option>
                   ))}
               </select>

@@ -68,6 +68,11 @@ pub struct Conversation {
     /// among multiple pinned conversations is deterministic (most-recently-pinned first) —
     /// see migration `0007_conversation_pinning.sql`'s doc comment.
     pub pinned_at: Option<String>,
+    /// FTR-003: `None` means unassigned. Independent of `project_id` — a project groups
+    /// conversations by subject, a persona defines how the assistant behaves; both can be set
+    /// on the same conversation. Set via `Database::set_conversation_persona`, which validates
+    /// the referenced persona exists first — see `personas.rs`'s module doc.
+    pub persona_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,6 +9,7 @@ use crate::config::{
     LOCAL_INFERENCE_HOST_PROVIDER_NAME, LOCAL_INFERENCE_HOST_PROVIDER_TYPE,
 };
 use crate::errors::AppError;
+use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview, UpdateProjectChanges};
 use crate::providers::{ModelInfo, ProviderConfig};
 use chrono::Utc;
@@ -96,6 +97,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 9,
         name: "0009_message_branch_names",
         sql: include_str!("../../migrations/0009_message_branch_names.sql"),
+    },
+    MigrationDef {
+        version: 10,
+        name: "0010_personas",
+        sql: include_str!("../../migrations/0010_personas.sql"),
     },
 ];
 
@@ -981,7 +987,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
-                    system_prompt, temperature, max_tokens, archived, project_id, pinned_at
+                    system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id
                  FROM conversations
                  WHERE id = ?1",
                 params![id],
@@ -1002,7 +1008,7 @@ impl Database {
     ) -> Result<Vec<Conversation>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
-                system_prompt, temperature, max_tokens, archived, project_id, pinned_at
+                system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id
              FROM conversations
              WHERE ?1 IS NULL OR project_id = ?1
              ORDER BY created_at ASC, id ASC",
@@ -1054,8 +1060,8 @@ impl Database {
             "UPDATE conversations
              SET created_at = ?1, updated_at = ?2, provider_id = ?3, model_id = ?4,
                  system_prompt = ?5, temperature = ?6, max_tokens = ?7, archived = ?8,
-                 project_id = ?9, pinned_at = ?10
-             WHERE id = ?11",
+                 project_id = ?9, pinned_at = ?10, persona_id = ?11
+             WHERE id = ?12",
             params![
                 source.created_at,
                 source.updated_at,
@@ -1067,6 +1073,7 @@ impl Database {
                 source.archived,
                 source.project_id,
                 source.pinned_at,
+                source.persona_id,
                 imported_id,
             ],
         )?;
@@ -1167,6 +1174,24 @@ impl Database {
         self.connection.execute(
             "UPDATE conversations SET project_id = ?1 WHERE id = ?2",
             params![project_id, id],
+        )?;
+        self.get_conversation(id)
+    }
+
+    /// FTR-003: assigns or clears (`persona_id = None`) a conversation's persona. Validates the
+    /// referenced persona exists first, mirroring `set_conversation_project` exactly — a project
+    /// and a persona are independently assignable to the same conversation.
+    pub fn set_conversation_persona(
+        &self,
+        id: &str,
+        persona_id: Option<&str>,
+    ) -> Result<Conversation, AppError> {
+        if let Some(persona_id) = persona_id {
+            self.get_persona(persona_id)?;
+        }
+        self.connection.execute(
+            "UPDATE conversations SET persona_id = ?1 WHERE id = ?2",
+            params![persona_id, id],
         )?;
         self.get_conversation(id)
     }
@@ -1287,6 +1312,198 @@ impl Database {
                 .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
             if affected == 0 {
                 return Err(AppError::not_found("Project"));
+            }
+            Ok(())
+        })
+    }
+
+    /// FTR-003: creates a persona and its first version (version 1) in one transaction — the
+    /// persona row's `current_version_id` is set to the version being inserted alongside it, so
+    /// no reader can ever observe a persona without a version to resolve.
+    pub fn create_persona(
+        &self,
+        name: &str,
+        instructions: &str,
+        default_temperature: Option<f64>,
+        default_max_tokens: Option<i64>,
+    ) -> Result<Persona, AppError> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err(AppError::invalid_input("Persona name cannot be empty."));
+        }
+        let persona_id = Uuid::new_v4().to_string();
+        let version_id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.transaction(|| {
+            self.connection.execute(
+                "INSERT INTO personas (id, name, current_version_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![persona_id, trimmed_name, version_id, timestamp],
+            )?;
+            self.connection.execute(
+                "INSERT INTO persona_versions (
+                    id, persona_id, version_number, instructions, default_temperature,
+                    default_max_tokens, created_at
+                 ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6)",
+                params![
+                    version_id,
+                    persona_id,
+                    instructions,
+                    default_temperature,
+                    default_max_tokens,
+                    timestamp
+                ],
+            )?;
+            Ok(())
+        })?;
+        self.get_persona(&persona_id)
+    }
+
+    pub fn list_personas(&self) -> Result<Vec<Persona>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.name, pv.instructions, pv.default_temperature, pv.default_max_tokens,
+                    pv.version_number, p.archived_at, p.created_at, p.updated_at
+             FROM personas p
+             JOIN persona_versions pv ON pv.id = p.current_version_id
+             ORDER BY p.archived_at IS NOT NULL, p.name ASC",
+        )?;
+        let rows = statement.query_map([], map_persona)?;
+        collect_rows(rows)
+    }
+
+    pub fn get_persona(&self, id: &str) -> Result<Persona, AppError> {
+        self.connection
+            .query_row(
+                "SELECT p.id, p.name, pv.instructions, pv.default_temperature, pv.default_max_tokens,
+                        pv.version_number, p.archived_at, p.created_at, p.updated_at
+                 FROM personas p
+                 JOIN persona_versions pv ON pv.id = p.current_version_id
+                 WHERE p.id = ?1",
+                params![id],
+                map_persona,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Persona"))
+    }
+
+    /// FTR-003 acceptance criterion 2: "prompt versions are immutable... and do not silently
+    /// alter past provenance." A persona's `name` is ordinary mutable metadata and is always
+    /// updated in place. Its instructions/defaults are different: if they're unchanged from the
+    /// current version, only `name`/`updated_at` are touched (no version churn from a plain
+    /// rename); if they differ at all, a brand-new `persona_versions` row is inserted and
+    /// `current_version_id` moves to it — the *previous* version row is never mutated, so any
+    /// generation's provenance that already recorded that version number keeps pointing at
+    /// exactly the content that was live when it ran, even after this call returns.
+    pub fn update_persona(
+        &self,
+        id: &str,
+        name: &str,
+        instructions: &str,
+        default_temperature: Option<f64>,
+        default_max_tokens: Option<i64>,
+    ) -> Result<Persona, AppError> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err(AppError::invalid_input("Persona name cannot be empty."));
+        }
+        let current = self.get_persona(id)?;
+        let timestamp = now();
+
+        let prompt_unchanged = current.instructions == instructions
+            && current.default_temperature == default_temperature
+            && current.default_max_tokens == default_max_tokens;
+
+        if prompt_unchanged {
+            self.connection.execute(
+                "UPDATE personas SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![trimmed_name, timestamp, id],
+            )?;
+        } else {
+            let version_id = Uuid::new_v4().to_string();
+            let next_version_number = current.version_number + 1;
+            self.transaction(|| {
+                self.connection.execute(
+                    "INSERT INTO persona_versions (
+                        id, persona_id, version_number, instructions, default_temperature,
+                        default_max_tokens, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        version_id,
+                        id,
+                        next_version_number,
+                        instructions,
+                        default_temperature,
+                        default_max_tokens,
+                        timestamp
+                    ],
+                )?;
+                self.connection.execute(
+                    "UPDATE personas SET name = ?1, current_version_id = ?2, updated_at = ?3
+                     WHERE id = ?4",
+                    params![trimmed_name, version_id, timestamp, id],
+                )?;
+                Ok(())
+            })?;
+        }
+        self.get_persona(id)
+    }
+
+    /// FTR-003: every version ever created for this persona, newest first — the visible proof
+    /// that versioning is real, not just an internal implementation detail.
+    pub fn list_persona_versions(&self, id: &str) -> Result<Vec<PersonaVersionSummary>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, version_number, instructions, default_temperature, default_max_tokens, created_at
+             FROM persona_versions
+             WHERE persona_id = ?1
+             ORDER BY version_number DESC",
+        )?;
+        let rows = statement.query_map(params![id], map_persona_version_summary)?;
+        collect_rows(rows)
+    }
+
+    /// FTR-003: archiving a persona is non-destructive and doesn't touch its conversations —
+    /// mirrors `set_project_archived` exactly. Undo is calling this again with `false`.
+    pub fn set_persona_archived(&self, id: &str, archived: bool) -> Result<Persona, AppError> {
+        let archived_at = archived.then(now);
+        self.connection.execute(
+            "UPDATE personas SET archived_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![archived_at, now(), id],
+        )?;
+        self.get_persona(id)
+    }
+
+    /// FTR-003: what `delete_persona` is about to do, shown to the user before they confirm —
+    /// mirrors `preview_project_deletion` exactly.
+    pub fn preview_persona_deletion(&self, id: &str) -> Result<PersonaDeletionPreview, AppError> {
+        let persona = self.get_persona(id)?;
+        let conversation_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE persona_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(PersonaDeletionPreview {
+            persona,
+            conversation_count,
+        })
+    }
+
+    /// Unassigns every conversation referencing this persona, deletes every version, then
+    /// deletes the persona itself, inside one transaction — mirrors `delete_project` exactly.
+    pub fn delete_persona(&self, id: &str) -> Result<(), AppError> {
+        self.transaction(|| {
+            self.connection.execute(
+                "UPDATE conversations SET persona_id = NULL WHERE persona_id = ?1",
+                params![id],
+            )?;
+            self.connection.execute(
+                "DELETE FROM persona_versions WHERE persona_id = ?1",
+                params![id],
+            )?;
+            let affected = self
+                .connection
+                .execute("DELETE FROM personas WHERE id = ?1", params![id])?;
+            if affected == 0 {
+                return Err(AppError::not_found("Persona"));
             }
             Ok(())
         })
@@ -2044,17 +2261,18 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         archived: row.get::<_, i64>(10)? != 0,
         project_id: row.get(11)?,
         pinned_at: row.get(12)?,
+        persona_id: row.get(13)?,
     })
 }
 
 /// FTR-002: used only by `list_conversations_page`, whose query always selects a trailing
 /// `match_snippet` column (real when searching, `NULL` otherwise — see
 /// `build_conversation_page_query`) in addition to every column `map_conversation` reads, so
-/// reusing it here for the shared columns is safe: it never touches index 13.
+/// reusing it here for the shared columns is safe: it never touches index 14.
 fn map_conversation_with_snippet(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<(Conversation, Option<String>)> {
-    Ok((map_conversation(row)?, row.get(13)?))
+    Ok((map_conversation(row)?, row.get(14)?))
 }
 
 fn build_conversation_page_query(
@@ -2091,7 +2309,7 @@ fn build_conversation_page_query(
     let mut select_columns = String::from(
         "c.id, c.title, c.created_at, c.updated_at, c.provider_id, c.model_id,
          c.current_message_id, c.system_prompt, c.temperature, c.max_tokens,
-         c.archived, c.project_id, c.pinned_at",
+         c.archived, c.project_id, c.pinned_at, c.persona_id",
     );
     let mut values = Vec::<Value>::new();
 
@@ -2260,6 +2478,31 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         archived_at: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+    })
+}
+
+fn map_persona(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persona> {
+    Ok(Persona {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        instructions: row.get(2)?,
+        default_temperature: row.get(3)?,
+        default_max_tokens: row.get(4)?,
+        version_number: row.get(5)?,
+        archived_at: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn map_persona_version_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonaVersionSummary> {
+    Ok(PersonaVersionSummary {
+        id: row.get(0)?,
+        version_number: row.get(1)?,
+        instructions: row.get(2)?,
+        default_temperature: row.get(3)?,
+        default_max_tokens: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }
 
@@ -3380,6 +3623,74 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    fn seed_migration_0009_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..9] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1),
+                        (9, '0009_message_branch_names', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 9 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-9 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-9 conversation, from before personas existed");
+        conversation_id
+    }
+
+    /// FTR-003 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 10, the current latest — a pre-existing conversation row from a migration-9
+    /// workspace must survive migration 10's new `personas`/`persona_versions` tables and the new
+    /// `conversations.persona_id` column, and both must actually be usable afterward.
+    #[test]
+    fn upgrading_a_migration_0009_workspace_adds_personas_and_the_persona_id_column() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0009_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-9 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-9 conversation");
+        assert_eq!(
+            conversation.persona_id, None,
+            "migration 10 must leave pre-existing rows unassigned by default"
+        );
+
+        let persona = db
+            .create_persona("Post-upgrade persona", "Be terse.", None, None)
+            .expect("personas table is usable immediately after migration 10");
+        let assigned = db
+            .set_conversation_persona(&conversation_id, Some(&persona.id))
+            .expect("persona_id column is usable immediately after migration 10");
+        assert_eq!(assigned.persona_id.as_deref(), Some(persona.id.as_str()));
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -3722,6 +4033,201 @@ mod tests {
 
         let missing = db.get_project(&project.id).expect_err("project is gone");
         assert_eq!(missing.code, "not_found");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn create_persona_rejects_a_blank_name_or_blank_instructions_and_starts_at_version_one() {
+        let (db, path) = test_db();
+
+        let error = db
+            .create_persona("   ", "Be terse.", None, None)
+            .expect_err("blank persona name is rejected");
+        assert_eq!(error.code, "invalid_input");
+
+        let persona = db
+            .create_persona("Terse reviewer", "Be terse.", Some(0.2), Some(512))
+            .expect("persona created");
+        assert_eq!(persona.name, "Terse reviewer");
+        assert_eq!(persona.instructions, "Be terse.");
+        assert_eq!(persona.default_temperature, Some(0.2));
+        assert_eq!(persona.default_max_tokens, Some(512));
+        assert_eq!(persona.version_number, 1);
+        assert_eq!(persona.archived_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_persona_creates_a_new_version_only_when_prompt_content_actually_changes() {
+        let (db, path) = test_db();
+        let created = db
+            .create_persona("Reviewer", "Be terse.", Some(0.2), None)
+            .expect("persona created");
+        assert_eq!(created.version_number, 1);
+
+        // FTR-003 criterion 2: a plain rename (identical instructions/defaults) must not create
+        // a new version — only the mutable `name` metadata changes.
+        let renamed = db
+            .update_persona(&created.id, "Terse reviewer", "Be terse.", Some(0.2), None)
+            .expect("renamed");
+        assert_eq!(renamed.name, "Terse reviewer");
+        assert_eq!(
+            renamed.version_number, 1,
+            "a plain rename must not bump the version"
+        );
+
+        // Changing the instructions must create a new, immutable version.
+        let revised = db
+            .update_persona(
+                &created.id,
+                "Terse reviewer",
+                "Be terse and cite line numbers.",
+                Some(0.2),
+                None,
+            )
+            .expect("revised");
+        assert_eq!(revised.version_number, 2);
+        assert_eq!(revised.instructions, "Be terse and cite line numbers.");
+
+        // The version history proves the previous version's content was never overwritten.
+        let versions = db
+            .list_persona_versions(&created.id)
+            .expect("versions listed");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version_number, 2);
+        assert_eq!(versions[0].instructions, "Be terse and cite line numbers.");
+        assert_eq!(versions[1].version_number, 1);
+        assert_eq!(
+            versions[1].instructions, "Be terse.",
+            "editing must not silently alter the prior version's content"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_persona_archived_excludes_it_from_the_default_listing_order() {
+        let (db, path) = test_db();
+        let active = db
+            .create_persona("Active persona", "Be helpful.", None, None)
+            .expect("created");
+        let archived = db
+            .create_persona("Archived persona", "Be helpful.", None, None)
+            .expect("created");
+
+        let archived = db
+            .set_persona_archived(&archived.id, true)
+            .expect("archived");
+        assert!(archived.archived_at.is_some());
+
+        let listed = db.list_personas().expect("listed");
+        let ids: Vec<&str> = listed.iter().map(|persona| persona.id.as_str()).collect();
+        assert_eq!(ids, vec![active.id.as_str(), archived.id.as_str()]);
+
+        let unarchived = db
+            .set_persona_archived(&archived.id, false)
+            .expect("unarchived — undo is just the opposite call");
+        assert_eq!(unarchived.archived_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_conversation_persona_validates_the_persona_exists_first() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Unassigned".to_string()))
+            .expect("conversation created");
+
+        let error = db
+            .set_conversation_persona(&conversation.id, Some("does-not-exist"))
+            .expect_err("assigning a nonexistent persona is rejected");
+        assert_eq!(error.code, "not_found");
+
+        let refetched = db.get_conversation(&conversation.id).expect("refetched");
+        assert_eq!(
+            refetched.persona_id, None,
+            "a rejected assignment must not partially apply"
+        );
+
+        let persona = db
+            .create_persona("Real persona", "Be helpful.", None, None)
+            .expect("persona created");
+        let assigned = db
+            .set_conversation_persona(&conversation.id, Some(&persona.id))
+            .expect("assigned to a real persona");
+        assert_eq!(assigned.persona_id.as_deref(), Some(persona.id.as_str()));
+
+        let cleared = db
+            .set_conversation_persona(&conversation.id, None)
+            .expect("cleared");
+        assert_eq!(cleared.persona_id, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_conversation_can_have_an_independent_project_and_persona_at_once() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Both assigned".to_string()))
+            .expect("conversation created");
+        let project = db.create_project("Research").expect("project created");
+        let persona = db
+            .create_persona("Reviewer", "Be terse.", None, None)
+            .expect("persona created");
+
+        db.set_conversation_project(&conversation.id, Some(&project.id))
+            .expect("project assigned");
+        let both = db
+            .set_conversation_persona(&conversation.id, Some(&persona.id))
+            .expect("persona assigned");
+        assert_eq!(both.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(both.persona_id.as_deref(), Some(persona.id.as_str()));
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_persona_unassigns_conversations_rather_than_deleting_them() {
+        let (db, path) = test_db();
+        let persona = db
+            .create_persona("Doomed persona", "Be terse.", None, None)
+            .expect("created");
+        let conversation = db
+            .create_conversation(Some("Survives persona deletion".to_string()))
+            .expect("conversation created");
+        db.set_conversation_persona(&conversation.id, Some(&persona.id))
+            .expect("assigned");
+
+        let preview = db
+            .preview_persona_deletion(&persona.id)
+            .expect("preview computed");
+        assert_eq!(preview.conversation_count, 1);
+        assert_eq!(preview.persona.id, persona.id);
+
+        db.delete_persona(&persona.id).expect("persona deleted");
+
+        let refetched = db
+            .get_conversation(&conversation.id)
+            .expect("conversation still exists — deletion must not cascade");
+        assert_eq!(refetched.persona_id, None);
+
+        let missing = db.get_persona(&persona.id).expect_err("persona is gone");
+        assert_eq!(missing.code, "not_found");
+
+        let versions = db
+            .list_persona_versions(&persona.id)
+            .expect("listing versions of a deleted persona returns empty, not an error");
+        assert!(versions.is_empty());
 
         drop(db);
         let _ = fs::remove_file(path);

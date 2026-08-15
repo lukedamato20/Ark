@@ -23,6 +23,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Persona,
   Project,
   ProviderConfig,
   RefreshModelsResult,
@@ -46,6 +47,8 @@ export interface ArkController {
   changeConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   /** FTR-003: `projectId: null` unassigns. */
   changeConversationProject: (id: string, projectId: string | null) => Promise<void>;
+  /** FTR-003: `personaId: null` unassigns — independent of `changeConversationProject`. */
+  changeConversationPersona: (id: string, personaId: string | null) => Promise<void>;
   setShowArchived: (showArchived: boolean) => void;
   refreshProviderModels: (providerId: string) => Promise<void>;
   saveProvider: (provider: ProviderConfig) => void;
@@ -54,6 +57,9 @@ export interface ArkController {
    * an already-server-confirmed result into the store. */
   saveProject: (project: Project) => void;
   removeProject: (id: string) => void;
+  /** FTR-003: mirrors `saveProject`/`removeProject` exactly. */
+  savePersona: (persona: Persona) => void;
+  removePersona: (id: string) => void;
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
@@ -305,6 +311,7 @@ export function useArkController(): ArkController {
         health: {},
       });
       stores.projects.set({ projects: entityCollection(data.projects) });
+      stores.personas.set({ personas: entityCollection(data.personas) });
       stores.settings.set({
         workspacePath: data.workspacePath,
         workspace: data.workspace,
@@ -543,6 +550,31 @@ export function useArkController(): ArkController {
 
   const removeProject = React.useCallback(
     (id: string) => patchStore(stores.projects, { projects: removeEntity(stores.projects.getSnapshot().projects, id) }),
+    [stores],
+  );
+
+  const changeConversationPersona = React.useCallback(
+    async (id: string, personaId: string | null) => {
+      try {
+        const updated = await client.setConversationPersona(id, personaId);
+        patchStore(stores.catalog, {
+          conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+        });
+      } catch (error) {
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
+  const savePersona = React.useCallback(
+    (persona: Persona) =>
+      patchStore(stores.personas, { personas: upsertEntity(stores.personas.getSnapshot().personas, persona) }),
+    [stores],
+  );
+
+  const removePersona = React.useCallback(
+    (id: string) => patchStore(stores.personas, { personas: removeEntity(stores.personas.getSnapshot().personas, id) }),
     [stores],
   );
 
@@ -834,11 +866,14 @@ export function useArkController(): ArkController {
       changeConversationArchived,
       changeConversationPinned,
       changeConversationProject,
+      changeConversationPersona,
       setShowArchived,
       refreshProviderModels,
       saveProvider,
       saveProject,
       removeProject,
+      savePersona,
+      removePersona,
       changeTheme,
       changeBuiltInModelPath,
       changeCrashCaptureEnabled,
@@ -859,6 +894,7 @@ export function useArkController(): ArkController {
       changeConversationArchived,
       changeConversationPinned,
       changeConversationProject,
+      changeConversationPersona,
       changeCrashCaptureEnabled,
       changeTheme,
       createConversation,
@@ -868,9 +904,11 @@ export function useArkController(): ArkController {
       openSearch,
       refreshProviderModels,
       removeProject,
+      removePersona,
       renameConversation,
       retryWorkspace,
       saveProject,
+      savePersona,
       saveProvider,
       searchConversations,
       selectConversation,

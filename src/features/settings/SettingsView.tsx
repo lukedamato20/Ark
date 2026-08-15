@@ -35,6 +35,9 @@ import type {
   DiagnosticsBundle,
   ModelInfo,
   OllamaPullProgress,
+  Persona,
+  PersonaDeletionPreview,
+  PersonaVersionSummary,
   Project,
   ProjectDeletionPreview,
   ProviderConfig,
@@ -63,6 +66,7 @@ interface SettingsViewProps {
   models: ModelInfo[];
   providerHealth: Record<string, ProviderHealth>;
   projects: Project[];
+  personas: Persona[];
   theme: ThemeMode;
   workspace?: WorkspaceInfo | null;
   builtInStatus: BuiltInRuntimeStatus;
@@ -78,6 +82,8 @@ interface SettingsViewProps {
   onProviderSaved: (provider: ProviderConfig) => void;
   onProjectSaved: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
+  onPersonaSaved: (persona: Persona) => void;
+  onPersonaDeleted: (id: string) => void;
   /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) — see
    * `useArkController.ts`'s `refreshProviderModels` doc comment. */
   onRefreshProviderModels: (providerId: string) => Promise<void>;
@@ -91,6 +97,7 @@ export function SettingsView({
   models,
   providerHealth,
   projects,
+  personas,
   theme,
   workspace,
   builtInStatus,
@@ -104,6 +111,8 @@ export function SettingsView({
   onProviderSaved,
   onProjectSaved,
   onProjectDeleted,
+  onPersonaSaved,
+  onPersonaDeleted,
   onRefreshProviderModels,
   onBack,
   onError,
@@ -356,6 +365,13 @@ export function SettingsView({
             models={models}
             onProjectSaved={onProjectSaved}
             onProjectDeleted={onProjectDeleted}
+            onError={onError}
+          />
+
+          <PersonasPanel
+            personas={personas}
+            onPersonaSaved={onPersonaSaved}
+            onPersonaDeleted={onPersonaDeleted}
             onError={onError}
           />
 
@@ -958,6 +974,377 @@ function ProjectEditor({
           type="button"
           onClick={() => void save()}
           disabled={saving || !name.trim() || !temperatureValid || !maxTokensValid}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * FTR-003: a persona is a reusable, named instruction identity a conversation can be assigned
+ * to — independent of `ProjectsPanel` above (a project groups conversations by subject, a
+ * persona defines how the assistant behaves; a conversation can have both at once). Mirrors
+ * `ProjectsPanel`'s structure exactly, with two real differences: instructions are required (a
+ * persona's entire purpose is its prompt) rather than optional, and editing them is versioned —
+ * see `PersonaEditor`'s version history.
+ */
+function PersonasPanel({
+  personas,
+  onPersonaSaved,
+  onPersonaDeleted,
+  onError,
+}: {
+  personas: Persona[];
+  onPersonaSaved: (persona: Persona) => void;
+  onPersonaDeleted: (id: string) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [newName, setNewName] = React.useState("");
+  const [newInstructions, setNewInstructions] = React.useState("");
+  const [creating, setCreating] = React.useState(false);
+  const [showArchived, setShowArchived] = React.useState(false);
+
+  const visiblePersonas = personas
+    .filter((persona) => showArchived || !persona.archivedAt)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const selected = personas.find((persona) => persona.id === selectedId) ?? null;
+
+  async function createPersona() {
+    const trimmedName = newName.trim();
+    const trimmedInstructions = newInstructions.trim();
+    if (!trimmedName || !trimmedInstructions) return;
+    setCreating(true);
+    try {
+      const persona = await client.createPersona({ name: trimmedName, instructions: trimmedInstructions });
+      onPersonaSaved(persona);
+      setNewName("");
+      setNewInstructions("");
+      setSelectedId(persona.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className="h-4 w-4" />
+          <h2 className="text-sm font-semibold">Personas</h2>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(event) => setShowArchived(event.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          Show archived
+        </label>
+      </div>
+      <p className="mb-3 text-sm text-muted-foreground">
+        A reusable instruction identity a conversation can be assigned to, independent of its project.
+      </p>
+
+      <div className="mb-3 grid gap-2 rounded-md border border-border p-3">
+        <Input
+          value={newName}
+          onChange={(event) => setNewName(event.target.value)}
+          placeholder="New persona name"
+          maxLength={200}
+        />
+        <Textarea
+          value={newInstructions}
+          onChange={(event) => setNewInstructions(event.target.value)}
+          placeholder="Instructions (required) — e.g. 'Be terse and cite line numbers.'"
+          rows={2}
+        />
+        <Button
+          variant="secondary"
+          disabled={creating || !newName.trim() || !newInstructions.trim()}
+          onClick={() => void createPersona()}
+          className="w-fit"
+        >
+          {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Create
+        </Button>
+      </div>
+
+      {visiblePersonas.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No personas yet.</p>
+      ) : (
+        <div className="grid gap-1">
+          {visiblePersonas.map((persona) => (
+            <button
+              key={persona.id}
+              type="button"
+              onClick={() => setSelectedId(persona.id === selectedId ? null : persona.id)}
+              aria-expanded={persona.id === selectedId}
+              className={cn(
+                "flex items-center justify-between rounded-md border border-transparent px-2 py-1.5 text-left text-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring",
+                persona.id === selectedId && "border-border bg-muted",
+              )}
+            >
+              <span className="truncate">{persona.name}</span>
+              <span className="flex items-center gap-1.5 shrink-0">
+                <span className="text-xs text-muted-foreground">v{persona.versionNumber}</span>
+                {persona.archivedAt && <Badge tone="warning">Archived</Badge>}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <PersonaEditor
+          key={selected.id}
+          persona={selected}
+          onPersonaSaved={onPersonaSaved}
+          onPersonaDeleted={(id) => {
+            onPersonaDeleted(id);
+            setSelectedId(null);
+          }}
+          onError={onError}
+        />
+      )}
+    </Panel>
+  );
+}
+
+function PersonaEditor({
+  persona,
+  onPersonaSaved,
+  onPersonaDeleted,
+  onError,
+}: {
+  persona: Persona;
+  onPersonaSaved: (persona: Persona) => void;
+  onPersonaDeleted: (id: string) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [name, setName] = React.useState(persona.name);
+  const [instructions, setInstructions] = React.useState(persona.instructions);
+  const [temperature, setTemperature] = React.useState(
+    persona.defaultTemperature != null ? String(persona.defaultTemperature) : "",
+  );
+  const [maxTokens, setMaxTokens] = React.useState(
+    persona.defaultMaxTokens != null ? String(persona.defaultMaxTokens) : "",
+  );
+  const [saving, setSaving] = React.useState(false);
+  const [archiving, setArchiving] = React.useState(false);
+  const [deletePreview, setDeletePreview] = React.useState<PersonaDeletionPreview | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
+  const [versions, setVersions] = React.useState<PersonaVersionSummary[] | null>(null);
+  const [versionsLoading, setVersionsLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    setName(persona.name);
+    setInstructions(persona.instructions);
+    setTemperature(persona.defaultTemperature != null ? String(persona.defaultTemperature) : "");
+    setMaxTokens(persona.defaultMaxTokens != null ? String(persona.defaultMaxTokens) : "");
+    setDeletePreview(null);
+    setVersions(null);
+  }, [persona]);
+
+  // FTR-003: mirrors `ProjectEditor`'s bespoke empty-is-valid inline validation for the same
+  // "optional numeric override" shape — see that component's comment for why `NumberField` isn't
+  // reused here.
+  const temperatureTrimmed = temperature.trim();
+  const maxTokensTrimmed = maxTokens.trim();
+  const temperatureNumber = temperatureTrimmed === "" ? null : Number(temperatureTrimmed);
+  const maxTokensNumber = maxTokensTrimmed === "" ? null : Number(maxTokensTrimmed);
+  const temperatureValid =
+    temperatureTrimmed === "" ||
+    (temperatureNumber !== null &&
+      Number.isFinite(temperatureNumber) &&
+      temperatureNumber >= MIN_PROJECT_TEMPERATURE &&
+      temperatureNumber <= MAX_PROJECT_TEMPERATURE);
+  const maxTokensValid =
+    maxTokensTrimmed === "" ||
+    (maxTokensNumber !== null &&
+      Number.isInteger(maxTokensNumber) &&
+      maxTokensNumber >= MIN_PROJECT_MAX_TOKENS &&
+      maxTokensNumber <= MAX_PROJECT_MAX_TOKENS);
+
+  async function save() {
+    if (!name.trim() || !instructions.trim() || !temperatureValid || !maxTokensValid) return;
+    setSaving(true);
+    try {
+      const saved = await client.updatePersona({
+        id: persona.id,
+        name,
+        instructions,
+        defaultTemperature: temperatureNumber,
+        defaultMaxTokens: maxTokensNumber,
+      });
+      onPersonaSaved(saved);
+      setVersions(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleArchived() {
+    setArchiving(true);
+    try {
+      const saved = await client.setPersonaArchived(persona.id, !persona.archivedAt);
+      onPersonaSaved(saved);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setArchiving(false);
+    }
+  }
+
+  async function loadDeletePreview() {
+    try {
+      setDeletePreview(await client.previewPersonaDeletion(persona.id));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }
+
+  async function confirmDelete() {
+    setDeleting(true);
+    try {
+      await client.deletePersona(persona.id);
+      onPersonaDeleted(persona.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+      setDeleting(false);
+    }
+  }
+
+  async function toggleVersionHistory() {
+    if (versions) {
+      setVersions(null);
+      return;
+    }
+    setVersionsLoading(true);
+    try {
+      setVersions(await client.listPersonaVersions(persona.id));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setVersionsLoading(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 grid gap-3 rounded-md border border-border p-3">
+      <label className="grid gap-1.5 text-sm">
+        Name
+        <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={200} />
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Instructions
+        <Textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} rows={4} />
+        {!instructions.trim() && (
+          <span role="alert" className="text-xs text-destructive">
+            Instructions cannot be empty.
+          </span>
+        )}
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Default temperature
+        <Input
+          value={temperature}
+          onChange={(event) => setTemperature(event.target.value)}
+          inputMode="decimal"
+          placeholder="Provider default"
+          aria-invalid={!temperatureValid}
+          className={cn(!temperatureValid && "border-destructive focus-visible:ring-destructive")}
+        />
+        {!temperatureValid && (
+          <span role="alert" className="text-xs text-destructive">
+            Must be between {MIN_PROJECT_TEMPERATURE} and {MAX_PROJECT_TEMPERATURE}, or empty.
+          </span>
+        )}
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Default max tokens
+        <Input
+          value={maxTokens}
+          onChange={(event) => setMaxTokens(event.target.value)}
+          inputMode="numeric"
+          placeholder="Provider default"
+          aria-invalid={!maxTokensValid}
+          className={cn(!maxTokensValid && "border-destructive focus-visible:ring-destructive")}
+        />
+        {!maxTokensValid && (
+          <span role="alert" className="text-xs text-destructive">
+            Must be a whole number between {MIN_PROJECT_MAX_TOKENS} and {MAX_PROJECT_MAX_TOKENS}, or empty.
+          </span>
+        )}
+      </label>
+
+      <div>
+        <Button type="button" variant="ghost" size="sm" onClick={() => void toggleVersionHistory()}>
+          {versionsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {versions ? "Hide version history" : "Show version history"}
+        </Button>
+        {versions && (
+          <ul className="mt-1 grid gap-1 rounded-md border border-border bg-muted/30 p-2 text-xs">
+            {versions.map((version) => (
+              <li key={version.id} className="grid gap-0.5">
+                <span className="font-medium text-foreground">
+                  v{version.versionNumber} · {new Date(version.createdAt).toLocaleString()}
+                </span>
+                <span className="text-muted-foreground">{version.instructions}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="secondary" onClick={() => void toggleArchived()} disabled={archiving}>
+            {persona.archivedAt ? "Unarchive" : "Archive"}
+          </Button>
+          {deletePreview ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                {deletePreview.conversationCount === 0
+                  ? "No conversations are assigned."
+                  : `${deletePreview.conversationCount} conversation(s) will be unassigned, not deleted.`}
+              </span>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+              >
+                {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Confirm delete
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setDeletePreview(null)}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button type="button" variant="ghost" onClick={() => void loadDeletePreview()}>
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          )}
+        </div>
+        <Button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || !name.trim() || !instructions.trim() || !temperatureValid || !maxTokensValid}
         >
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           Save

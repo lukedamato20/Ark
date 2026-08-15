@@ -18,6 +18,9 @@ import type {
   ImportProgressEvent,
   Message,
   OllamaPullProgress,
+  Persona,
+  PersonaDeletionPreview,
+  PersonaVersionSummary,
   Project,
   ProjectDeletionPreview,
   ProviderConfig,
@@ -89,6 +92,21 @@ export interface UpdateProjectInput {
   instructions?: string | null;
   defaultProviderId?: string | null;
   defaultModelId?: string | null;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
+}
+
+export interface CreatePersonaInput {
+  name: string;
+  instructions: string;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
+}
+
+export interface UpdatePersonaInput {
+  id: string;
+  name: string;
+  instructions: string;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
 }
@@ -207,6 +225,26 @@ export interface ArkClient {
    * confirm, since deletion unassigns (not deletes) every conversation still in the project. */
   previewProjectDeletion(id: string): Promise<ProjectDeletionPreview>;
   deleteProject(id: string): Promise<void>;
+
+  /** FTR-003: `personaId: null` unassigns the conversation from any persona — independent of
+   * `setConversationProject`. */
+  setConversationPersona(id: string, personaId: string | null): Promise<Conversation>;
+  listPersonas(): Promise<Persona[]>;
+  createPersona(input: CreatePersonaInput): Promise<Persona>;
+  /** Sends the complete current draft, not a partial patch — matching `updateProject`'s
+   * convention. Whether this creates a new immutable version or just renames in place is decided
+   * server-side (`Database::update_persona`): only if `instructions`/the defaults actually
+   * changed from the persona's current version. */
+  updatePersona(input: UpdatePersonaInput): Promise<Persona>;
+  /** FTR-003 criterion 2: every version ever created for this persona, newest first — the
+   * visible proof that versioning is real. */
+  listPersonaVersions(id: string): Promise<PersonaVersionSummary[]>;
+  /** FTR-003: undo is calling this again with the opposite value. */
+  setPersonaArchived(id: string, archived: boolean): Promise<Persona>;
+  /** What deleting this persona would affect — call before `deletePersona` so the user can
+   * confirm, since deletion unassigns (not deletes) every conversation still assigned to it. */
+  previewPersonaDeletion(id: string): Promise<PersonaDeletionPreview>;
+  deletePersona(id: string): Promise<void>;
 
   runDiagnostics(providerId: string, model?: string | null, includeRuntimeLogs?: boolean): Promise<DiagnosticsResult>;
 
@@ -402,6 +440,15 @@ export function createTauriArkClient(): ArkClient {
     previewProjectDeletion: (id) => invoke<ProjectDeletionPreview>("preview_project_deletion", { id }),
     deleteProject: (id) => invoke<void>("delete_project", { id }),
 
+    setConversationPersona: (id, personaId) => invoke<Conversation>("set_conversation_persona", { id, personaId }),
+    listPersonas: () => invoke<Persona[]>("list_personas"),
+    createPersona: (input) => invoke<Persona>("create_persona", { request: input }),
+    updatePersona: (input) => invoke<Persona>("update_persona", { request: input }),
+    listPersonaVersions: (id) => invoke<PersonaVersionSummary[]>("list_persona_versions", { id }),
+    setPersonaArchived: (id, archived) => invoke<Persona>("set_persona_archived", { id, archived }),
+    previewPersonaDeletion: (id) => invoke<PersonaDeletionPreview>("preview_persona_deletion", { id }),
+    deletePersona: (id) => invoke<void>("delete_persona", { id }),
+
     runDiagnostics: (providerId, model, includeRuntimeLogs = false) =>
       invoke<DiagnosticsResult>("run_diagnostics", {
         providerId,
@@ -528,6 +575,15 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     setProjectArchived: notImplemented("setProjectArchived"),
     previewProjectDeletion: notImplemented("previewProjectDeletion"),
     deleteProject: async () => undefined,
+
+    setConversationPersona: notImplemented("setConversationPersona"),
+    listPersonas: async () => [],
+    createPersona: notImplemented("createPersona"),
+    updatePersona: notImplemented("updatePersona"),
+    listPersonaVersions: async () => [],
+    setPersonaArchived: notImplemented("setPersonaArchived"),
+    previewPersonaDeletion: notImplemented("previewPersonaDeletion"),
+    deletePersona: async () => undefined,
 
     runDiagnostics: notImplemented("runDiagnostics"),
 

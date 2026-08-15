@@ -18,6 +18,10 @@ export interface Conversation {
   /** FTR-002: null means unpinned. An ISO timestamp (not a boolean) so pin order among
    * multiple pinned conversations is deterministic — most-recently-pinned first. */
   pinnedAt?: string | null;
+  /** FTR-003: null means unassigned. Independent of `projectId` — a project groups
+   * conversations by subject, a persona defines how the assistant behaves. Set via
+   * `setConversationPersona`. */
+  personaId?: string | null;
 }
 
 /** FTR-003: groups conversations under a shared name, instructions, and default
@@ -42,6 +46,41 @@ export interface Project {
  * never deletes conversations, only unassigns them, but the count still needs surfacing. */
 export interface ProjectDeletionPreview {
   project: Project;
+  conversationCount: number;
+}
+
+/** FTR-003: a reusable, named instruction identity a conversation can be assigned to,
+ * independent of any project — a project groups conversations by subject, a persona defines
+ * how the assistant behaves. `instructions` is always the *current* version's content; editing
+ * it creates a new immutable version rather than rewriting history (see `versionNumber`). */
+export interface Persona {
+  id: string;
+  name: string;
+  instructions: string;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
+  /** Which version this is — increments only when `instructions`/the defaults actually change,
+   * not on a plain rename. */
+  versionNumber: number;
+  archivedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** FTR-003: one entry in a persona's version history — `listPersonaVersions`. */
+export interface PersonaVersionSummary {
+  id: string;
+  versionNumber: number;
+  instructions: string;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
+  createdAt: string;
+}
+
+/** FTR-003: what deleting a persona would affect, shown before the user confirms — mirrors
+ * `ProjectDeletionPreview` exactly. */
+export interface PersonaDeletionPreview {
+  persona: Persona;
   conversationCount: number;
 }
 
@@ -189,6 +228,9 @@ export interface AppBootstrap {
   /** FTR-003: every project (active and archived) — expected to stay small, unpaginated like
    * `providers`. */
   projects: Project[];
+  /** FTR-003: every persona (active and archived), each already carrying its current version's
+   * content — mirrors `projects` exactly. */
+  personas: Persona[];
   workspacePath: string;
   workspace: WorkspaceInfo;
   /** ARC-006: device-scoped (theme, built-in runtime model path) — see docs/settings-catalog.md. */

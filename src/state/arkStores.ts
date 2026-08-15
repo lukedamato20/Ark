@@ -4,6 +4,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Persona,
   Project,
   ProviderConfig,
   ProviderHealth,
@@ -65,6 +66,12 @@ export interface ProjectState {
   projects: EntityCollection<Project>;
 }
 
+/** FTR-003: mirrors `ProjectState` exactly — personas are independent of projects, each their
+ * own small unpaginated collection. */
+export interface PersonaState {
+  personas: EntityCollection<Persona>;
+}
+
 export interface SettingsState {
   workspacePath: string;
   workspace: WorkspaceInfo | null;
@@ -103,6 +110,7 @@ export interface ArkStores {
   generation: ExternalStore<GenerationState>;
   providers: ExternalStore<ProviderState>;
   projects: ExternalStore<ProjectState>;
+  personas: ExternalStore<PersonaState>;
   settings: ExternalStore<SettingsState>;
   shell: ExternalStore<ShellState>;
 }
@@ -130,6 +138,9 @@ export function createArkStores(initial?: {
     }),
     projects: createExternalStore<ProjectState>({
       projects: emptyEntityCollection(),
+    }),
+    personas: createExternalStore<PersonaState>({
+      personas: emptyEntityCollection(),
     }),
     settings: createExternalStore<SettingsState>({
       workspacePath: "",

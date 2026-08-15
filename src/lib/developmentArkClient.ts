@@ -6,6 +6,8 @@ import type {
   Message,
   ModelInfo,
   OllamaPullProgress,
+  Persona,
+  PersonaVersionSummary,
   Project,
   ProviderConfig,
   WorkspaceProtectionStatus,
@@ -114,6 +116,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     providers: [provider],
     models: [model],
     projects: [],
+    personas: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -190,6 +193,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
     providers: [provider],
     models: [],
     projects: [],
+    personas: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -271,6 +275,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     providers: [],
     models: [],
     projects: [],
+    personas: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -475,6 +480,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     providers: [provider],
     models: [model],
     projects: [],
+    personas: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -789,6 +795,44 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
   ];
   conversations[2].projectId = "fixture-project-research";
 
+  // FTR-003: one active persona, already at version 2 (revised once) so the version-history UI
+  // has something real to show, and already assigned to a different conversation than the
+  // project above — proving the two are independently assignable.
+  const personas: Persona[] = [
+    {
+      id: "fixture-persona-reviewer",
+      name: "Terse reviewer",
+      instructions: "Be terse and cite line numbers.",
+      defaultTemperature: 0.2,
+      defaultMaxTokens: 512,
+      versionNumber: 2,
+      archivedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ];
+  const personaVersions: Record<string, PersonaVersionSummary[]> = {
+    "fixture-persona-reviewer": [
+      {
+        id: "fixture-persona-reviewer-v2",
+        versionNumber: 2,
+        instructions: "Be terse and cite line numbers.",
+        defaultTemperature: 0.2,
+        defaultMaxTokens: 512,
+        createdAt: timestamp,
+      },
+      {
+        id: "fixture-persona-reviewer-v1",
+        versionNumber: 1,
+        instructions: "Be terse.",
+        defaultTemperature: 0.2,
+        defaultMaxTokens: null,
+        createdAt: timestamp,
+      },
+    ],
+  };
+  conversations[0].personaId = "fixture-persona-reviewer";
+
   const companionApiState: CompanionApiStatus = {
     enabled: false,
     running: false,
@@ -805,6 +849,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     providers: [provider],
     models: [model],
     projects,
+    personas,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -935,6 +980,91 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       projects.splice(index, 1);
       for (const conversation of conversations) {
         if (conversation.projectId === id) conversation.projectId = null;
+      }
+    },
+
+    setConversationPersona: async (id, personaId) => {
+      const conversation = conversations.find((item) => item.id === id);
+      if (!conversation) throw new Error(`fixture: conversation ${id} not found`);
+      if (personaId && !personas.some((persona) => persona.id === personaId)) {
+        throw new Error(`fixture: persona ${personaId} not found`);
+      }
+      conversation.personaId = personaId;
+      return { ...conversation };
+    },
+    listPersonas: async () => [...personas],
+    createPersona: async (input) => {
+      const created: Persona = {
+        id: `fixture-persona-${personas.length}`,
+        name: input.name,
+        instructions: input.instructions,
+        defaultTemperature: input.defaultTemperature ?? null,
+        defaultMaxTokens: input.defaultMaxTokens ?? null,
+        versionNumber: 1,
+        archivedAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      personas.push(created);
+      personaVersions[created.id] = [
+        {
+          id: `${created.id}-v1`,
+          versionNumber: 1,
+          instructions: created.instructions,
+          defaultTemperature: created.defaultTemperature,
+          defaultMaxTokens: created.defaultMaxTokens,
+          createdAt: created.createdAt,
+        },
+      ];
+      return created;
+    },
+    updatePersona: async (input) => {
+      const persona = personas.find((item) => item.id === input.id);
+      if (!persona) throw new Error(`fixture: persona ${input.id} not found`);
+      const promptUnchanged =
+        persona.instructions === input.instructions &&
+        (persona.defaultTemperature ?? null) === (input.defaultTemperature ?? null) &&
+        (persona.defaultMaxTokens ?? null) === (input.defaultMaxTokens ?? null);
+      persona.name = input.name;
+      persona.updatedAt = new Date().toISOString();
+      if (!promptUnchanged) {
+        persona.instructions = input.instructions;
+        persona.defaultTemperature = input.defaultTemperature ?? null;
+        persona.defaultMaxTokens = input.defaultMaxTokens ?? null;
+        persona.versionNumber += 1;
+        const versions = personaVersions[persona.id] ?? [];
+        versions.unshift({
+          id: `${persona.id}-v${persona.versionNumber}`,
+          versionNumber: persona.versionNumber,
+          instructions: persona.instructions,
+          defaultTemperature: persona.defaultTemperature,
+          defaultMaxTokens: persona.defaultMaxTokens,
+          createdAt: persona.updatedAt,
+        });
+        personaVersions[persona.id] = versions;
+      }
+      return { ...persona };
+    },
+    listPersonaVersions: async (id) => [...(personaVersions[id] ?? [])],
+    setPersonaArchived: async (id, archived) => {
+      const persona = personas.find((item) => item.id === id);
+      if (!persona) throw new Error(`fixture: persona ${id} not found`);
+      persona.archivedAt = archived ? new Date().toISOString() : null;
+      return { ...persona };
+    },
+    previewPersonaDeletion: async (id) => {
+      const persona = personas.find((item) => item.id === id);
+      if (!persona) throw new Error(`fixture: persona ${id} not found`);
+      const conversationCount = conversations.filter((item) => item.personaId === id).length;
+      return { persona: { ...persona }, conversationCount };
+    },
+    deletePersona: async (id) => {
+      const index = personas.findIndex((item) => item.id === id);
+      if (index === -1) throw new Error(`fixture: persona ${id} not found`);
+      personas.splice(index, 1);
+      delete personaVersions[id];
+      for (const conversation of conversations) {
+        if (conversation.personaId === id) conversation.personaId = null;
       }
     },
 
@@ -1127,6 +1257,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
     providers: [provider],
     models: installedModels,
     projects: [],
+    personas: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",

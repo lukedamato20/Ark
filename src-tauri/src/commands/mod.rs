@@ -52,6 +52,31 @@ pub struct UpdateProjectRequest {
     pub default_max_tokens: Option<i64>,
 }
 
+/// FTR-003: `name` and `instructions` are always sent (unlike a project's optional
+/// `instructions`, a persona's prompt content is required); `Database::create_persona` rejects a
+/// blank `instructions` the same way it rejects a blank `name`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePersonaRequest {
+    pub name: String,
+    pub instructions: String,
+    pub default_temperature: Option<f64>,
+    pub default_max_tokens: Option<i64>,
+}
+
+/// FTR-003: mirrors `UpdateProjectRequest`'s "always send the complete current draft" convention.
+/// `Database::update_persona` decides internally whether this actually creates a new immutable
+/// version (only if `instructions`/the defaults changed) or just renames in place.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePersonaRequest {
+    pub id: String,
+    pub name: String,
+    pub instructions: String,
+    pub default_temperature: Option<f64>,
+    pub default_max_tokens: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantBranchRequest {
@@ -264,6 +289,85 @@ pub fn preview_project_deletion(
 pub fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let id = crate::validation::validate_entity_id(&id, "Project ID")?;
     lock_db(&state)?.delete_project(id)
+}
+
+#[tauri::command]
+pub fn set_conversation_persona(
+    state: State<'_, AppState>,
+    id: String,
+    persona_id: Option<String>,
+) -> Result<crate::chat::Conversation, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Conversation ID")?.to_string();
+    let persona_id = persona_id
+        .as_deref()
+        .map(|value| crate::validation::validate_entity_id(value, "Persona ID"))
+        .transpose()?
+        .map(str::to_string);
+    lock_db(&state)?.set_conversation_persona(&id, persona_id.as_deref())
+}
+
+#[tauri::command]
+pub fn list_personas(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::personas::Persona>, AppError> {
+    lock_read_db(&state)?.list_personas()
+}
+
+#[tauri::command]
+pub fn create_persona(
+    state: State<'_, AppState>,
+    request: CreatePersonaRequest,
+) -> Result<crate::personas::Persona, AppError> {
+    let instructions = crate::validation::validate_persona_instructions(&request.instructions)?;
+    let temperature = crate::validation::validate_temperature(request.default_temperature)?;
+    let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
+    lock_db(&state)?.create_persona(&request.name, &instructions, temperature, max_tokens)
+}
+
+#[tauri::command]
+pub fn update_persona(
+    state: State<'_, AppState>,
+    request: UpdatePersonaRequest,
+) -> Result<crate::personas::Persona, AppError> {
+    let id = crate::validation::validate_entity_id(&request.id, "Persona ID")?.to_string();
+    let instructions = crate::validation::validate_persona_instructions(&request.instructions)?;
+    let temperature = crate::validation::validate_temperature(request.default_temperature)?;
+    let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
+    lock_db(&state)?.update_persona(&id, &request.name, &instructions, temperature, max_tokens)
+}
+
+#[tauri::command]
+pub fn list_persona_versions(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::personas::PersonaVersionSummary>, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
+    lock_read_db(&state)?.list_persona_versions(id)
+}
+
+#[tauri::command]
+pub fn set_persona_archived(
+    state: State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<crate::personas::Persona, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
+    lock_db(&state)?.set_persona_archived(id, archived)
+}
+
+#[tauri::command]
+pub fn preview_persona_deletion(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::personas::PersonaDeletionPreview, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
+    lock_read_db(&state)?.preview_persona_deletion(id)
+}
+
+#[tauri::command]
+pub fn delete_persona(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
+    lock_db(&state)?.delete_persona(id)
 }
 
 #[tauri::command]

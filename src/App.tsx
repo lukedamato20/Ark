@@ -226,6 +226,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
   const transcript = useStore(stores.transcript);
   const providerState = useStore(stores.providers);
   const projectState = useStore(stores.projects);
+  const personaState = useStore(stores.personas);
   const booting = useStoreSelector(stores.shell, (state) => state.booting);
   const focusComposerSignal = useStoreSelector(stores.shell, (state) => state.focusComposerSignal);
   return (
@@ -236,6 +237,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       models={entityList(providerState.models)}
       providerHealth={providerState.health}
       projects={entityList(projectState.projects)}
+      personas={entityList(personaState.personas)}
       isLoading={transcript.isLoading || booting}
       focusComposerSignal={focusComposerSignal}
       onMessagesChange={controller.setMessages}
@@ -243,6 +245,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       onConversationImported={controller.importConversation}
       onConversationRenamed={controller.renameConversation}
       onConversationProjectChange={controller.changeConversationProject}
+      onConversationPersonaChange={controller.changeConversationPersona}
       onRefreshProviderModels={controller.refreshProviderModels}
       onError={controller.setError}
       onInfo={controller.setInfo}
@@ -254,6 +257,7 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
   const stores = useArkStores();
   const providerState = useStore(stores.providers);
   const projectState = useStore(stores.projects);
+  const personaState = useStore(stores.personas);
   const settings = useStore(stores.settings);
   return (
     <SettingsView
@@ -262,6 +266,7 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       models={entityList(providerState.models)}
       providerHealth={providerState.health}
       projects={entityList(projectState.projects)}
+      personas={entityList(personaState.personas)}
       theme={settings.theme}
       workspace={settings.workspace}
       builtInStatus={settings.builtInStatus}
@@ -275,6 +280,8 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onProviderSaved={controller.saveProvider}
       onProjectSaved={controller.saveProject}
       onProjectDeleted={controller.removeProject}
+      onPersonaSaved={controller.savePersona}
+      onPersonaDeleted={controller.removePersona}
       onRefreshProviderModels={controller.refreshProviderModels}
       onBack={() => controller.setView("chat")}
       onError={controller.setError}

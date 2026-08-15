@@ -115,6 +115,25 @@ pub fn validate_system_prompt(value: Option<String>) -> Result<Option<String>, A
     Ok(Some(trimmed.to_string()))
 }
 
+/// FTR-003: validates a persona's instructions. Unlike `validate_system_prompt`, `None`/blank is
+/// rejected rather than normalized away — a persona's entire purpose is its prompt content, so
+/// (unlike a conversation's optional override) an empty one is a user error, not a valid "no
+/// override" state. Reuses `MAX_SYSTEM_PROMPT_CHARS` since this is the same kind of content.
+pub fn validate_persona_instructions(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_input(
+            "Persona instructions cannot be empty.",
+        ));
+    }
+    if trimmed.chars().count() > MAX_SYSTEM_PROMPT_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Persona instructions must be at most {MAX_SYSTEM_PROMPT_CHARS} characters."
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// FTR-005: a branch label is a short, glanceable name shown next to a "Response N" ordinal in
 /// the alternatives switcher — not free-form prose, so the bound is much tighter than
 /// `MAX_SYSTEM_PROMPT_CHARS`.

@@ -14,7 +14,8 @@
       "maxTokens",
       "archived",
       "projectId",
-      "pinnedAt"
+      "pinnedAt",
+      "personaId"
     ],
     "ConversationPage": ["items", "nextCursor", "searchSnippets"],
     "Project": [
@@ -30,6 +31,26 @@
       "updatedAt"
     ],
     "ProjectDeletionPreview": ["project", "conversationCount"],
+    "Persona": [
+      "id",
+      "name",
+      "instructions",
+      "defaultTemperature",
+      "defaultMaxTokens",
+      "versionNumber",
+      "archivedAt",
+      "createdAt",
+      "updatedAt"
+    ],
+    "PersonaVersionSummary": [
+      "id",
+      "versionNumber",
+      "instructions",
+      "defaultTemperature",
+      "defaultMaxTokens",
+      "createdAt"
+    ],
+    "PersonaDeletionPreview": ["persona", "conversationCount"],
     "Message": [
       "id",
       "conversationId",
@@ -113,6 +134,7 @@
       "providers",
       "models",
       "projects",
+      "personas",
       "workspacePath",
       "workspace",
       "deviceSettings",

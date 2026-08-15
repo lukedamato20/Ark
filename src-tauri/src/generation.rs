@@ -11,6 +11,7 @@ use crate::chat::{
 };
 use crate::db::Database;
 use crate::errors::AppError;
+use crate::personas::Persona;
 use crate::projects::Project;
 use crate::providers::{ProviderChatRequest, ProviderConfig, ProviderRegistry};
 use crate::AppState;
@@ -32,20 +33,26 @@ enum SettingSource {
     /// the field/tier has existed since COR-003 and remains the highest-precedence override).
     Request,
     Conversation,
-    /// FTR-003: the conversation's assigned project's own default — sits between the
-    /// conversation's own override and the provider's default, so a project can steer every
-    /// conversation inside it without conversations having to repeat the same override.
+    /// FTR-003: the conversation's assigned persona's own default — sits between the
+    /// conversation's own override and its assigned project's default, matching the plan's
+    /// stated precedence order (application, project, persona, conversation, user/request).
+    Persona,
+    /// FTR-003: the conversation's assigned project's own default — sits between its persona's
+    /// default (if any) and the provider's default, so a project can steer every conversation
+    /// inside it without conversations having to repeat the same override.
     Project,
     ProviderDefault,
 }
 
-/// FTR-004/FTR-003: the four-tier precedence — request override, then this conversation's own
-/// setting, then its assigned project's default (if any), then the provider's current default —
-/// resolved once per generation call, not three times with divergent logic at each of
+/// FTR-004/FTR-003: the five-tier precedence — request override, then this conversation's own
+/// setting, then its assigned persona's default (if any), then its assigned project's default
+/// (if any), then the provider's current default — resolved once per generation call, not three
+/// times with divergent logic at each of
 /// `send_chat_message`/`edit_user_message`/`regenerate_assistant_message`.
 fn resolve_setting<T>(
     request_value: Option<T>,
     conversation_value: Option<T>,
+    persona_value: Option<T>,
     project_value: Option<T>,
     provider_value: Option<T>,
 ) -> (Option<T>, Option<SettingSource>) {
@@ -54,6 +61,9 @@ fn resolve_setting<T>(
     }
     if let Some(value) = conversation_value {
         return (Some(value), Some(SettingSource::Conversation));
+    }
+    if let Some(value) = persona_value {
+        return (Some(value), Some(SettingSource::Persona));
     }
     if let Some(value) = project_value {
         return (Some(value), Some(SettingSource::Project));
@@ -65,15 +75,19 @@ fn resolve_setting<T>(
 }
 
 /// FTR-003: the system prompt has no per-request override tier (unlike temperature/max_tokens),
-/// so this is a separate two-tier resolution rather than a degenerate call to `resolve_setting`
-/// with an always-`None` request tier — a conversation's own override, then its project's
-/// instructions.
+/// so this is a separate three-tier resolution rather than a degenerate call to `resolve_setting`
+/// with an always-`None` request tier — a conversation's own override, then its persona's
+/// instructions, then its project's instructions.
 fn resolve_system_prompt(
     conversation_value: Option<&str>,
+    persona_value: Option<&str>,
     project_value: Option<&str>,
 ) -> (Option<String>, Option<SettingSource>) {
     if let Some(value) = conversation_value {
         return (Some(value.to_string()), Some(SettingSource::Conversation));
+    }
+    if let Some(value) = persona_value {
+        return (Some(value.to_string()), Some(SettingSource::Persona));
     }
     if let Some(value) = project_value {
         return (Some(value.to_string()), Some(SettingSource::Project));
@@ -90,6 +104,14 @@ fn resolve_conversation_project(db: &Database, conversation: &Conversation) -> O
     db.get_project(project_id).ok()
 }
 
+/// FTR-003: fetches the conversation's assigned persona, if any — mirrors
+/// `resolve_conversation_project` exactly, including treating a stale reference as unassigned
+/// rather than failing the generation.
+fn resolve_conversation_persona(db: &Database, conversation: &Conversation) -> Option<Persona> {
+    let persona_id = conversation.persona_id.as_deref()?;
+    db.get_persona(persona_id).ok()
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerationProvenance {
@@ -100,6 +122,14 @@ struct GenerationProvenance {
     /// project contributed a `Project`-sourced setting without re-deriving it from the
     /// conversation row as it exists *now*, which may have since been reassigned.
     project_id: Option<String>,
+    /// FTR-003: the persona this conversation was assigned to at generation time, if any, and
+    /// the exact version number of that persona that was live — acceptance criterion 2's "do not
+    /// silently alter past provenance": a persona's instructions can be revised later (creating a
+    /// new version), but this record permanently shows exactly which version actually produced
+    /// this response, regardless of what the persona's *current* version is by the time anyone
+    /// reads this back.
+    persona_id: Option<String>,
+    persona_version: Option<i64>,
     temperature: Option<f64>,
     temperature_source: Option<SettingSource>,
     max_tokens: Option<i64>,
@@ -245,9 +275,11 @@ pub fn send_chat_message(
             )?;
 
             let project = resolve_conversation_project(&db, &conversation);
+            let persona = resolve_conversation_persona(&db, &conversation);
 
             let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
                 conversation.system_prompt.as_deref(),
+                persona.as_ref().map(|p| p.instructions.as_str()),
                 project.as_ref().and_then(|p| p.instructions.as_deref()),
             );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
@@ -273,12 +305,14 @@ pub fn send_chat_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                persona.as_ref().and_then(|p| p.default_temperature),
                 project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                persona.as_ref().and_then(|p| p.default_max_tokens),
                 project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
@@ -290,6 +324,8 @@ pub fn send_chat_message(
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
                     project_id: conversation.project_id.clone(),
+                    persona_id: conversation.persona_id.clone(),
+                    persona_version: persona.as_ref().map(|p| p.version_number),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
@@ -398,9 +434,11 @@ pub fn edit_user_message(
             )?;
 
             let project = resolve_conversation_project(&db, &conversation);
+            let persona = resolve_conversation_persona(&db, &conversation);
 
             let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
                 conversation.system_prompt.as_deref(),
+                persona.as_ref().map(|p| p.instructions.as_str()),
                 project.as_ref().and_then(|p| p.instructions.as_deref()),
             );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
@@ -426,12 +464,14 @@ pub fn edit_user_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                persona.as_ref().and_then(|p| p.default_temperature),
                 project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                persona.as_ref().and_then(|p| p.default_max_tokens),
                 project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
@@ -443,6 +483,8 @@ pub fn edit_user_message(
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
                     project_id: conversation.project_id.clone(),
+                    persona_id: conversation.persona_id.clone(),
+                    persona_version: persona.as_ref().map(|p| p.version_number),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
@@ -521,6 +563,7 @@ pub fn regenerate_assistant_message(
         let conversation = db.get_conversation(&request.conversation_id)?;
         let provider = db.get_provider(&request.provider_id)?;
         let project = resolve_conversation_project(&db, &conversation);
+        let persona = resolve_conversation_persona(&db, &conversation);
         let history = db.get_message_path(parent_message_id)?;
 
         // COR-004: the new assistant revision insert and the conversation pointer update
@@ -546,6 +589,7 @@ pub fn regenerate_assistant_message(
 
             let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
                 conversation.system_prompt.as_deref(),
+                persona.as_ref().map(|p| p.instructions.as_str()),
                 project.as_ref().and_then(|p| p.instructions.as_deref()),
             );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
@@ -567,12 +611,14 @@ pub fn regenerate_assistant_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                persona.as_ref().and_then(|p| p.default_temperature),
                 project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                persona.as_ref().and_then(|p| p.default_max_tokens),
                 project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
@@ -584,6 +630,8 @@ pub fn regenerate_assistant_message(
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
                     project_id: conversation.project_id.clone(),
+                    persona_id: conversation.persona_id.clone(),
+                    persona_version: persona.as_ref().map(|p| p.version_number),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
@@ -1701,46 +1749,65 @@ mod tests {
         }
     }
 
-    // ── FTR-004/FTR-003: four-tier settings precedence + provenance ────────────────────
+    // ── FTR-004/FTR-003: five-tier settings precedence + provenance ────────────────────
 
     #[test]
-    fn resolve_setting_prefers_request_then_conversation_then_project_then_provider_default() {
+    fn resolve_setting_prefers_request_then_conversation_then_persona_then_project_then_provider_default(
+    ) {
         assert_eq!(
-            resolve_setting(Some(1), Some(2), Some(3), Some(4)),
+            resolve_setting(Some(1), Some(2), Some(3), Some(4), Some(5)),
             (Some(1), Some(SettingSource::Request))
         );
         assert_eq!(
-            resolve_setting(None, Some(2), Some(3), Some(4)),
+            resolve_setting(None, Some(2), Some(3), Some(4), Some(5)),
             (Some(2), Some(SettingSource::Conversation))
         );
         assert_eq!(
-            resolve_setting(None, None, Some(3), Some(4)),
-            (Some(3), Some(SettingSource::Project))
+            resolve_setting(None, None, Some(3), Some(4), Some(5)),
+            (Some(3), Some(SettingSource::Persona))
         );
         assert_eq!(
-            resolve_setting(None, None, None, Some(4)),
-            (Some(4), Some(SettingSource::ProviderDefault))
+            resolve_setting(None, None, None, Some(4), Some(5)),
+            (Some(4), Some(SettingSource::Project))
         );
-        assert_eq!(resolve_setting::<i64>(None, None, None, None), (None, None));
+        assert_eq!(
+            resolve_setting(None, None, None, None, Some(5)),
+            (Some(5), Some(SettingSource::ProviderDefault))
+        );
+        assert_eq!(
+            resolve_setting::<i64>(None, None, None, None, None),
+            (None, None)
+        );
     }
 
     #[test]
-    fn resolve_system_prompt_prefers_conversation_then_project() {
+    fn resolve_system_prompt_prefers_conversation_then_persona_then_project() {
         assert_eq!(
-            resolve_system_prompt(Some("Be terse."), Some("Cite sources.")),
+            resolve_system_prompt(
+                Some("Be terse."),
+                Some("You are a reviewer."),
+                Some("Cite sources.")
+            ),
             (
                 Some("Be terse.".to_string()),
                 Some(SettingSource::Conversation)
             )
         );
         assert_eq!(
-            resolve_system_prompt(None, Some("Cite sources.")),
+            resolve_system_prompt(None, Some("You are a reviewer."), Some("Cite sources.")),
+            (
+                Some("You are a reviewer.".to_string()),
+                Some(SettingSource::Persona)
+            )
+        );
+        assert_eq!(
+            resolve_system_prompt(None, None, Some("Cite sources.")),
             (
                 Some("Cite sources.".to_string()),
                 Some(SettingSource::Project)
             )
         );
-        assert_eq!(resolve_system_prompt(None, None), (None, None));
+        assert_eq!(resolve_system_prompt(None, None, None), (None, None));
     }
 
     #[test]
