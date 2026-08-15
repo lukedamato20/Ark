@@ -929,6 +929,80 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
         if (conversation.projectId === id) conversation.projectId = null;
       }
     },
+
+    // FTR-008: exports the fixture's own in-memory conversations as a workspace bundle, and
+    // treats any conversation ID already present locally as a duplicate on preview — enough to
+    // exercise export → preview → duplicate-flagged → selective-import live, without a real
+    // content hash (the fixture has no message bodies to hash).
+    exportWorkspaceJson: async (projectId) => {
+      const scoped = projectId ? conversations.filter((item) => item.projectId === projectId) : conversations;
+      const manifest = {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        scope: projectId ? `project:${projectId}` : "workspace",
+        entries: scoped.map((item) => ({
+          conversationId: item.id,
+          title: item.title,
+          messageCount: 0,
+          sha256: `fixture-hash-${item.id}`,
+        })),
+      };
+      return JSON.stringify(
+        { manifest, conversations: scoped.map((item) => ({ conversation: item, messages: [] })) },
+        null,
+        2,
+      );
+    },
+    exportWorkspaceMarkdown: async (projectId) => {
+      const scoped = projectId ? conversations.filter((item) => item.projectId === projectId) : conversations;
+      const label = projectId ? (projects.find((item) => item.id === projectId)?.name ?? "project") : "workspace";
+      return (
+        `# Ark export — ${label}\n\n` +
+        scoped.map((item) => `## ${item.title}\n\n(fixture export — no message bodies)`).join("\n\n---\n\n")
+      );
+    },
+    previewWorkspaceImport: async (json) => {
+      const parsed = JSON.parse(json) as {
+        manifest: { scope: string; entries: { conversationId: string; title: string; messageCount: number }[] };
+      };
+      return {
+        scope: parsed.manifest.scope,
+        entries: parsed.manifest.entries.map((entry) => ({
+          conversationId: entry.conversationId,
+          title: entry.title,
+          messageCount: entry.messageCount,
+          duplicateOfLocalId: conversations.some((item) => item.id === entry.conversationId)
+            ? entry.conversationId
+            : null,
+        })),
+        providerMappings: [
+          {
+            sourceProviderId: provider.id,
+            targetProviderId: provider.id,
+            reason: "Matched an existing provider by stable ID.",
+          },
+        ],
+      };
+    },
+    importWorkspaceJson: async (json, includeConversationIds) => {
+      const parsed = JSON.parse(json) as { conversations: { conversation: Conversation }[] };
+      let importedCount = 0;
+      let skippedCount = 0;
+      for (const entry of parsed.conversations) {
+        if (!includeConversationIds.includes(entry.conversation.id)) {
+          skippedCount += 1;
+          continue;
+        }
+        importedCount += 1;
+        conversations.unshift({
+          ...entry.conversation,
+          id: `fixture-imported-${conversations.length}-${entry.conversation.id}`,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return { importedCount, skippedCount };
+    },
   });
 }
 

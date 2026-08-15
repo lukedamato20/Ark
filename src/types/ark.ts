@@ -426,3 +426,21 @@ export interface OllamaPullProgress {
   digest?: string | null;
   error?: string | null;
 }
+
+export interface WorkspaceImportPreviewEntry {
+  conversationId: string;
+  title: string;
+  messageCount: number;
+  duplicateOfLocalId?: string | null;
+}
+
+export interface WorkspaceImportPreview {
+  scope: string;
+  entries: WorkspaceImportPreviewEntry[];
+  providerMappings: ImportProviderMapping[];
+}
+
+export interface WorkspaceImportResult {
+  importedCount: number;
+  skippedCount: number;
+}

@@ -25,6 +25,8 @@ import type {
   SecretMetadata,
   SecretStoreStatus,
   StreamEvent,
+  WorkspaceImportPreview,
+  WorkspaceImportResult,
   WorkspaceInfo,
   WorkspaceProtectionChange,
   WorkspaceProtectionStatus,
@@ -212,6 +214,14 @@ export interface ArkClient {
   importConversationJson(importId: string, json: string): Promise<ImportConversationResult>;
   cancelImport(importId: string): Promise<void>;
 
+  /** FTR-008: `projectId` omitted (or null) exports every conversation in the workspace. */
+  exportWorkspaceJson(projectId?: string | null): Promise<string>;
+  exportWorkspaceMarkdown(projectId?: string | null): Promise<string>;
+  previewWorkspaceImport(json: string): Promise<WorkspaceImportPreview>;
+  /** Imports only the conversations whose IDs are in `includeConversationIds` — anything else
+   * in the bundle is skipped, matching the preview's per-entry include choice. */
+  importWorkspaceJson(json: string, includeConversationIds: string[]): Promise<WorkspaceImportResult>;
+
   getBuiltInRuntimeStatus(): Promise<BuiltInRuntimeStatus>;
   startBuiltInRuntime(modelPath: string, modelSource: string, modelLicense: string): Promise<BuiltInRuntimeStatus>;
   stopBuiltInRuntime(): Promise<void>;
@@ -396,6 +406,13 @@ export function createTauriArkClient(): ArkClient {
       invoke<ImportConversationResult>("import_conversation_json", { request: { importId, json } }),
     cancelImport: (importId) => invoke<void>("cancel_import", { importId }),
 
+    exportWorkspaceJson: (projectId) => invoke<string>("export_workspace_json", { projectId: projectId ?? null }),
+    exportWorkspaceMarkdown: (projectId) =>
+      invoke<string>("export_workspace_markdown", { projectId: projectId ?? null }),
+    previewWorkspaceImport: (json) => invoke<WorkspaceImportPreview>("preview_workspace_import", { json }),
+    importWorkspaceJson: (json, includeConversationIds) =>
+      invoke<WorkspaceImportResult>("import_workspace_json", { json, includeConversationIds }),
+
     getBuiltInRuntimeStatus: () => invoke<BuiltInRuntimeStatus>("get_built_in_runtime_status"),
     startBuiltInRuntime: (modelPath, modelSource, modelLicense) =>
       invoke<BuiltInRuntimeStatus>("start_built_in_runtime", { modelPath, modelSource, modelLicense }),
@@ -505,6 +522,11 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     previewConversationImport: notImplemented("previewConversationImport"),
     importConversationJson: notImplemented("importConversationJson"),
     cancelImport: async () => undefined,
+
+    exportWorkspaceJson: notImplemented("exportWorkspaceJson"),
+    exportWorkspaceMarkdown: notImplemented("exportWorkspaceMarkdown"),
+    previewWorkspaceImport: notImplemented("previewWorkspaceImport"),
+    importWorkspaceJson: notImplemented("importWorkspaceJson"),
 
     getBuiltInRuntimeStatus: async () => ({
       running: false,

@@ -22,6 +22,7 @@ import {
 import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
 import { getErrorMessage } from "../../lib/arkErrors";
+import { downloadText, safeFilename } from "../../lib/download";
 import { validateNumberInput } from "../../lib/numberField";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
@@ -40,6 +41,8 @@ import type {
   SecretMetadata,
   SecretStoreStatus,
   ThemeMode,
+  WorkspaceImportPreview,
+  WorkspaceImportResult,
   WorkspaceInfo,
   WorkspaceProtectionStatus,
 } from "../../types/ark";
@@ -533,6 +536,8 @@ export function SettingsView({
           </Panel>
 
           <BackupRestorePanel onError={onError} />
+
+          <DataPortabilityPanel projects={projects} onError={onError} />
 
           <DiagnosticsBundlePanel
             onError={onError}
@@ -1771,6 +1776,212 @@ function BackupRestorePanel({ onError }: { onError: (message: string) => void })
           {restoreSuccess && (
             <p role="status" className="text-sm text-emerald-600 dark:text-emerald-300">
               Restored to {restoreSuccess}.
+            </p>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+const MAX_WORKSPACE_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
+
+function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onError: (message: string) => void }) {
+  const client = useArkClient();
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const [scopeProjectId, setScopeProjectId] = React.useState("");
+  const [exporting, setExporting] = React.useState<"json" | "markdown" | null>(null);
+
+  const [importJson, setImportJson] = React.useState<string | null>(null);
+  const [preview, setPreview] = React.useState<WorkspaceImportPreview | null>(null);
+  const [includedIds, setIncludedIds] = React.useState<Set<string>>(new Set());
+  const [previewing, setPreviewing] = React.useState(false);
+  const [importing, setImporting] = React.useState(false);
+  const [importResult, setImportResult] = React.useState<WorkspaceImportResult | null>(null);
+
+  const scopeLabel = scopeProjectId
+    ? (projects.find((project) => project.id === scopeProjectId)?.name ?? "project")
+    : "workspace";
+
+  async function handleExport(format: "json" | "markdown") {
+    setExporting(format);
+    try {
+      const projectId = scopeProjectId || null;
+      if (format === "json") {
+        const json = await client.exportWorkspaceJson(projectId);
+        downloadText(`ark-${safeFilename(scopeLabel)}-export.json`, json, "application/json;charset=utf-8");
+      } else {
+        const markdown = await client.exportWorkspaceMarkdown(projectId);
+        downloadText(`ark-${safeFilename(scopeLabel)}-export.md`, markdown, "text/markdown;charset=utf-8");
+      }
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setExporting(null);
+    }
+  }
+
+  async function handleChooseFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    if (file.size > MAX_WORKSPACE_IMPORT_FILE_BYTES) {
+      onError(
+        `"${file.name}" is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds the ${MAX_WORKSPACE_IMPORT_FILE_BYTES / (1024 * 1024)} MB import limit.`,
+      );
+      return;
+    }
+
+    setPreviewing(true);
+    setPreview(null);
+    setImportResult(null);
+    try {
+      const json = await file.text();
+      const nextPreview = await client.previewWorkspaceImport(json);
+      setImportJson(json);
+      setPreview(nextPreview);
+      // FTR-008: entries whose content already matches a local conversation default to
+      // unchecked (skip) — see WorkspaceImportPreviewEntry's doc comment in import_export.rs.
+      setIncludedIds(
+        new Set(nextPreview.entries.filter((entry) => !entry.duplicateOfLocalId).map((entry) => entry.conversationId)),
+      );
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  function toggleIncluded(conversationId: string) {
+    setIncludedIds((current) => {
+      const next = new Set(current);
+      if (next.has(conversationId)) {
+        next.delete(conversationId);
+      } else {
+        next.add(conversationId);
+      }
+      return next;
+    });
+  }
+
+  async function handleImport() {
+    if (!importJson) return;
+    setImporting(true);
+    try {
+      const result = await client.importWorkspaceJson(importJson, Array.from(includedIds));
+      setImportResult(result);
+      setPreview(null);
+      setImportJson(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <FileText className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Data portability</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Export every conversation in the workspace (or a single project) as one bundle, or import a bundle exported from
+        another Ark workspace.
+      </p>
+      <div className="mt-3 grid gap-4">
+        <div className="grid gap-2">
+          <label className="grid gap-1.5 text-sm">
+            Scope
+            <Select value={scopeProjectId} onChange={(event) => setScopeProjectId(event.target.value)}>
+              <option value="">Entire workspace</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => void handleExport("json")} disabled={exporting !== null}>
+              {exporting === "json" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Export JSON
+            </Button>
+            <Button variant="secondary" onClick={() => void handleExport("markdown")} disabled={exporting !== null}>
+              {exporting === "markdown" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+              Export Markdown
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-2 border-t border-border pt-3">
+          <div className="text-sm font-medium">Import a bundle</div>
+          <Button
+            variant="secondary"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={previewing}
+            className="w-fit"
+          >
+            {previewing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Choose file
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={handleChooseFile}
+          />
+
+          {preview && (
+            <div className="grid gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
+              <div className="text-muted-foreground">
+                {preview.entries.length} conversation{preview.entries.length === 1 ? "" : "s"} in bundle (scope:{" "}
+                {preview.scope}) · {includedIds.size} selected to import
+              </div>
+              <ul className="grid max-h-64 gap-1 overflow-y-auto">
+                {preview.entries.map((entry) => (
+                  <li key={entry.conversationId} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={includedIds.has(entry.conversationId)}
+                      onChange={() => toggleIncluded(entry.conversationId)}
+                      aria-label={`Import "${entry.title}"`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-foreground">{entry.title}</span>
+                    <span className="shrink-0 text-muted-foreground">{entry.messageCount} msgs</span>
+                    {entry.duplicateOfLocalId && <Badge tone="warning">already in workspace</Badge>}
+                  </li>
+                ))}
+              </ul>
+              {preview.providerMappings.length > 0 && (
+                <div className="text-muted-foreground">
+                  Providers:{" "}
+                  {preview.providerMappings
+                    .map((mapping) => `${mapping.sourceProviderId ?? "unspecified"} → ${mapping.targetProviderId}`)
+                    .join(", ")}
+                </div>
+              )}
+              <Button
+                onClick={() => void handleImport()}
+                disabled={importing || includedIds.size === 0}
+                className="w-fit"
+              >
+                {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Import {includedIds.size} selected
+              </Button>
+            </div>
+          )}
+
+          {importResult && (
+            <p role="status" className="text-sm text-emerald-600 dark:text-emerald-300">
+              Imported {importResult.importedCount} conversation{importResult.importedCount === 1 ? "" : "s"}
+              {importResult.skippedCount > 0 ? `, skipped ${importResult.skippedCount} not selected for import` : ""}.
             </p>
           )}
         </div>

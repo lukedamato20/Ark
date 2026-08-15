@@ -202,6 +202,9 @@
       "estimatedStorageBytes"
     ],
     "ImportProgressEvent": ["importId", "completedMessages", "totalMessages"],
-    "OllamaPullProgress": ["providerId", "modelName", "status", "total", "completed", "digest", "error"]
+    "OllamaPullProgress": ["providerId", "modelName", "status", "total", "completed", "digest", "error"],
+    "WorkspaceImportPreviewEntry": ["conversationId", "title", "messageCount", "duplicateOfLocalId"],
+    "WorkspaceImportPreview": ["scope", "entries", "providerMappings"],
+    "WorkspaceImportResult": ["importedCount", "skippedCount"]
   }
 }

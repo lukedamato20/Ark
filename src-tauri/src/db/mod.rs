@@ -991,6 +991,26 @@ impl Database {
             .ok_or_else(|| AppError::not_found("Conversation"))
     }
 
+    /// FTR-008: every conversation in scope for a batch export — unpaginated, unlike
+    /// `list_conversations_page`, since a batch export is an explicit one-shot operation over
+    /// however many conversations actually exist, not a UI list a user scrolls through.
+    /// `project_id: None` means every conversation in the workspace (the "entire workspace"
+    /// export scope); `Some(id)` scopes to that project only.
+    pub fn list_all_conversations(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<Conversation>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
+                system_prompt, temperature, max_tokens, archived, project_id, pinned_at
+             FROM conversations
+             WHERE ?1 IS NULL OR project_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id], map_conversation)?;
+        collect_rows(rows)
+    }
+
     pub fn create_conversation(&self, title: Option<String>) -> Result<Conversation, AppError> {
         let timestamp = now();
         let id = Uuid::new_v4().to_string();

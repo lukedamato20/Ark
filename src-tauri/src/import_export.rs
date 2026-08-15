@@ -169,7 +169,10 @@ pub fn export_conversation_markdown(
     ))
 }
 
-pub fn export_conversation_json(db: &Database, conversation_id: &str) -> Result<String, AppError> {
+fn build_conversation_export(
+    db: &Database,
+    conversation_id: &str,
+) -> Result<ConversationExport, AppError> {
     let conversation = db.get_conversation(conversation_id)?;
     let provider = conversation
         .provider_id
@@ -183,19 +186,231 @@ pub fn export_conversation_json(db: &Database, conversation_id: &str) -> Result<
             provider.api_key_ref = None;
             provider
         });
-    let export = ConversationExport {
+    Ok(ConversationExport {
         schema_version: CONVERSATION_EXPORT_SCHEMA_VERSION,
         exported_at: now(),
         messages: db.get_all_conversation_messages(conversation_id)?,
         conversation,
         provider,
-    };
+    })
+}
 
+pub fn export_conversation_json(db: &Database, conversation_id: &str) -> Result<String, AppError> {
+    let export = build_conversation_export(db, conversation_id)?;
     serde_json::to_string_pretty(&export).map_err(|error| {
         AppError::new(
             "export_error",
             format!("Could not serialize export: {error}"),
         )
+    })
+}
+
+/// FTR-008: `project_id: None` exports every conversation in the workspace; `Some(id)` scopes to
+/// that project. Each entry is still a complete, standalone `ConversationExport` — a workspace
+/// bundle's entries remain individually re-importable, and the single-conversation import path
+/// is reused unchanged for each one (see `import_workspace_json`) rather than duplicated.
+pub fn export_workspace_json(db: &Database, project_id: Option<&str>) -> Result<String, AppError> {
+    let conversations = db.list_all_conversations(project_id)?;
+    let mut entries = Vec::with_capacity(conversations.len());
+    let mut conversation_exports = Vec::with_capacity(conversations.len());
+    for conversation in &conversations {
+        let export = build_conversation_export(db, &conversation.id)?;
+        entries.push(crate::export::WorkspaceExportManifestEntry {
+            conversation_id: conversation.id.clone(),
+            title: conversation.title.clone(),
+            message_count: export.messages.len(),
+            sha256: crate::export::conversation_messages_fingerprint(&export.messages),
+        });
+        conversation_exports.push(export);
+    }
+
+    let bundle = crate::export::WorkspaceExport {
+        manifest: crate::export::WorkspaceExportManifest {
+            schema_version: crate::export::WORKSPACE_EXPORT_SCHEMA_VERSION,
+            exported_at: now(),
+            scope: project_id.map_or_else(|| "workspace".to_string(), |id| format!("project:{id}")),
+            entries,
+        },
+        conversations: conversation_exports,
+    };
+
+    serde_json::to_string_pretty(&bundle).map_err(|error| {
+        AppError::new(
+            "export_error",
+            format!("Could not serialize workspace export: {error}"),
+        )
+    })
+}
+
+/// FTR-008: one concatenated, human-readable document — every conversation in scope rendered
+/// via the same `conversation_to_markdown` a single-conversation export already uses, separated
+/// by a title heading and a horizontal rule so the file reads sensibly without Ark, matching
+/// this task's "Markdown remains readable without Ark" acceptance criterion.
+pub fn export_workspace_markdown(
+    db: &Database,
+    project_id: Option<&str>,
+) -> Result<String, AppError> {
+    let conversations = db.list_all_conversations(project_id)?;
+    let scope_label = project_id.map_or_else(
+        || "Entire workspace".to_string(),
+        |id| format!("Project {id}"),
+    );
+    let mut document = format!(
+        "# Ark export — {scope_label}\n\nExported {}. {} conversation(s).\n\n---\n\n",
+        now(),
+        conversations.len()
+    );
+    for conversation in &conversations {
+        let active_messages = db.get_active_messages(&conversation.id)?;
+        let all_messages = db.get_all_conversation_messages(&conversation.id)?;
+        let provider = conversation
+            .provider_id
+            .as_deref()
+            .and_then(|provider_id| db.get_provider(provider_id).ok());
+        document.push_str(&conversation_to_markdown(
+            conversation,
+            &active_messages,
+            provider.as_ref(),
+            all_messages.len() > active_messages.len(),
+        ));
+        document.push_str("\n\n---\n\n");
+    }
+    Ok(document)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceImportPreviewEntry {
+    pub conversation_id: String,
+    pub title: String,
+    pub message_count: usize,
+    /// FTR-008: set when a local conversation's message content already hashes identically to
+    /// this entry — the only "duplicate" signal actually implemented. The frontend uses this to
+    /// default the entry's "include" choice to unchecked (skip); nothing here attempts a
+    /// semantic merge of two conversations, which the plan's own acceptance criteria only ask
+    /// for "where semantic merge is safe" — for two independently-branched message trees, it
+    /// isn't.
+    pub duplicate_of_local_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceImportPreview {
+    pub scope: String,
+    pub entries: Vec<WorkspaceImportPreviewEntry>,
+    pub provider_mappings: Vec<ImportProviderMapping>,
+}
+
+fn parse_workspace_export(json: &str) -> Result<crate::export::WorkspaceExport, AppError> {
+    if json.len() > MAX_IMPORT_JSON_BYTES {
+        return Err(AppError::invalid_input(format!(
+            "Import file is too large ({:.1} MB). The limit is {} MB.",
+            json.len() as f64 / (1024.0 * 1024.0),
+            MAX_IMPORT_JSON_BYTES / (1024 * 1024)
+        )));
+    }
+    let export: crate::export::WorkspaceExport = serde_json::from_str(json).map_err(|error| {
+        AppError::invalid_input(format!("Invalid workspace export JSON: {error}"))
+    })?;
+    crate::export::validate_workspace_export(&export)?;
+    Ok(export)
+}
+
+pub fn preview_workspace_import(
+    db: &Database,
+    json: &str,
+) -> Result<WorkspaceImportPreview, AppError> {
+    let export = parse_workspace_export(json)?;
+
+    // FTR-008: local conversations are fingerprinted once up front (not once per manifest
+    // entry) so this preview stays linear in the number of local conversations rather than
+    // quadratic.
+    let mut local_fingerprints: HashMap<String, String> = HashMap::new();
+    for conversation in db.list_all_conversations(None)? {
+        let messages = db.get_all_conversation_messages(&conversation.id)?;
+        local_fingerprints.insert(
+            crate::export::conversation_messages_fingerprint(&messages),
+            conversation.id,
+        );
+    }
+
+    let mut source_provider_ids = HashSet::new();
+    for conversation_export in &export.conversations {
+        source_provider_ids.insert(conversation_export.conversation.provider_id.as_deref());
+        for message in &conversation_export.messages {
+            source_provider_ids.insert(message.provider_id.as_deref());
+        }
+    }
+    let mut provider_mappings = source_provider_ids
+        .into_iter()
+        .map(|source| map_provider(db, source))
+        .collect::<Result<Vec<_>, _>>()?;
+    provider_mappings.sort_by(|left, right| {
+        left.source_provider_id
+            .cmp(&right.source_provider_id)
+            .then(left.target_provider_id.cmp(&right.target_provider_id))
+    });
+
+    let entries = export
+        .manifest
+        .entries
+        .iter()
+        .map(|entry| WorkspaceImportPreviewEntry {
+            conversation_id: entry.conversation_id.clone(),
+            title: entry.title.clone(),
+            message_count: entry.message_count,
+            duplicate_of_local_id: local_fingerprints.get(&entry.sha256).cloned(),
+        })
+        .collect();
+
+    Ok(WorkspaceImportPreview {
+        scope: export.manifest.scope,
+        entries,
+        provider_mappings,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceImportResult {
+    pub imported_count: usize,
+    pub skipped_count: usize,
+}
+
+/// FTR-008: imports every conversation in the bundle whose ID is in `include_conversation_ids`,
+/// skipping the rest — the real, implemented half of "skip/duplicate... where safe" (see
+/// `WorkspaceImportPreviewEntry`'s doc comment on why full merge isn't attempted). Each included
+/// conversation goes through the exact same `import_conversation_json_with_control` path a
+/// single-conversation import uses (re-serialized back to JSON per entry, rather than
+/// duplicating that function's logic against an already-parsed value) — so a batch import commits
+/// one conversation at a time, not as one all-or-nothing transaction across the whole bundle;
+/// a failure partway through leaves everything imported so far intact rather than rolling back
+/// conversations that already succeeded.
+pub fn import_workspace_json(
+    db: &Database,
+    json: &str,
+    include_conversation_ids: &HashSet<String>,
+) -> Result<WorkspaceImportResult, AppError> {
+    let export = parse_workspace_export(json)?;
+    let mut imported_count = 0usize;
+    let mut skipped_count = 0usize;
+    for conversation_export in &export.conversations {
+        if !include_conversation_ids.contains(&conversation_export.conversation.id) {
+            skipped_count += 1;
+            continue;
+        }
+        let single_json = serde_json::to_string(conversation_export).map_err(|error| {
+            AppError::new(
+                "export_error",
+                format!("Could not re-serialize conversation for import: {error}"),
+            )
+        })?;
+        import_conversation_json_with_control(db, &single_json, || false, |_, _| Ok(()))?;
+        imported_count += 1;
+    }
+    Ok(WorkspaceImportResult {
+        imported_count,
+        skipped_count,
     })
 }
 

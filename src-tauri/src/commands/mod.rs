@@ -600,6 +600,56 @@ pub fn export_conversation_json(
     crate::import_export::export_conversation_json(&db, conversation_id)
 }
 
+/// FTR-008: `project_id: None` exports every conversation in the workspace.
+#[tauri::command]
+pub fn export_workspace_json(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<String, AppError> {
+    let project_id = project_id
+        .as_deref()
+        .map(|value| crate::validation::validate_entity_id(value, "Project ID"))
+        .transpose()?;
+    let db = lock_db(&state)?;
+    crate::import_export::export_workspace_json(&db, project_id)
+}
+
+#[tauri::command]
+pub fn export_workspace_markdown(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<String, AppError> {
+    let project_id = project_id
+        .as_deref()
+        .map(|value| crate::validation::validate_entity_id(value, "Project ID"))
+        .transpose()?;
+    let db = lock_db(&state)?;
+    crate::import_export::export_workspace_markdown(&db, project_id)
+}
+
+#[tauri::command]
+pub fn preview_workspace_import(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<crate::import_export::WorkspaceImportPreview, AppError> {
+    let db = lock_db(&state)?;
+    crate::import_export::preview_workspace_import(&db, &json)
+}
+
+#[tauri::command]
+pub fn import_workspace_json(
+    state: State<'_, AppState>,
+    json: String,
+    include_conversation_ids: Vec<String>,
+) -> Result<crate::import_export::WorkspaceImportResult, AppError> {
+    let db = lock_db(&state)?;
+    crate::import_export::import_workspace_json(
+        &db,
+        &json,
+        &include_conversation_ids.into_iter().collect(),
+    )
+}
+
 #[tauri::command]
 pub fn import_conversation_json(
     app: AppHandle,

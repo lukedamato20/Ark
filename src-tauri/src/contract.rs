@@ -18,6 +18,7 @@ use crate::diagnostics::{BenchmarkResult, DiagnosticsResult};
 use crate::errors::AppError;
 use crate::import_export::{
     ImportConversationPreview, ImportConversationResult, ImportProviderMapping,
+    WorkspaceImportPreview, WorkspaceImportPreviewEntry, WorkspaceImportResult,
 };
 use crate::projects::{Project, ProjectDeletionPreview};
 use crate::provider_management::{BuiltInRuntimeStatus, RefreshModelsResult};
@@ -667,6 +668,46 @@ fn ollama_pull_progress_matches_contract() {
             completed: Some(50),
             digest: None,
             error: None,
+        },
+    );
+}
+
+fn sample_workspace_import_preview_entry() -> WorkspaceImportPreviewEntry {
+    WorkspaceImportPreviewEntry {
+        conversation_id: "conversation-1".to_string(),
+        title: "Example conversation".to_string(),
+        message_count: 4,
+        duplicate_of_local_id: None,
+    }
+}
+
+#[test]
+fn workspace_import_preview_entry_matches_contract() {
+    assert_matches_contract(
+        "WorkspaceImportPreviewEntry",
+        &sample_workspace_import_preview_entry(),
+    );
+}
+
+#[test]
+fn workspace_import_preview_matches_contract() {
+    assert_matches_contract(
+        "WorkspaceImportPreview",
+        &WorkspaceImportPreview {
+            scope: "workspace".to_string(),
+            entries: vec![sample_workspace_import_preview_entry()],
+            provider_mappings: vec![sample_import_provider_mapping()],
+        },
+    );
+}
+
+#[test]
+fn workspace_import_result_matches_contract() {
+    assert_matches_contract(
+        "WorkspaceImportResult",
+        &WorkspaceImportResult {
+            imported_count: 3,
+            skipped_count: 1,
         },
     );
 }
