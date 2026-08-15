@@ -2,16 +2,9 @@
 //! tool-calling feature (CMP-002/003/004, Ark Code's CODE-004/CODE-005) must consume rather than
 //! each defining its own permission shape. See
 //! `docs/adr/0002-tool-capability-and-prompt-injection-policy.md` for the policy this
-//! implements. Nothing in the codebase constructs a real tool definition yet — no tool-calling
-//! feature exists — this module is the contract the first one must satisfy, following the same
-//! "define the extensible structure before its first consumer" pattern ARC-003 already used for
-//! the provider capability registry.
-//!
-//! `#![allow(dead_code)]`: every item here is exercised only by this module's own tests, not by
-//! production code — deliberately, since there is no real tool-calling feature to call it yet.
-//! Remove this allow the moment CMP-003 or Ark Code's CODE-004 adds the first real consumer;
-//! leaving it in place after that would silently hide genuinely unused code again.
-#![allow(dead_code)]
+//! implements. CMP-003's `tools.rs` is the first real consumer (a single built-in, chat-safe
+//! "notes" tool) — the `#![allow(dead_code)]` this module carried while it had none has been
+//! removed accordingly.
 
 use crate::db::now;
 use serde::{Deserialize, Serialize};
@@ -31,6 +24,7 @@ pub enum CapabilityTier {
 /// A tool's declared scope. `data` is a free-text description of *which* data, not just the
 /// axis — "write" alone is not a usable grant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CapabilityScope {
     pub tier: CapabilityTier,
     pub read: bool,
@@ -55,6 +49,7 @@ impl CapabilityScope {
 /// A bounded, narrow, time-boxed authorization to use one tool's declared scope. There is
 /// deliberately no "allow all tools" variant — every grant names exactly one tool and expires.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CapabilityGrant {
     pub tool_id: String,
     pub scope: CapabilityScope,
@@ -85,6 +80,7 @@ pub enum IdempotencyPolicy {
 /// The human-readable preview shown before a side-effecting call runs, unless a still-valid
 /// narrow grant already covers this exact action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SideEffectPreview {
     pub tool_id: String,
     pub summary: String,
@@ -98,6 +94,7 @@ pub struct SideEffectPreview {
 /// the same discipline already enforced for runtime logs
 /// (`docs/runtime-diagnostics-policy.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditEvent {
     pub sequence: u64,
     pub timestamp: String,
@@ -204,6 +201,13 @@ pub fn verify_audit_chain(events: &[AuditEvent]) -> bool {
 /// `repository_bound` stands in for a real Ark Code Repository context (Phase 6.5, not yet
 /// implemented); this function is what CODE-004/CODE-005 must call before honoring any
 /// repository-execution grant.
+/// Not yet called by production code: CMP-003 (`tools.rs`) only registers `ChatSafe`-tier tools,
+/// so nothing in this build ever constructs a `RepositoryExecution` scope to check. This becomes
+/// a real, called function the moment Phase 6.5's CODE-004/CODE-005 exist — kept here now rather
+/// than deleted so that work has a tested enforcement point to call on day one, matching the
+/// "define the extensible structure before its first consumer" pattern this module already used
+/// for its own types before CMP-003 existed.
+#[allow(dead_code)]
 pub fn enforce_tier_boundary(
     scope: &CapabilityScope,
     repository_bound: bool,

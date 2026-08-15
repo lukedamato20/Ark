@@ -37,6 +37,51 @@ pub struct UpdateConversationSettingsRequest {
 
 pub use crate::generation::{EditUserMessageRequest, RegenerateAssistantMessageRequest};
 
+/// CMP-003: an explicit, user-chosen grant from the Tools settings panel — distinct from the
+/// short, fixed-TTL grant `tools::authorize_note_write` creates automatically when a previewed
+/// write is approved inline.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantToolCapabilityRequest {
+    pub tool_id: String,
+    pub ttl_minutes: i64,
+}
+
+/// CMP-003: previews a notes write before it runs. `content` is required for `create`/`update`,
+/// ignored for `delete`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewNoteWriteRequest {
+    pub action: crate::tools::NoteWriteAction,
+    pub content: Option<String>,
+}
+
+/// CMP-003: `approve` mirrors `UpdateProviderChanges::acknowledge_remote_risk`'s established
+/// shape — `false` on a normal attempt; the frontend resubmits with `true` only after the user
+/// has seen `preview_note_write`'s output and explicitly confirmed it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNoteRequest {
+    pub conversation_id: String,
+    pub content: String,
+    pub approve: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateNoteRequest {
+    pub id: String,
+    pub content: String,
+    pub approve: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteNoteRequest {
+    pub id: String,
+    pub approve: bool,
+}
+
 /// FTR-003: `name` is always sent; every other field independently `None`/blank clears that
 /// project-level default, matching `UpdateConversationSettingsRequest`'s convention — the
 /// frontend always sends its complete current draft, not a partial patch.
@@ -411,6 +456,150 @@ pub fn get_attachment_content(state: State<'_, AppState>, id: String) -> Result<
 pub fn delete_attachment(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let id = crate::validation::validate_entity_id(&id, "Attachment ID")?;
     lock_db(&state)?.delete_attachment(id)
+}
+
+/// CMP-003: the first real consumer of `tool_policy`/`tools`. See `tools.rs`'s own module doc for
+/// what this deliberately does and does not cover — one built-in, user-triggered, chat-safe tool
+/// ("notes"), not a real MCP protocol client or LLM-autonomous agent loop.
+#[tauri::command]
+pub fn list_tools(state: State<'_, AppState>) -> Result<Vec<crate::tools::ToolStatus>, AppError> {
+    let db = lock_read_db(&state)?;
+    let now_ts = crate::db::now();
+    crate::tools::built_in_tools()
+        .into_iter()
+        .map(|definition| {
+            let active_grant = db
+                .get_active_grant_for_tool(&definition.id)?
+                .filter(|grant| grant.is_valid_at(&now_ts));
+            Ok(crate::tools::ToolStatus {
+                definition,
+                active_grant,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn grant_tool_capability(
+    state: State<'_, AppState>,
+    request: GrantToolCapabilityRequest,
+) -> Result<crate::tools::ToolCapabilityGrant, AppError> {
+    let tool_id = crate::validation::validate_entity_id(&request.tool_id, "Tool ID")?.to_string();
+    let ttl_minutes = crate::validation::validate_grant_ttl_minutes(request.ttl_minutes)?;
+    let tool = crate::tools::built_in_tools()
+        .into_iter()
+        .find(|tool| tool.id == tool_id)
+        .ok_or_else(|| AppError::not_found("Tool"))?;
+    lock_db(&state)?.create_capability_grant(&tool_id, &tool.scope, ttl_minutes)
+}
+
+#[tauri::command]
+pub fn revoke_tool_capability(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Grant ID")?;
+    lock_db(&state)?.revoke_capability_grant(id)
+}
+
+#[tauri::command]
+pub fn list_tool_audit_events(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::tool_policy::AuditEvent>, AppError> {
+    lock_read_db(&state)?.list_audit_events()
+}
+
+/// SEC-009's tamper-evidence property, made checkable from the UI: recomputes the persisted
+/// chain's hashes from scratch and confirms they match what is stored. `true` means the trail is
+/// genuinely unmodified since it was written, not just present.
+#[tauri::command]
+pub fn verify_tool_audit_trail(state: State<'_, AppState>) -> Result<bool, AppError> {
+    let events = lock_read_db(&state)?.list_audit_events()?;
+    Ok(crate::tool_policy::verify_audit_chain(&events))
+}
+
+#[tauri::command]
+pub fn list_conversation_notes(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<crate::tools::ConversationNote>, AppError> {
+    let conversation_id =
+        crate::validation::validate_entity_id(&conversation_id, "Conversation ID")?;
+    lock_read_db(&state)?.list_conversation_notes(conversation_id)
+}
+
+#[tauri::command]
+pub fn preview_note_write(
+    request: PreviewNoteWriteRequest,
+) -> Result<crate::tool_policy::SideEffectPreview, AppError> {
+    let content = match request.action {
+        crate::tools::NoteWriteAction::Delete => None,
+        crate::tools::NoteWriteAction::Create | crate::tools::NoteWriteAction::Update => {
+            Some(crate::validation::validate_note_content(
+                request.content.as_deref().unwrap_or_default(),
+            )?)
+        }
+    };
+    Ok(crate::tools::preview_note_write(
+        request.action,
+        content.as_deref(),
+    ))
+}
+
+fn approval_required_error() -> AppError {
+    AppError::new(
+        "approval_required",
+        "This action needs approval — preview it and grant access first.",
+    )
+}
+
+#[tauri::command]
+pub fn create_note(
+    state: State<'_, AppState>,
+    request: CreateNoteRequest,
+) -> Result<crate::tools::ConversationNote, AppError> {
+    let conversation_id =
+        crate::validation::validate_entity_id(&request.conversation_id, "Conversation ID")?
+            .to_string();
+    let content = crate::validation::validate_note_content(&request.content)?;
+    let db = lock_db(&state)?;
+    match crate::tools::authorize_note_write(&db, request.approve)? {
+        crate::tools::NoteWriteAttempt::ApprovalRequired => Err(approval_required_error()),
+        crate::tools::NoteWriteAttempt::Applied => {
+            let note = db.create_note(&conversation_id, &content)?;
+            db.record_tool_invocation("notes", "created a note")?;
+            Ok(note)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn update_note(
+    state: State<'_, AppState>,
+    request: UpdateNoteRequest,
+) -> Result<crate::tools::ConversationNote, AppError> {
+    let id = crate::validation::validate_entity_id(&request.id, "Note ID")?.to_string();
+    let content = crate::validation::validate_note_content(&request.content)?;
+    let db = lock_db(&state)?;
+    match crate::tools::authorize_note_write(&db, request.approve)? {
+        crate::tools::NoteWriteAttempt::ApprovalRequired => Err(approval_required_error()),
+        crate::tools::NoteWriteAttempt::Applied => {
+            let note = db.update_note(&id, &content)?;
+            db.record_tool_invocation("notes", "updated a note")?;
+            Ok(note)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn delete_note(state: State<'_, AppState>, request: DeleteNoteRequest) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&request.id, "Note ID")?.to_string();
+    let db = lock_db(&state)?;
+    match crate::tools::authorize_note_write(&db, request.approve)? {
+        crate::tools::NoteWriteAttempt::ApprovalRequired => Err(approval_required_error()),
+        crate::tools::NoteWriteAttempt::Applied => {
+            db.delete_note(&id)?;
+            db.record_tool_invocation("notes", "deleted a note")?;
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]

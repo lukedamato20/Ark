@@ -34,6 +34,11 @@ use crate::sidecar::{
     RuntimeLogEntry,
 };
 use crate::supply_chain::{InstalledFileProvenance, ModelProvenance, RuntimeProvenance};
+use crate::tool_policy::{
+    AuditEvent, AuditEventKind, CapabilityScope, CapabilityTier, IdempotencyPolicy,
+    SideEffectPreview,
+};
+use crate::tools::{ConversationNote, ToolCapabilityGrant, ToolDefinition, ToolStatus};
 use crate::workspace::WorkspaceInfo;
 use crate::workspace_bootstrap::AppBootstrap;
 use serde::Serialize;
@@ -290,6 +295,118 @@ fn attachment_matches_contract() {
             byte_size: 42,
             sha256: "a".repeat(64),
             created_at: "2026-08-13T00:00:00Z".to_string(),
+        },
+    );
+}
+
+fn sample_capability_scope() -> CapabilityScope {
+    CapabilityScope {
+        tier: CapabilityTier::ChatSafe,
+        read: true,
+        write: true,
+        network: false,
+        secret: false,
+        data: "This conversation's own notes".to_string(),
+    }
+}
+
+#[test]
+fn capability_scope_matches_contract() {
+    assert_matches_contract("CapabilityScope", &sample_capability_scope());
+}
+
+#[test]
+fn tool_definition_matches_contract() {
+    assert_matches_contract(
+        "ToolDefinition",
+        &ToolDefinition {
+            id: "notes".to_string(),
+            name: "Notes".to_string(),
+            description: "Read and write a short scratch note attached to this conversation."
+                .to_string(),
+            publisher: "Ark (built-in)".to_string(),
+            scope: sample_capability_scope(),
+        },
+    );
+}
+
+fn sample_tool_capability_grant() -> ToolCapabilityGrant {
+    ToolCapabilityGrant {
+        id: "grant-1".to_string(),
+        tool_id: "notes".to_string(),
+        tier: CapabilityTier::ChatSafe,
+        read: true,
+        write: true,
+        network: false,
+        secret: false,
+        data: "This conversation's own notes".to_string(),
+        granted_at: "2026-08-15T00:00:00Z".to_string(),
+        expires_at: "2026-08-15T00:05:00Z".to_string(),
+        revoked: false,
+    }
+}
+
+#[test]
+fn tool_capability_grant_matches_contract() {
+    assert_matches_contract("ToolCapabilityGrant", &sample_tool_capability_grant());
+}
+
+#[test]
+fn tool_status_matches_contract() {
+    assert_matches_contract(
+        "ToolStatus",
+        &ToolStatus {
+            definition: ToolDefinition {
+                id: "notes".to_string(),
+                name: "Notes".to_string(),
+                description: "Read and write a short scratch note attached to this conversation."
+                    .to_string(),
+                publisher: "Ark (built-in)".to_string(),
+                scope: sample_capability_scope(),
+            },
+            active_grant: Some(sample_tool_capability_grant()),
+        },
+    );
+}
+
+#[test]
+fn conversation_note_matches_contract() {
+    assert_matches_contract(
+        "ConversationNote",
+        &ConversationNote {
+            id: "note-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            content: "Remember to follow up".to_string(),
+            created_at: "2026-08-15T00:00:00Z".to_string(),
+            updated_at: "2026-08-15T00:00:00Z".to_string(),
+        },
+    );
+}
+
+#[test]
+fn side_effect_preview_matches_contract() {
+    assert_matches_contract(
+        "SideEffectPreview",
+        &SideEffectPreview {
+            tool_id: "notes".to_string(),
+            summary: "Create a new note in this conversation: \"Remember to follow up\""
+                .to_string(),
+            idempotency: IdempotencyPolicy::RequiresFreshApproval,
+        },
+    );
+}
+
+#[test]
+fn audit_event_matches_contract() {
+    assert_matches_contract(
+        "AuditEvent",
+        &AuditEvent {
+            sequence: 0,
+            timestamp: "2026-08-15T00:00:00Z".to_string(),
+            kind: AuditEventKind::Granted,
+            tool_id: "notes".to_string(),
+            redacted_detail: "granted: notes for 5 min".to_string(),
+            chain_hash: "0123456789abcdef".to_string(),
         },
     );
 }

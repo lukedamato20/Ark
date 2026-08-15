@@ -98,6 +98,83 @@ export interface Attachment {
   createdAt: string;
 }
 
+/** CMP-003: SEC-009's capability-scope contract, made real by the "notes" tool. `tier` is always
+ * `"chat_safe"` today — `"repository_execution"` exists for Ark Code's future CODE-004/CODE-005,
+ * never reachable from Ark Chat. */
+export interface CapabilityScope {
+  tier: "chat_safe" | "repository_execution";
+  read: boolean;
+  write: boolean;
+  network: boolean;
+  secret: boolean;
+  /** Which data this scope actually covers — a human-readable description, not just the axis. */
+  data: string;
+}
+
+/** CMP-003: a tool's declared identity and scope, shown before any grant exists — the
+ * install/connect-style publisher/source/scope/trust disclosure, applied to a built-in tool. */
+export interface ToolDefinition {
+  id: string;
+  name: string;
+  description: string;
+  publisher: string;
+  scope: CapabilityScope;
+}
+
+/** CMP-003: a persisted capability grant. `id` identifies the grant row itself — a tool can be
+ * granted, expire, and be re-granted many times, each a distinct row. */
+export interface ToolCapabilityGrant {
+  id: string;
+  toolId: string;
+  tier: "chat_safe" | "repository_execution";
+  read: boolean;
+  write: boolean;
+  network: boolean;
+  secret: boolean;
+  data: string;
+  grantedAt: string;
+  expiresAt: string;
+  revoked: boolean;
+}
+
+/** CMP-003: a tool's current status for the Tools panel — its definition plus whichever grant (if
+ * any) currently governs it, valid or not, so the UI can show *why* the next write will ask for
+ * approval again. */
+export interface ToolStatus {
+  definition: ToolDefinition;
+  activeGrant?: ToolCapabilityGrant | null;
+}
+
+/** CMP-003: the built-in "notes" tool's own data — a short scratch note attached to a
+ * conversation. */
+export interface ConversationNote {
+  id: string;
+  conversationId: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type NoteWriteAction = "create" | "update" | "delete";
+
+/** CMP-003: the human-readable preview shown before a side-effecting tool call runs, unless a
+ * still-valid narrow grant already covers it. */
+export interface SideEffectPreview {
+  toolId: string;
+  summary: string;
+  idempotency: "idempotent" | "requires_fresh_approval";
+}
+
+/** CMP-003: one entry in SEC-009's persisted, hash-chained, tamper-evident audit trail. */
+export interface AuditEvent {
+  sequence: number;
+  timestamp: string;
+  kind: "granted" | "revoked" | "invoked" | "approval_requested" | "approval_denied";
+  toolId: string;
+  redactedDetail: string;
+  chainHash: string;
+}
+
 export interface ConversationPage {
   items: Conversation[];
   nextCursor?: string | null;

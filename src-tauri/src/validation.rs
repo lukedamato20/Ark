@@ -185,6 +185,42 @@ pub fn validate_attachment(file_name: &str, content: &str) -> Result<(String, St
     Ok((trimmed_name.to_string(), content.to_string()))
 }
 
+/// CMP-003: a conversation note is a short scratch memo, not a document store — generous enough
+/// for real notes, small enough that the built-in "notes" tool can't become an unbounded-size
+/// liability the way an attachment-scale limit would be wrong for.
+pub const MAX_NOTE_CONTENT_CHARS: usize = 8_000;
+
+/// Validates a conversation note's content before it is stored via the "notes" tool.
+pub fn validate_note_content(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_input("Note content cannot be empty."));
+    }
+    if trimmed.chars().count() > MAX_NOTE_CONTENT_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Note content must be at most {MAX_NOTE_CONTENT_CHARS} characters."
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// CMP-003: bounds for an explicit, user-chosen capability grant TTL (the Settings-panel "grant
+/// this tool access" path). ADR 0002 requires narrow, time-boxed grants only — an hour is a
+/// generous ceiling for a chat-safe, no-network, no-secret tool, not an "effectively unlimited"
+/// escape hatch.
+pub const MIN_GRANT_TTL_MINUTES: i64 = 1;
+pub const MAX_GRANT_TTL_MINUTES: i64 = 60;
+
+/// Validates a capability grant TTL in minutes.
+pub fn validate_grant_ttl_minutes(value: i64) -> Result<i64, AppError> {
+    if !(MIN_GRANT_TTL_MINUTES..=MAX_GRANT_TTL_MINUTES).contains(&value) {
+        return Err(AppError::invalid_input(format!(
+            "Grant duration must be between {MIN_GRANT_TTL_MINUTES} and {MAX_GRANT_TTL_MINUTES} minutes."
+        )));
+    }
+    Ok(value)
+}
+
 /// FTR-005: a branch label is a short, glanceable name shown next to a "Response N" ordinal in
 /// the alternatives switcher — not free-form prose, so the bound is much tighter than
 /// `MAX_SYSTEM_PROMPT_CHARS`.
@@ -686,5 +722,48 @@ mod tests {
     fn attachment_rejects_content_containing_a_nul_byte_as_not_really_text() {
         let error = validate_attachment("notes.txt", "hello\0world").unwrap_err();
         assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn note_content_trims_and_rejects_blank() {
+        assert_eq!(validate_note_content("  hello  ").unwrap(), "hello");
+        assert_eq!(
+            validate_note_content("   ").unwrap_err().code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn note_content_rejects_over_the_character_limit() {
+        let oversized = "a".repeat(MAX_NOTE_CONTENT_CHARS + 1);
+        assert_eq!(
+            validate_note_content(&oversized).unwrap_err().code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn note_content_accepts_content_at_exactly_the_character_limit() {
+        let exact = "a".repeat(MAX_NOTE_CONTENT_CHARS);
+        assert!(validate_note_content(&exact).is_ok());
+    }
+
+    #[test]
+    fn grant_ttl_accepts_the_full_valid_range_inclusive() {
+        assert_eq!(
+            validate_grant_ttl_minutes(MIN_GRANT_TTL_MINUTES).unwrap(),
+            1
+        );
+        assert_eq!(
+            validate_grant_ttl_minutes(MAX_GRANT_TTL_MINUTES).unwrap(),
+            60
+        );
+    }
+
+    #[test]
+    fn grant_ttl_rejects_out_of_range_values() {
+        assert!(validate_grant_ttl_minutes(0).is_err());
+        assert!(validate_grant_ttl_minutes(-1).is_err());
+        assert!(validate_grant_ttl_minutes(MAX_GRANT_TTL_MINUTES + 1).is_err());
     }
 }

@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
   Sun,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
@@ -29,6 +30,7 @@ import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTim
 import { useArkClient } from "../../lib/useArkClient";
 import type {
   AppErrorShape,
+  AuditEvent,
   BackupResult,
   BuiltInRuntimeStatus,
   CompanionApiStatus,
@@ -46,6 +48,7 @@ import type {
   SecretMetadata,
   SecretStoreStatus,
   ThemeMode,
+  ToolStatus,
   WorkspaceImportPreview,
   WorkspaceImportResult,
   WorkspaceInfo,
@@ -564,6 +567,8 @@ export function SettingsView({
           />
 
           <CompanionApiPanel onError={onError} />
+
+          <ToolsPanel onError={onError} />
 
           <Panel className="p-4">
             <div className="mb-2 flex items-center gap-2">
@@ -2493,6 +2498,200 @@ function CompanionApiPanel({ onError }: { onError: (message: string) => void }) 
           )
         )}
       </div>
+    </Panel>
+  );
+}
+
+/** CMP-003: the Tools settings panel — shows every built-in tool's declared publisher/scope/trust
+ * status, lets the user proactively grant or immediately revoke access, and shows the persisted,
+ * tamper-evident audit trail with a one-click integrity check. Today there is exactly one
+ * built-in tool ("Notes"); this panel is written to scale to more without change. */
+function ToolsPanel({ onError }: { onError: (message: string) => void }) {
+  const client = useArkClient();
+  const [tools, setTools] = React.useState<ToolStatus[] | null>(null);
+  const [events, setEvents] = React.useState<AuditEvent[]>([]);
+  const [ttlMinutes, setTtlMinutes] = React.useState("5");
+  const [busyToolId, setBusyToolId] = React.useState<string | null>(null);
+  const [integrityResult, setIntegrityResult] = React.useState<boolean | null>(null);
+  const [checkingIntegrity, setCheckingIntegrity] = React.useState(false);
+  const [showTrail, setShowTrail] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const [nextTools, nextEvents] = await Promise.all([client.listTools(), client.listToolAuditEvents()]);
+      setTools(nextTools);
+      setEvents(nextEvents);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function grant(toolId: string) {
+    const parsed = Number.parseInt(ttlMinutes, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 60) {
+      onError("Grant duration must be between 1 and 60 minutes.");
+      return;
+    }
+    setBusyToolId(toolId);
+    try {
+      await client.grantToolCapability(toolId, parsed);
+      await refresh();
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusyToolId(null);
+    }
+  }
+
+  async function revoke(grantId: string, toolId: string) {
+    setBusyToolId(toolId);
+    try {
+      await client.revokeToolCapability(grantId);
+      await refresh();
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusyToolId(null);
+    }
+  }
+
+  async function checkIntegrity() {
+    setCheckingIntegrity(true);
+    try {
+      setIntegrityResult(await client.verifyToolAuditTrail());
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setCheckingIntegrity(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Wrench className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Tools</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Built-in, chat-safe tools Ark can use. Each declares exactly what it can read/write/reach over the network —
+        writes need a preview and your approval unless you grant access below. No external tool servers are connected in
+        this build.
+      </p>
+
+      {!tools ? (
+        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading tools…
+        </div>
+      ) : (
+        <div className="mt-3 grid gap-3">
+          {tools.map((tool) => (
+            <div key={tool.definition.id} className="rounded-md border border-border p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium">{tool.definition.name}</span>
+                <Badge tone="muted">{tool.definition.publisher}</Badge>
+                <Badge tone={tool.definition.scope.tier === "chat_safe" ? "success" : "warning"}>
+                  {tool.definition.scope.tier === "chat_safe" ? "chat-safe" : "repository-execution"}
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">{tool.definition.description}</p>
+              <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground">
+                <span>Scope: {tool.definition.scope.data}</span>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {[
+                    tool.definition.scope.read && "read",
+                    tool.definition.scope.write && "write",
+                    tool.definition.scope.network && "network",
+                    tool.definition.scope.secret && "secret",
+                  ]
+                    .filter(Boolean)
+                    .join(", ")}
+                </span>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-2">
+                {tool.activeGrant ? (
+                  <>
+                    <Badge tone="success">
+                      Granted until {new Date(tool.activeGrant.expiresAt).toLocaleTimeString()}
+                    </Badge>
+                    <Button
+                      variant="secondary"
+                      className="ml-auto"
+                      disabled={busyToolId === tool.definition.id}
+                      onClick={() => void revoke(tool.activeGrant!.id, tool.definition.id)}
+                    >
+                      {busyToolId === tool.definition.id ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Revoke access
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Badge tone="muted">No active grant — writes will ask for approval</Badge>
+                    <label className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+                      Grant for
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={ttlMinutes}
+                        onChange={(event) => setTtlMinutes(event.target.value)}
+                        className="w-14 rounded border border-border bg-background px-1 py-0.5 text-xs"
+                        aria-label="Grant duration in minutes"
+                      />
+                      min
+                    </label>
+                    <Button
+                      variant="secondary"
+                      disabled={busyToolId === tool.definition.id}
+                      onClick={() => void grant(tool.definition.id)}
+                    >
+                      {busyToolId === tool.definition.id ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Grant access
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+
+          <div className="border-t border-border pt-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="secondary" onClick={() => setShowTrail((value) => !value)}>
+                {showTrail ? "Hide" : "Show"} audit trail ({events.length})
+              </Button>
+              <Button variant="secondary" disabled={checkingIntegrity} onClick={() => void checkIntegrity()}>
+                {checkingIntegrity ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Verify integrity
+              </Button>
+              {integrityResult !== null && (
+                <Badge tone={integrityResult ? "success" : "danger"}>
+                  {integrityResult ? "Trail verified — unmodified" : "Trail failed verification"}
+                </Badge>
+              )}
+            </div>
+            {showTrail && (
+              <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                {events.length === 0 && <li>No tool activity yet.</li>}
+                {events.map((event) => (
+                  <li key={event.sequence} className="flex flex-wrap gap-1">
+                    <span className="font-mono">#{event.sequence}</span>
+                    <span className="font-medium text-foreground">{event.kind}</span>
+                    <span>{event.toolId}</span>
+                    <span>— {event.redactedDetail}</span>
+                    <span className="ml-auto">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }

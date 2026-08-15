@@ -4,10 +4,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppBootstrap,
   Attachment,
+  AuditEvent,
   BackupResult,
   BranchAlternative,
   BuiltInRuntimeStatus,
   Conversation,
+  ConversationNote,
   ConversationPage,
   DeviceSettings,
   DiagnosticsBundle,
@@ -18,6 +20,7 @@ import type {
   ImportConversationResult,
   ImportProgressEvent,
   Message,
+  NoteWriteAction,
   OllamaPullProgress,
   Persona,
   PersonaDeletionPreview,
@@ -30,7 +33,10 @@ import type {
   SendChatResult,
   SecretMetadata,
   SecretStoreStatus,
+  SideEffectPreview,
   StreamEvent,
+  ToolCapabilityGrant,
+  ToolStatus,
   WorkspaceImportPreview,
   WorkspaceImportResult,
   WorkspaceInfo,
@@ -259,6 +265,32 @@ export interface ArkClient {
    * part of a sent message is not offered for deletion. */
   deleteAttachment(id: string): Promise<void>;
 
+  /** CMP-003: every built-in tool's declared definition plus whichever grant (if any) currently
+   * governs it. Today this is always exactly the one built-in "notes" tool. */
+  listTools(): Promise<ToolStatus[]>;
+  /** Proactively grants a tool access for `ttlMinutes` (1-60) without going through the
+   * preview/approve flow — the Settings-panel "grant this tool access" path. */
+  grantToolCapability(toolId: string, ttlMinutes: number): Promise<ToolCapabilityGrant>;
+  /** Immediate and independent of expiry. */
+  revokeToolCapability(id: string): Promise<void>;
+  /** The full, ordered, tamper-evident audit trail — every grant/revoke/invocation across every
+   * tool, oldest first. */
+  listToolAuditEvents(): Promise<AuditEvent[]>;
+  /** Recomputes the persisted audit chain's hashes from scratch; `true` means it is genuinely
+   * unmodified since it was written. */
+  verifyToolAuditTrail(): Promise<boolean>;
+
+  listConversationNotes(conversationId: string): Promise<ConversationNote[]>;
+  /** A human-readable preview of a notes write, shown before the user approves it. `content` is
+   * required for `"create"`/`"update"`, ignored for `"delete"`. */
+  previewNoteWrite(action: NoteWriteAction, content?: string | null): Promise<SideEffectPreview>;
+  /** `approve: true` only after the user has seen `previewNoteWrite`'s output and confirmed it —
+   * unnecessary (and ignored) while a still-valid grant already covers this tool. Rejects with
+   * `{ code: "approval_required" }` if no valid grant exists and `approve` is `false`. */
+  createNote(conversationId: string, content: string, approve: boolean): Promise<ConversationNote>;
+  updateNote(id: string, content: string, approve: boolean): Promise<ConversationNote>;
+  deleteNote(id: string, approve: boolean): Promise<void>;
+
   runDiagnostics(providerId: string, model?: string | null, includeRuntimeLogs?: boolean): Promise<DiagnosticsResult>;
 
   exportConversationMarkdown(conversationId: string): Promise<string>;
@@ -470,6 +502,23 @@ export function createTauriArkClient(): ArkClient {
     getAttachmentContent: (id) => invoke<string>("get_attachment_content", { id }),
     deleteAttachment: (id) => invoke<void>("delete_attachment", { id }),
 
+    listTools: () => invoke<ToolStatus[]>("list_tools"),
+    grantToolCapability: (toolId, ttlMinutes) =>
+      invoke<ToolCapabilityGrant>("grant_tool_capability", { request: { toolId, ttlMinutes } }),
+    revokeToolCapability: (id) => invoke<void>("revoke_tool_capability", { id }),
+    listToolAuditEvents: () => invoke<AuditEvent[]>("list_tool_audit_events"),
+    verifyToolAuditTrail: () => invoke<boolean>("verify_tool_audit_trail"),
+
+    listConversationNotes: (conversationId) =>
+      invoke<ConversationNote[]>("list_conversation_notes", { conversationId }),
+    previewNoteWrite: (action, content) =>
+      invoke<SideEffectPreview>("preview_note_write", { request: { action, content: content ?? null } }),
+    createNote: (conversationId, content, approve) =>
+      invoke<ConversationNote>("create_note", { request: { conversationId, content, approve } }),
+    updateNote: (id, content, approve) =>
+      invoke<ConversationNote>("update_note", { request: { id, content, approve } }),
+    deleteNote: (id, approve) => invoke<void>("delete_note", { request: { id, approve } }),
+
     runDiagnostics: (providerId, model, includeRuntimeLogs = false) =>
       invoke<DiagnosticsResult>("run_diagnostics", {
         providerId,
@@ -610,6 +659,17 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     listConversationAttachments: async () => [],
     getAttachmentContent: notImplemented("getAttachmentContent"),
     deleteAttachment: async () => undefined,
+
+    listTools: async () => [],
+    grantToolCapability: notImplemented("grantToolCapability"),
+    revokeToolCapability: async () => undefined,
+    listToolAuditEvents: async () => [],
+    verifyToolAuditTrail: async () => true,
+    listConversationNotes: async () => [],
+    previewNoteWrite: notImplemented("previewNoteWrite"),
+    createNote: notImplemented("createNote"),
+    updateNote: notImplemented("updateNote"),
+    deleteNote: async () => undefined,
 
     runDiagnostics: notImplemented("runDiagnostics"),
 

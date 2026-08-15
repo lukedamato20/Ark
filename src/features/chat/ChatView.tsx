@@ -7,9 +7,11 @@ import {
   Loader2,
   MoreVertical,
   Paperclip,
+  Pencil,
   Send,
   SlidersHorizontal,
   Square,
+  StickyNote,
   Trash2,
   X,
 } from "lucide-react";
@@ -23,6 +25,7 @@ import { useArkClient } from "../../lib/useArkClient";
 import type {
   Attachment,
   Conversation,
+  ConversationNote,
   Message,
   ModelInfo,
   Persona,
@@ -30,6 +33,7 @@ import type {
   ProviderConfig,
   ProviderHealth,
   SendChatResult,
+  SideEffectPreview,
 } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -826,6 +830,7 @@ export function ChatView({
             onSettingsSaved={onConversationRenamed}
             onError={onError}
           />
+          <ConversationNotesButton conversation={conversation} onError={onError} />
           <HeaderOverflowMenu
             conversationSelected={Boolean(conversation)}
             onExportMarkdown={() => void handleExport("markdown")}
@@ -1438,6 +1443,266 @@ function ConversationSettingsButton({
                 Save
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * CMP-003: the built-in "notes" tool's UI — a per-conversation scratch note list. Every write
+ * (create/update/delete) goes through the same preview-then-approve flow the backend enforces: an
+ * attempt without a currently valid grant comes back as a typed `approval_required` error, at
+ * which point this component fetches the human-readable preview and shows an inline Approve
+ * step; approving resubmits the same write with `approve: true`, which both performs it and
+ * creates a short-lived grant so the next write in this session doesn't need to ask again.
+ */
+function ConversationNotesButton({
+  conversation,
+  onError,
+}: {
+  conversation?: Conversation;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [open, setOpen] = React.useState(false);
+  const [notes, setNotes] = React.useState<ConversationNote[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+  const [editingId, setEditingId] = React.useState<string | null>(null);
+  const [editDraft, setEditDraft] = React.useState("");
+  const [pendingApproval, setPendingApproval] = React.useState<{
+    preview: SideEffectPreview;
+    run: () => Promise<void>;
+  } | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+  const refresh = React.useCallback(
+    async (conversationId: string) => {
+      setLoading(true);
+      try {
+        setNotes(await client.listConversationNotes(conversationId));
+      } catch (error) {
+        onError(getErrorMessage(error));
+      } finally {
+        setLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  React.useEffect(() => {
+    if (open && conversation) void refresh(conversation.id);
+  }, [open, conversation, refresh]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  /** Runs `attempt` with `approve: false` first; if the backend reports `approval_required`,
+   * fetches the preview and stashes a retry (`approve: true`) for the user to confirm instead of
+   * failing outright. */
+  async function attemptWrite(attempt: (approve: boolean) => Promise<void>, preview: () => Promise<SideEffectPreview>) {
+    setBusy(true);
+    try {
+      await attempt(false);
+      setPendingApproval(null);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
+      if (code === "approval_required") {
+        try {
+          const shown = await preview();
+          setPendingApproval({ preview: shown, run: () => attempt(true) });
+        } catch (previewError) {
+          onError(getErrorMessage(previewError));
+        }
+      } else {
+        onError(getErrorMessage(error));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addNote() {
+    const content = draft.trim();
+    if (!content || !conversation) return;
+    const conversationId = conversation.id;
+    await attemptWrite(
+      async (approve) => {
+        await client.createNote(conversationId, content, approve);
+        setDraft("");
+        await refresh(conversationId);
+      },
+      () => client.previewNoteWrite("create", content),
+    );
+  }
+
+  async function saveEdit(id: string) {
+    const content = editDraft.trim();
+    if (!content || !conversation) return;
+    const conversationId = conversation.id;
+    await attemptWrite(
+      async (approve) => {
+        await client.updateNote(id, content, approve);
+        setEditingId(null);
+        await refresh(conversationId);
+      },
+      () => client.previewNoteWrite("update", content),
+    );
+  }
+
+  async function removeNote(id: string) {
+    if (!conversation) return;
+    const conversationId = conversation.id;
+    await attemptWrite(
+      async (approve) => {
+        await client.deleteNote(id, approve);
+        await refresh(conversationId);
+      },
+      () => client.previewNoteWrite("delete"),
+    );
+  }
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={notes.length > 0 ? `Notes (${notes.length})` : "Notes"}
+        onClick={() => setOpen((value) => !value)}
+        disabled={!conversation}
+        className="relative flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <StickyNote className="h-4 w-4" aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Conversation notes"
+          className="absolute right-0 top-11 z-20 grid w-80 gap-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
+        >
+          <div className="text-sm font-semibold">Notes</div>
+
+          {pendingApproval && (
+            <div className="grid gap-2 rounded-md border border-warning/50 bg-warning/10 p-2 text-xs">
+              <div>{pendingApproval.preview.summary}</div>
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" onClick={() => setPendingApproval(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    const run = pendingApproval.run;
+                    setPendingApproval(null);
+                    void (async () => {
+                      setBusy(true);
+                      try {
+                        await run();
+                      } catch (error) {
+                        onError(getErrorMessage(error));
+                      } finally {
+                        setBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  Approve
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading notes…
+            </div>
+          ) : (
+            <ul className="grid gap-2">
+              {notes.length === 0 && <li className="text-xs text-muted-foreground">No notes yet.</li>}
+              {notes.map((note) => (
+                <li key={note.id} className="rounded-md border border-border p-2 text-xs">
+                  {editingId === note.id ? (
+                    <div className="grid gap-2">
+                      <Textarea
+                        value={editDraft}
+                        onChange={(event) => setEditDraft(event.target.value)}
+                        rows={2}
+                        className="text-xs"
+                      />
+                      <div className="flex justify-end gap-2">
+                        <Button variant="ghost" onClick={() => setEditingId(null)}>
+                          Cancel
+                        </Button>
+                        <Button variant="secondary" disabled={busy} onClick={() => void saveEdit(note.id)}>
+                          Save
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-2">
+                      <span className="whitespace-pre-wrap break-words">{note.content}</span>
+                      <div className="ml-auto flex shrink-0 gap-1">
+                        <button
+                          type="button"
+                          aria-label="Edit note"
+                          className="rounded p-1 hover:bg-accent"
+                          onClick={() => {
+                            setEditingId(note.id);
+                            setEditDraft(note.content);
+                          }}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Delete note"
+                          className="rounded p-1 hover:bg-accent"
+                          onClick={() => void removeNote(note.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="flex gap-2 border-t border-border pt-2">
+            <Textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="Add a note…"
+              rows={2}
+              className="text-xs"
+            />
+            <Button variant="secondary" disabled={busy || !draft.trim()} onClick={() => void addNote()}>
+              Add
+            </Button>
           </div>
         </div>
       )}

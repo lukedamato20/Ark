@@ -13,7 +13,11 @@ use crate::errors::AppError;
 use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview, UpdateProjectChanges};
 use crate::providers::{ModelInfo, ProviderConfig};
-use chrono::Utc;
+use crate::tool_policy::{
+    next_audit_event, AuditEvent, AuditEventKind, CapabilityScope, CapabilityTier,
+};
+use crate::tools::{ConversationNote, ToolCapabilityGrant};
+use chrono::{Duration, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -109,6 +113,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 11,
         name: "0011_attachments",
         sql: include_str!("../../migrations/0011_attachments.sql"),
+    },
+    MigrationDef {
+        version: 12,
+        name: "0012_tool_capabilities",
+        sql: include_str!("../../migrations/0012_tool_capabilities.sql"),
     },
 ];
 
@@ -1690,6 +1699,224 @@ impl Database {
         Ok(linked)
     }
 
+    // --- CMP-003: the built-in "notes" tool's own data, and SEC-009's capability-grant/audit
+    // persistence (the first real consumer of `tool_policy`'s in-memory-only type model). ---
+
+    pub fn create_note(
+        &self,
+        conversation_id: &str,
+        content: &str,
+    ) -> Result<ConversationNote, AppError> {
+        self.get_conversation(conversation_id)?;
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO conversation_notes (id, conversation_id, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, conversation_id, content, timestamp],
+        )?;
+        self.get_note(&id)
+    }
+
+    pub fn get_note(&self, id: &str) -> Result<ConversationNote, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, conversation_id, content, created_at, updated_at
+                 FROM conversation_notes WHERE id = ?1",
+                params![id],
+                map_note,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Note"))
+    }
+
+    pub fn list_conversation_notes(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationNote>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, conversation_id, content, created_at, updated_at
+             FROM conversation_notes WHERE conversation_id = ?1 ORDER BY updated_at ASC",
+        )?;
+        let rows = statement.query_map(params![conversation_id], map_note)?;
+        collect_rows(rows)
+    }
+
+    pub fn update_note(&self, id: &str, content: &str) -> Result<ConversationNote, AppError> {
+        self.get_note(id)?;
+        self.connection.execute(
+            "UPDATE conversation_notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, now(), id],
+        )?;
+        self.get_note(id)
+    }
+
+    pub fn delete_note(&self, id: &str) -> Result<(), AppError> {
+        self.get_note(id)?;
+        self.connection
+            .execute("DELETE FROM conversation_notes WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Creates a new grant and records the corresponding `Granted` audit event. There is no
+    /// "extend an existing grant" path — a fresh grant is always a fresh, narrow, time-boxed
+    /// authorization (ADR 0002 §3), even if an unexpired one already exists for the same tool.
+    pub fn create_capability_grant(
+        &self,
+        tool_id: &str,
+        scope: &CapabilityScope,
+        ttl_minutes: i64,
+    ) -> Result<ToolCapabilityGrant, AppError> {
+        let id = Uuid::new_v4().to_string();
+        let granted_at = now();
+        let expires_at = (Utc::now() + Duration::minutes(ttl_minutes)).to_rfc3339();
+        self.connection.execute(
+            "INSERT INTO capability_grants (
+                id, tool_id, tier, can_read, can_write, can_network, can_secret, scope_data,
+                granted_at, expires_at, revoked
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)",
+            params![
+                id,
+                tool_id,
+                capability_tier_to_str(scope.tier),
+                scope.read,
+                scope.write,
+                scope.network,
+                scope.secret,
+                scope.data,
+                granted_at,
+                expires_at,
+            ],
+        )?;
+        self.append_audit_event(
+            AuditEventKind::Granted,
+            tool_id,
+            &format!("granted: {} for {ttl_minutes} min", scope.data),
+        )?;
+        self.get_capability_grant(&id)
+    }
+
+    fn get_capability_grant(&self, id: &str) -> Result<ToolCapabilityGrant, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, tool_id, tier, can_read, can_write, can_network, can_secret,
+                        scope_data, granted_at, expires_at, revoked
+                 FROM capability_grants WHERE id = ?1",
+                params![id],
+                map_capability_grant,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Capability grant"))
+    }
+
+    /// The most recent, still-unexpired-by-clock, non-revoked grant for `tool_id`, if any. Does
+    /// not itself check `is_valid_at` against the current instant beyond what SQL's string
+    /// comparison already gives for RFC3339 timestamps — callers that need the precise instant
+    /// (e.g. `tools::authorize_note_write`) re-check via `ToolCapabilityGrant::is_valid_at`.
+    pub fn get_active_grant_for_tool(
+        &self,
+        tool_id: &str,
+    ) -> Result<Option<ToolCapabilityGrant>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, tool_id, tier, can_read, can_write, can_network, can_secret,
+                        scope_data, granted_at, expires_at, revoked
+                 FROM capability_grants
+                 WHERE tool_id = ?1 AND revoked = 0
+                 ORDER BY granted_at DESC LIMIT 1",
+                params![tool_id],
+                map_capability_grant,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn list_capability_grants(&self) -> Result<Vec<ToolCapabilityGrant>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, tool_id, tier, can_read, can_write, can_network, can_secret,
+                    scope_data, granted_at, expires_at, revoked
+             FROM capability_grants ORDER BY granted_at DESC",
+        )?;
+        let rows = statement.query_map([], map_capability_grant)?;
+        collect_rows(rows)
+    }
+
+    /// Revocation is immediate and independent of expiry — matches
+    /// `tool_policy::CapabilityGrant::is_valid_at`'s own documented invariant. Records a
+    /// `Revoked` audit event so the trail shows *when* access was pulled, not just that it
+    /// eventually lapsed.
+    pub fn revoke_capability_grant(&self, id: &str) -> Result<(), AppError> {
+        let grant = self.get_capability_grant(id)?;
+        self.connection.execute(
+            "UPDATE capability_grants SET revoked = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        self.append_audit_event(AuditEventKind::Revoked, &grant.tool_id, "revoked by user")?;
+        Ok(())
+    }
+
+    /// Appends the next event in the single, global, hash-chained audit log — reads the current
+    /// last event (if any), builds the next one via `tool_policy::next_audit_event` (which
+    /// computes `sequence`/`chain_hash` from it), and inserts. `redacted_detail` must never
+    /// contain a raw secret or full tool-call payload, matching the same discipline
+    /// `docs/runtime-diagnostics-policy.md` already enforces for runtime logs — every call site
+    /// in this module passes a short, pre-redacted summary, never raw note content.
+    fn append_audit_event(
+        &self,
+        kind: AuditEventKind,
+        tool_id: &str,
+        redacted_detail: &str,
+    ) -> Result<AuditEvent, AppError> {
+        let previous = self.get_last_audit_event()?;
+        let event = next_audit_event(previous.as_ref(), kind, tool_id, redacted_detail);
+        self.connection.execute(
+            "INSERT INTO tool_audit_events (sequence, timestamp, kind, tool_id, redacted_detail, chain_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.sequence as i64,
+                event.timestamp,
+                audit_event_kind_to_str(event.kind),
+                event.tool_id,
+                event.redacted_detail,
+                event.chain_hash,
+            ],
+        )?;
+        Ok(event)
+    }
+
+    fn get_last_audit_event(&self) -> Result<Option<AuditEvent>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT sequence, timestamp, kind, tool_id, redacted_detail, chain_hash
+                 FROM tool_audit_events ORDER BY sequence DESC LIMIT 1",
+                [],
+                map_audit_event,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT sequence, timestamp, kind, tool_id, redacted_detail, chain_hash
+             FROM tool_audit_events ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map([], map_audit_event)?;
+        collect_rows(rows)
+    }
+
+    /// Records that a notes write actually ran, once the caller has performed it — separate from
+    /// `authorize_note_write`'s `Granted` event, which only fires when a *new* grant was created,
+    /// not on every invocation under an already-valid one.
+    pub fn record_tool_invocation(
+        &self,
+        tool_id: &str,
+        redacted_detail: &str,
+    ) -> Result<(), AppError> {
+        self.append_audit_event(AuditEventKind::Invoked, tool_id, redacted_detail)?;
+        Ok(())
+    }
+
     pub fn get_active_messages(&self, conversation_id: &str) -> Result<Vec<Message>, AppError> {
         let conversation = self.get_conversation(conversation_id)?;
         let Some(current_message_id) = conversation.current_message_id else {
@@ -2696,6 +2923,96 @@ fn map_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
         byte_size: row.get(4)?,
         sha256: row.get(5)?,
         created_at: row.get(6)?,
+    })
+}
+
+fn map_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationNote> {
+    Ok(ConversationNote {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        content: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+fn capability_tier_to_str(tier: CapabilityTier) -> &'static str {
+    match tier {
+        CapabilityTier::ChatSafe => "chat_safe",
+        CapabilityTier::RepositoryExecution => "repository_execution",
+    }
+}
+
+fn capability_tier_from_str(value: &str) -> rusqlite::Result<CapabilityTier> {
+    match value {
+        "chat_safe" => Ok(CapabilityTier::ChatSafe),
+        "repository_execution" => Ok(CapabilityTier::RepositoryExecution),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown capability tier: {other}"),
+            )),
+        )),
+    }
+}
+
+fn map_capability_grant(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCapabilityGrant> {
+    let tier_str: String = row.get(2)?;
+    Ok(ToolCapabilityGrant {
+        id: row.get(0)?,
+        tool_id: row.get(1)?,
+        tier: capability_tier_from_str(&tier_str)?,
+        read: row.get(3)?,
+        write: row.get(4)?,
+        network: row.get(5)?,
+        secret: row.get(6)?,
+        data: row.get(7)?,
+        granted_at: row.get(8)?,
+        expires_at: row.get(9)?,
+        revoked: row.get(10)?,
+    })
+}
+
+fn audit_event_kind_to_str(kind: AuditEventKind) -> &'static str {
+    match kind {
+        AuditEventKind::Granted => "granted",
+        AuditEventKind::Revoked => "revoked",
+        AuditEventKind::Invoked => "invoked",
+        AuditEventKind::ApprovalRequested => "approval_requested",
+        AuditEventKind::ApprovalDenied => "approval_denied",
+    }
+}
+
+fn audit_event_kind_from_str(value: &str) -> rusqlite::Result<AuditEventKind> {
+    match value {
+        "granted" => Ok(AuditEventKind::Granted),
+        "revoked" => Ok(AuditEventKind::Revoked),
+        "invoked" => Ok(AuditEventKind::Invoked),
+        "approval_requested" => Ok(AuditEventKind::ApprovalRequested),
+        "approval_denied" => Ok(AuditEventKind::ApprovalDenied),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown audit event kind: {other}"),
+            )),
+        )),
+    }
+}
+
+fn map_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
+    let sequence: i64 = row.get(0)?;
+    let kind_str: String = row.get(2)?;
+    Ok(AuditEvent {
+        sequence: sequence as u64,
+        timestamp: row.get(1)?,
+        kind: audit_event_kind_from_str(&kind_str)?,
+        tool_id: row.get(3)?,
+        redacted_detail: row.get(4)?,
+        chain_hash: row.get(5)?,
     })
 }
 
@@ -6267,5 +6584,234 @@ mod tests {
 
         drop(db);
         let _ = fs::remove_file(path);
+    }
+
+    // --- CMP-003: notes tool data, capability grants, and audit persistence. ---
+
+    fn notes_scope() -> CapabilityScope {
+        CapabilityScope {
+            tier: CapabilityTier::ChatSafe,
+            read: true,
+            write: true,
+            network: false,
+            secret: false,
+            data: "This conversation's own notes".to_string(),
+        }
+    }
+
+    #[test]
+    fn note_create_list_update_delete_round_trip() {
+        let (db, path) = test_db();
+        let conversation = db.create_conversation(None).expect("conversation created");
+
+        let created = db
+            .create_note(&conversation.id, "first draft")
+            .expect("note created");
+        assert_eq!(created.content, "first draft");
+        assert_eq!(created.conversation_id, conversation.id);
+
+        let updated = db
+            .update_note(&created.id, "revised draft")
+            .expect("note updated");
+        assert_eq!(updated.content, "revised draft");
+        assert_eq!(updated.id, created.id);
+
+        let listed = db
+            .list_conversation_notes(&conversation.id)
+            .expect("notes listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].content, "revised draft");
+
+        db.delete_note(&created.id).expect("note deleted");
+        assert!(db.get_note(&created.id).is_err());
+        assert!(db
+            .list_conversation_notes(&conversation.id)
+            .expect("notes listed after delete")
+            .is_empty());
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_conversation_notes_returns_only_this_conversations_rows() {
+        let (db, path) = test_db();
+        let conversation_a = db.create_conversation(None).expect("conversation a");
+        let conversation_b = db.create_conversation(None).expect("conversation b");
+
+        db.create_note(&conversation_a.id, "a's note")
+            .expect("note a created");
+        db.create_note(&conversation_b.id, "b's note")
+            .expect("note b created");
+
+        let listed_a = db
+            .list_conversation_notes(&conversation_a.id)
+            .expect("a's notes listed");
+        assert_eq!(listed_a.len(), 1);
+        assert_eq!(listed_a[0].content, "a's note");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn create_capability_grant_is_valid_immediately_and_records_a_granted_audit_event() {
+        let (db, path) = test_db();
+        let grant = db
+            .create_capability_grant("notes", &notes_scope(), 5)
+            .expect("grant created");
+        assert!(grant.is_valid_at(&now()));
+        assert!(!grant.revoked);
+
+        let active = db
+            .get_active_grant_for_tool("notes")
+            .expect("lookup succeeds")
+            .expect("an active grant exists");
+        assert_eq!(active.id, grant.id);
+
+        let events = db.list_audit_events().expect("events listed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, AuditEventKind::Granted);
+        assert_eq!(events[0].tool_id, "notes");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_grant_created_with_a_negative_ttl_is_already_expired() {
+        let (db, path) = test_db();
+        let grant = db
+            .create_capability_grant("notes", &notes_scope(), -1)
+            .expect("grant created");
+        assert!(
+            !grant.is_valid_at(&now()),
+            "a grant whose expiry is already in the past must not be valid"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn revoke_capability_grant_is_immediate_and_records_a_revoked_audit_event() {
+        let (db, path) = test_db();
+        let grant = db
+            .create_capability_grant("notes", &notes_scope(), 5)
+            .expect("grant created");
+
+        db.revoke_capability_grant(&grant.id)
+            .expect("grant revoked");
+
+        let active = db
+            .get_active_grant_for_tool("notes")
+            .expect("lookup succeeds");
+        assert!(
+            active.is_none(),
+            "a revoked grant must not be returned as active"
+        );
+
+        let events = db.list_audit_events().expect("events listed");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, AuditEventKind::Granted);
+        assert_eq!(events[1].kind, AuditEventKind::Revoked);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persisted_audit_events_form_a_verifiable_tamper_evident_chain() {
+        let (db, path) = test_db();
+        let grant = db
+            .create_capability_grant("notes", &notes_scope(), 5)
+            .expect("grant created");
+        db.record_tool_invocation("notes", "created a note")
+            .expect("invocation recorded");
+        db.revoke_capability_grant(&grant.id)
+            .expect("grant revoked");
+
+        let events = db.list_audit_events().expect("events listed");
+        assert_eq!(events.len(), 3);
+        assert!(
+            crate::tool_policy::verify_audit_chain(&events),
+            "a genuine, untampered persisted chain must verify"
+        );
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    fn seed_migration_0011_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..11] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1),
+                        (9, '0009_message_branch_names', ?1),
+                        (10, '0010_personas', ?1),
+                        (11, '0011_attachments', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 11 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-11 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-11 conversation, from before tool capabilities existed");
+        conversation_id
+    }
+
+    /// CMP-003 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 12, the current latest — a pre-existing conversation row from a migration-11
+    /// workspace must survive migration 12's new `conversation_notes`/`capability_grants`/
+    /// `tool_audit_events` tables, and each must actually be usable afterward.
+    #[test]
+    fn upgrading_a_migration_0011_workspace_adds_the_tool_capability_tables() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0011_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-11 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-11 conversation");
+
+        let note = db
+            .create_note(&conversation_id, "post-upgrade note")
+            .expect("conversation_notes table is usable immediately after migration 12");
+        assert_eq!(note.conversation_id, conversation_id);
+
+        let grant = db
+            .create_capability_grant("notes", &notes_scope(), 5)
+            .expect("capability_grants table is usable immediately after migration 12");
+        assert!(grant.is_valid_at(&now()));
+
+        let events = db
+            .list_audit_events()
+            .expect("tool_audit_events table is usable immediately after migration 12");
+        assert_eq!(events.len(), 1);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 }

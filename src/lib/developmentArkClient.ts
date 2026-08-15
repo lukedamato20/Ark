@@ -1,16 +1,22 @@
 import type {
   AppBootstrap,
   Attachment,
+  AuditEvent,
   BuiltInRuntimeStatus,
   CompanionApiStatus,
   Conversation,
+  ConversationNote,
   Message,
   ModelInfo,
+  NoteWriteAction,
   OllamaPullProgress,
   Persona,
   PersonaVersionSummary,
   Project,
   ProviderConfig,
+  SideEffectPreview,
+  ToolCapabilityGrant,
+  ToolStatus,
   WorkspaceProtectionStatus,
 } from "../types/ark";
 import { createFakeArkClient, type ArkClient } from "./ArkClient";
@@ -841,6 +847,74 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
   // sent message" display path).
   const attachments: Attachment[] = [];
 
+  // CMP-003: mirrors the real backend's built-in "notes" tool + SEC-009 capability-grant/audit
+  // persistence closely enough to live-verify the grant/revoke/preview/approve/audit-trail flow —
+  // a single global, hash-chain-free (fixtures don't need tamper-evidence, only the interaction
+  // shape) in-memory audit log, one grant slot for the one built-in tool, and per-conversation
+  // notes.
+  const notesToolDefinition = {
+    id: "notes",
+    name: "Notes",
+    description: "Read and write a short scratch note attached to this conversation.",
+    publisher: "Ark (built-in)",
+    scope: {
+      tier: "chat_safe" as const,
+      read: true,
+      write: true,
+      network: false,
+      secret: false,
+      data: "This conversation's own notes",
+    },
+  };
+  const notes: ConversationNote[] = [];
+  const grants: ToolCapabilityGrant[] = [];
+  const auditEvents: AuditEvent[] = [];
+  let nextAuditSequence = 0;
+
+  function recordAuditEvent(kind: AuditEvent["kind"], toolId: string, redactedDetail: string) {
+    auditEvents.push({
+      sequence: nextAuditSequence++,
+      timestamp: new Date().toISOString(),
+      kind,
+      toolId,
+      redactedDetail,
+      chainHash: `fixture-hash-${nextAuditSequence}`,
+    });
+  }
+
+  function activeGrant(): ToolCapabilityGrant | null {
+    const now = new Date().toISOString();
+    return grants.find((grant) => !grant.revoked && grant.expiresAt > now) ?? null;
+  }
+
+  /** Mirrors `tools::authorize_note_write`'s auto-grant: a short-lived (5 min) grant created the
+   * moment a previewed write is approved with no already-valid grant in place. */
+  function createAutoGrant(): ToolCapabilityGrant {
+    const grant: ToolCapabilityGrant = {
+      id: `fixture-grant-${grants.length}`,
+      toolId: "notes",
+      tier: "chat_safe",
+      read: true,
+      write: true,
+      network: false,
+      secret: false,
+      data: notesToolDefinition.scope.data,
+      grantedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+      revoked: false,
+    };
+    grants.push(grant);
+    recordAuditEvent("granted", "notes", `granted: ${grant.data} for 5 min`);
+    return grant;
+  }
+
+  function previewSummary(action: NoteWriteAction, content?: string | null): string {
+    const truncated = (content ?? "").trim().slice(0, 80);
+    if (action === "create") return `Create a new note in this conversation: "${truncated}"`;
+    if (action === "update") return `Replace this note's content with: "${truncated}"`;
+    return "Delete this note permanently";
+  }
+
   const companionApiState: CompanionApiStatus = {
     enabled: false,
     running: false,
@@ -1202,6 +1276,93 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
         throw new Error("fixture: cannot delete an attachment already linked to a sent message");
       }
       attachments.splice(index, 1);
+    },
+
+    listTools: async (): Promise<ToolStatus[]> => [{ definition: notesToolDefinition, activeGrant: activeGrant() }],
+    grantToolCapability: async (toolId, ttlMinutes) => {
+      if (toolId !== "notes") throw { code: "not_found", message: "Tool not found." };
+      const grant: ToolCapabilityGrant = {
+        id: `fixture-grant-${grants.length}`,
+        toolId,
+        tier: "chat_safe",
+        read: true,
+        write: true,
+        network: false,
+        secret: false,
+        data: notesToolDefinition.scope.data,
+        grantedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + ttlMinutes * 60_000).toISOString(),
+        revoked: false,
+      };
+      grants.push(grant);
+      recordAuditEvent("granted", toolId, `granted: ${grant.data} for ${ttlMinutes} min`);
+      return grant;
+    },
+    revokeToolCapability: async (id) => {
+      const grant = grants.find((item) => item.id === id);
+      if (!grant) throw { code: "not_found", message: "Capability grant not found." };
+      grant.revoked = true;
+      recordAuditEvent("revoked", grant.toolId, "revoked by user");
+    },
+    listToolAuditEvents: async () => auditEvents.map((event) => ({ ...event })),
+    verifyToolAuditTrail: async () => true,
+
+    listConversationNotes: async (conversationId) =>
+      notes.filter((note) => note.conversationId === conversationId).map((note) => ({ ...note })),
+    previewNoteWrite: async (action, content): Promise<SideEffectPreview> => ({
+      toolId: "notes",
+      summary: previewSummary(action, content),
+      idempotency: "requires_fresh_approval",
+    }),
+    createNote: async (conversationId, content, approve) => {
+      if (!activeGrant()) {
+        if (!approve)
+          throw {
+            code: "approval_required",
+            message: "This action needs approval — preview it and grant access first.",
+          };
+        createAutoGrant();
+      }
+      const note: ConversationNote = {
+        id: `fixture-note-${notes.length}`,
+        conversationId,
+        content,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      notes.push(note);
+      recordAuditEvent("invoked", "notes", "created a note");
+      return note;
+    },
+    updateNote: async (id, content, approve) => {
+      const note = notes.find((item) => item.id === id);
+      if (!note) throw { code: "not_found", message: "Note not found." };
+      if (!activeGrant()) {
+        if (!approve)
+          throw {
+            code: "approval_required",
+            message: "This action needs approval — preview it and grant access first.",
+          };
+        createAutoGrant();
+      }
+      note.content = content;
+      note.updatedAt = new Date().toISOString();
+      recordAuditEvent("invoked", "notes", "updated a note");
+      return { ...note };
+    },
+    deleteNote: async (id, approve) => {
+      const index = notes.findIndex((item) => item.id === id);
+      if (index === -1) throw { code: "not_found", message: "Note not found." };
+      if (!activeGrant()) {
+        if (!approve)
+          throw {
+            code: "approval_required",
+            message: "This action needs approval — preview it and grant access first.",
+          };
+        createAutoGrant();
+      }
+      notes.splice(index, 1);
+      recordAuditEvent("invoked", "notes", "deleted a note");
     },
 
     // CMP-001: a minimal send — creates a user message and links any staged attachments to it,
