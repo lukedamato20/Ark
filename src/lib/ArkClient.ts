@@ -29,6 +29,7 @@ import type {
   ProjectDeletionPreview,
   ProviderConfig,
   RefreshModelsResult,
+  ResponseStyle,
   RestorePreview,
   SendChatResult,
   SecretMetadata,
@@ -37,6 +38,7 @@ import type {
   StreamEvent,
   ToolCapabilityGrant,
   ToolStatus,
+  Tone,
   WorkspaceImportPreview,
   WorkspaceImportResult,
   WorkspaceInfo,
@@ -93,6 +95,8 @@ export interface UpdateConversationSettingsInput {
   systemPrompt?: string | null;
   temperature?: number | null;
   maxTokens?: number | null;
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
 }
 
 export interface UpdateProjectInput {
@@ -103,6 +107,8 @@ export interface UpdateProjectInput {
   defaultModelId?: string | null;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
 }
 
 export interface CreatePersonaInput {
@@ -110,6 +116,8 @@ export interface CreatePersonaInput {
   instructions: string;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
 }
 
 export interface UpdatePersonaInput {
@@ -118,6 +126,8 @@ export interface UpdatePersonaInput {
   instructions: string;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
 }
 
 export interface ListConversationsInput {

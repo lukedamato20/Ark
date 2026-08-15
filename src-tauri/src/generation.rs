@@ -74,11 +74,13 @@ fn resolve_setting<T>(
     (None, None)
 }
 
-/// FTR-003: the system prompt has no per-request override tier (unlike temperature/max_tokens),
-/// so this is a separate three-tier resolution rather than a degenerate call to `resolve_setting`
-/// with an always-`None` request tier — a conversation's own override, then its persona's
-/// instructions, then its project's instructions.
-fn resolve_system_prompt(
+/// FTR-003/UX: the shared three-tier resolver for every Ark-level text setting that has no
+/// per-request or provider-default tier (unlike temperature/max_tokens) — system prompt,
+/// response style, and tone all resolve identically: a conversation's own override, then its
+/// persona's value, then its project's value. Field-agnostic despite the historical name (it
+/// started as system-prompt-only under FTR-003; UX's response-style/tone work reuses it rather
+/// than duplicating the same three lines twice more).
+fn resolve_text_setting(
     conversation_value: Option<&str>,
     persona_value: Option<&str>,
     project_value: Option<&str>,
@@ -93,6 +95,101 @@ fn resolve_system_prompt(
         return (Some(value.to_string()), Some(SettingSource::Project));
     }
     (None, None)
+}
+
+/// UX: maps a validated `response_style` value (see `validation::validate_response_style`'s
+/// allow-list, which this table must stay in sync with) to one fixed, human-readable instruction
+/// sentence. This is Ark-level behavior composed into the outgoing system message — never a real
+/// provider parameter, and never claimed to be one. `None` is defense in depth for a value that
+/// somehow reached here despite validation; it contributes nothing rather than panicking.
+fn response_style_instruction(style: &str) -> Option<&'static str> {
+    match style {
+        "balanced" => Some("Aim for a balanced level of detail — not too brief, not too long."),
+        "concise" => Some("Keep responses brief and to the point."),
+        "detailed" => Some("Provide detailed, thorough responses."),
+        "explanatory" => Some("Explain your reasoning and provide context, as if teaching."),
+        "technical" => Some("Use precise technical language appropriate for an expert audience."),
+        "creative" => Some("Feel free to be creative and exploratory in how you respond."),
+        _ => None,
+    }
+}
+
+/// UX: mirrors `response_style_instruction` for `tone` — see `validation::validate_tone`'s
+/// allow-list.
+fn tone_instruction(tone: &str) -> Option<&'static str> {
+    match tone {
+        "neutral" => Some("Use a neutral, matter-of-fact tone."),
+        "professional" => Some("Use a professional, polished tone."),
+        "friendly" => Some("Use a warm, friendly tone."),
+        "direct" => Some("Be direct and get straight to the point."),
+        "casual" => Some("Use a casual, conversational tone."),
+        _ => None,
+    }
+}
+
+/// UX: composes the response-style/tone instruction sentences into one block, appended after the
+/// resolved system prompt (never merged into the user's own stored `system_prompt` text — see
+/// `resolve_text_settings`, the sole caller). `None` when neither is set, so callers never append
+/// stray whitespace to a prompt that has neither.
+fn compose_style_instructions(style: Option<&str>, tone: Option<&str>) -> Option<String> {
+    let sentences: Vec<&str> = [
+        style.and_then(response_style_instruction),
+        tone.and_then(tone_instruction),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!sentences.is_empty()).then(|| sentences.join(" "))
+}
+
+/// UX: the three text settings (system prompt, response style, tone) resolved together, plus the
+/// single outgoing system message they compose into — the one place `send_chat_message`/
+/// `edit_user_message`/`regenerate_assistant_message` each used to duplicate this logic three
+/// times over.
+struct ResolvedTextSettings {
+    system_message: Option<String>,
+    system_prompt_source: Option<SettingSource>,
+    response_style: Option<String>,
+    response_style_source: Option<SettingSource>,
+    tone: Option<String>,
+    tone_source: Option<SettingSource>,
+}
+
+fn resolve_text_settings(
+    conversation: &Conversation,
+    persona: Option<&Persona>,
+    project: Option<&Project>,
+) -> ResolvedTextSettings {
+    let (system_prompt, system_prompt_source) = resolve_text_setting(
+        conversation.system_prompt.as_deref(),
+        persona.map(|p| p.instructions.as_str()),
+        project.and_then(|p| p.instructions.as_deref()),
+    );
+    let (response_style, response_style_source) = resolve_text_setting(
+        conversation.response_style.as_deref(),
+        persona.and_then(|p| p.response_style.as_deref()),
+        project.and_then(|p| p.response_style.as_deref()),
+    );
+    let (tone, tone_source) = resolve_text_setting(
+        conversation.tone.as_deref(),
+        persona.and_then(|p| p.tone.as_deref()),
+        project.and_then(|p| p.tone.as_deref()),
+    );
+    let style_instructions = compose_style_instructions(response_style.as_deref(), tone.as_deref());
+    let system_message = match (&system_prompt, &style_instructions) {
+        (Some(prompt), Some(instructions)) => Some(format!("{prompt}\n\n{instructions}")),
+        (Some(prompt), None) => Some(prompt.clone()),
+        (None, Some(instructions)) => Some(instructions.clone()),
+        (None, None) => None,
+    };
+    ResolvedTextSettings {
+        system_message,
+        system_prompt_source,
+        response_style,
+        response_style_source,
+        tone,
+        tone_source,
+    }
 }
 
 /// FTR-003: fetches the conversation's assigned project, if any. A conversation whose
@@ -117,7 +214,7 @@ fn resolve_conversation_persona(db: &Database, conversation: &Conversation) -> O
 /// acceptance criterion: what the provider actually receives never leaves a file's presence or
 /// name ambiguous. Deliberately appended only to the *provider request* built here, never merged
 /// into the user's own stored `Message.content` — the conversation's displayed/exported history
-/// stays exactly what the user typed, the same separation `resolve_system_prompt`'s injected
+/// stays exactly what the user typed, the same separation `resolve_text_settings`'s injected
 /// system message already establishes for project/persona instructions.
 fn build_attachment_disclosure(attachments: &[(crate::attachments::Attachment, String)]) -> String {
     let mut disclosure = String::new();
@@ -156,6 +253,13 @@ struct GenerationProvenance {
     /// itself, which stays out of provenance metadata the same way message content itself is
     /// never duplicated into it.
     system_prompt_source: Option<SettingSource>,
+    /// UX: unlike the system prompt, `response_style`/`tone` *are* recorded here (not just their
+    /// source) — they're one of a fixed six/five-value allow-list each, not free text, so there's
+    /// no sensitive-content reason to omit them the way a user's own prompt text is omitted.
+    response_style: Option<String>,
+    response_style_source: Option<SettingSource>,
+    tone: Option<String>,
+    tone_source: Option<SettingSource>,
 }
 
 /// FTR-004 acceptance: "effective settings ... stored in response provenance." Best-effort — a
@@ -308,16 +412,13 @@ pub fn send_chat_message(
             let project = resolve_conversation_project(&db, &conversation);
             let persona = resolve_conversation_persona(&db, &conversation);
 
-            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
-                conversation.system_prompt.as_deref(),
-                persona.as_ref().map(|p| p.instructions.as_str()),
-                project.as_ref().and_then(|p| p.instructions.as_deref()),
-            );
+            let resolved_text =
+                resolve_text_settings(&conversation, persona.as_ref(), project.as_ref());
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &effective_system_prompt {
+            if let Some(system_message) = &resolved_text.system_message {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
-                    content: system_prompt.clone(),
+                    content: system_message.clone(),
                 });
             }
             provider_messages.extend(active_messages.into_iter().filter_map(|message| {
@@ -361,7 +462,11 @@ pub fn send_chat_message(
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_source,
+                    system_prompt_source: resolved_text.system_prompt_source,
+                    response_style: resolved_text.response_style,
+                    response_style_source: resolved_text.response_style_source,
+                    tone: resolved_text.tone,
+                    tone_source: resolved_text.tone_source,
                 },
             );
 
@@ -467,16 +572,13 @@ pub fn edit_user_message(
             let project = resolve_conversation_project(&db, &conversation);
             let persona = resolve_conversation_persona(&db, &conversation);
 
-            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
-                conversation.system_prompt.as_deref(),
-                persona.as_ref().map(|p| p.instructions.as_str()),
-                project.as_ref().and_then(|p| p.instructions.as_deref()),
-            );
+            let resolved_text =
+                resolve_text_settings(&conversation, persona.as_ref(), project.as_ref());
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &effective_system_prompt {
+            if let Some(system_message) = &resolved_text.system_message {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
-                    content: system_prompt.clone(),
+                    content: system_message.clone(),
                 });
             }
             provider_messages.extend(history.into_iter().filter_map(|message| {
@@ -520,7 +622,11 @@ pub fn edit_user_message(
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_source,
+                    system_prompt_source: resolved_text.system_prompt_source,
+                    response_style: resolved_text.response_style,
+                    response_style_source: resolved_text.response_style_source,
+                    tone: resolved_text.tone,
+                    tone_source: resolved_text.tone_source,
                 },
             );
 
@@ -618,16 +724,13 @@ pub fn regenerate_assistant_message(
                 &request.model,
             )?;
 
-            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
-                conversation.system_prompt.as_deref(),
-                persona.as_ref().map(|p| p.instructions.as_str()),
-                project.as_ref().and_then(|p| p.instructions.as_deref()),
-            );
+            let resolved_text =
+                resolve_text_settings(&conversation, persona.as_ref(), project.as_ref());
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &effective_system_prompt {
+            if let Some(system_message) = &resolved_text.system_message {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
-                    content: system_prompt.clone(),
+                    content: system_message.clone(),
                 });
             }
             provider_messages.extend(history.into_iter().filter_map(|message| {
@@ -667,7 +770,11 @@ pub fn regenerate_assistant_message(
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_source,
+                    system_prompt_source: resolved_text.system_prompt_source,
+                    response_style: resolved_text.response_style,
+                    response_style_source: resolved_text.response_style_source,
+                    tone: resolved_text.tone,
+                    tone_source: resolved_text.tone_source,
                 },
             );
 
@@ -1815,9 +1922,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_system_prompt_prefers_conversation_then_persona_then_project() {
+    fn resolve_text_setting_prefers_conversation_then_persona_then_project() {
         assert_eq!(
-            resolve_system_prompt(
+            resolve_text_setting(
                 Some("Be terse."),
                 Some("You are a reviewer."),
                 Some("Cite sources.")
@@ -1828,20 +1935,149 @@ mod tests {
             )
         );
         assert_eq!(
-            resolve_system_prompt(None, Some("You are a reviewer."), Some("Cite sources.")),
+            resolve_text_setting(None, Some("You are a reviewer."), Some("Cite sources.")),
             (
                 Some("You are a reviewer.".to_string()),
                 Some(SettingSource::Persona)
             )
         );
         assert_eq!(
-            resolve_system_prompt(None, None, Some("Cite sources.")),
+            resolve_text_setting(None, None, Some("Cite sources.")),
             (
                 Some("Cite sources.".to_string()),
                 Some(SettingSource::Project)
             )
         );
-        assert_eq!(resolve_system_prompt(None, None, None), (None, None));
+        assert_eq!(resolve_text_setting(None, None, None), (None, None));
+    }
+
+    #[test]
+    fn compose_style_instructions_covers_every_allowed_value_and_none_cases() {
+        assert_eq!(compose_style_instructions(None, None), None);
+        assert!(compose_style_instructions(Some("concise"), None)
+            .unwrap()
+            .contains("brief"));
+        assert!(compose_style_instructions(None, Some("friendly"))
+            .unwrap()
+            .contains("warm"));
+        let both = compose_style_instructions(Some("technical"), Some("direct")).unwrap();
+        assert!(both.contains("technical") && both.contains("direct"));
+        // Every declared allow-list value must actually map to an instruction, not silently
+        // contribute nothing — this is the exhaustiveness check `validation::validate_response_style`
+        // /`validate_tone`'s own allow-lists depend on staying in sync with.
+        for style in [
+            "balanced",
+            "concise",
+            "detailed",
+            "explanatory",
+            "technical",
+            "creative",
+        ] {
+            assert!(
+                response_style_instruction(style).is_some(),
+                "missing instruction for response style {style}"
+            );
+        }
+        for tone in ["neutral", "professional", "friendly", "direct", "casual"] {
+            assert!(
+                tone_instruction(tone).is_some(),
+                "missing instruction for tone {tone}"
+            );
+        }
+        assert_eq!(response_style_instruction("not-a-real-style"), None);
+        assert_eq!(tone_instruction("not-a-real-tone"), None);
+    }
+
+    #[test]
+    fn resolve_text_settings_composes_system_prompt_and_style_instructions_together() {
+        let conversation = Conversation {
+            id: "c1".to_string(),
+            title: "Test".to_string(),
+            created_at: "2026-08-15T00:00:00Z".to_string(),
+            updated_at: "2026-08-15T00:00:00Z".to_string(),
+            provider_id: None,
+            model_id: None,
+            current_message_id: None,
+            system_prompt: Some("Be terse.".to_string()),
+            temperature: None,
+            max_tokens: None,
+            archived: false,
+            project_id: None,
+            pinned_at: None,
+            persona_id: None,
+            response_style: Some("concise".to_string()),
+            tone: None,
+        };
+        let resolved = resolve_text_settings(&conversation, None, None);
+        let message = resolved
+            .system_message
+            .expect("a system message must be composed");
+        assert!(message.starts_with("Be terse."));
+        assert!(message.contains("brief"));
+        assert_eq!(
+            resolved.system_prompt_source,
+            Some(SettingSource::Conversation)
+        );
+        assert_eq!(resolved.response_style, Some("concise".to_string()));
+        assert_eq!(
+            resolved.response_style_source,
+            Some(SettingSource::Conversation)
+        );
+        assert_eq!(resolved.tone, None);
+        assert_eq!(resolved.tone_source, None);
+    }
+
+    #[test]
+    fn resolve_text_settings_with_only_style_and_no_system_prompt_still_composes_a_message() {
+        let conversation = Conversation {
+            id: "c2".to_string(),
+            title: "Test".to_string(),
+            created_at: "2026-08-15T00:00:00Z".to_string(),
+            updated_at: "2026-08-15T00:00:00Z".to_string(),
+            provider_id: None,
+            model_id: None,
+            current_message_id: None,
+            system_prompt: None,
+            temperature: None,
+            max_tokens: None,
+            archived: false,
+            project_id: None,
+            pinned_at: None,
+            persona_id: None,
+            response_style: None,
+            tone: Some("friendly".to_string()),
+        };
+        let resolved = resolve_text_settings(&conversation, None, None);
+        assert_eq!(
+            resolved.system_message,
+            Some("Use a warm, friendly tone.".to_string())
+        );
+        assert_eq!(resolved.system_prompt_source, None);
+        assert_eq!(resolved.tone_source, Some(SettingSource::Conversation));
+    }
+
+    #[test]
+    fn resolve_text_settings_is_none_when_nothing_is_set() {
+        let conversation = Conversation {
+            id: "c3".to_string(),
+            title: "Test".to_string(),
+            created_at: "2026-08-15T00:00:00Z".to_string(),
+            updated_at: "2026-08-15T00:00:00Z".to_string(),
+            provider_id: None,
+            model_id: None,
+            current_message_id: None,
+            system_prompt: None,
+            temperature: None,
+            max_tokens: None,
+            archived: false,
+            project_id: None,
+            pinned_at: None,
+            persona_id: None,
+            response_style: None,
+            tone: None,
+        };
+        let resolved = resolve_text_settings(&conversation, None, None);
+        assert_eq!(resolved.system_message, None);
     }
 
     #[test]
@@ -1893,6 +2129,8 @@ mod tests {
                 Some("Be terse."),
                 Some(0.1),
                 Some(64),
+                None,
+                None,
             )
             .expect("conversation settings saved")
         };
@@ -2002,7 +2240,7 @@ mod tests {
             let conversation = db
                 .create_conversation(Some("Request wins".to_string()))
                 .expect("conversation created");
-            db.update_conversation_settings(&conversation.id, None, Some(0.1), Some(64))
+            db.update_conversation_settings(&conversation.id, None, Some(0.1), Some(64), None, None)
                 .expect("conversation settings saved")
         };
 
@@ -2046,6 +2284,8 @@ mod tests {
                         default_model_id: None,
                         default_temperature: Some(0.2),
                         default_max_tokens: Some(256),
+                        response_style: None,
+                        tone: None,
                     },
                 )
                 .expect("project defaults saved");

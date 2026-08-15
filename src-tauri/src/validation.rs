@@ -115,6 +115,61 @@ pub fn validate_system_prompt(value: Option<String>) -> Result<Option<String>, A
     Ok(Some(trimmed.to_string()))
 }
 
+/// UX: the fixed allow-list of Ark-level "response style" presets — must stay in sync with
+/// `generation.rs`'s `response_style_instruction` match arms (that function's own tests assert
+/// every value here maps to a real instruction). Not every low-level provider parameter Ark could
+/// expose — a deliberately small, human-readable set of behavioral presets.
+pub const RESPONSE_STYLE_VALUES: &[&str] = &[
+    "balanced",
+    "concise",
+    "detailed",
+    "explanatory",
+    "technical",
+    "creative",
+];
+
+/// UX: mirrors `RESPONSE_STYLE_VALUES` for tone — see `generation.rs`'s `tone_instruction`.
+pub const TONE_VALUES: &[&str] = &["neutral", "professional", "friendly", "direct", "casual"];
+
+/// Validates a response-style override. `None` or blank means "no override" (same normalization
+/// as `validate_system_prompt`); anything present must be one of `RESPONSE_STYLE_VALUES` — this
+/// is a closed preset, not free text, so an unrecognized value is a real input error, not
+/// something to silently pass through.
+pub fn validate_response_style(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !RESPONSE_STYLE_VALUES.contains(&trimmed) {
+        return Err(AppError::invalid_input(format!(
+            "Response style must be one of: {}.",
+            RESPONSE_STYLE_VALUES.join(", ")
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Validates a tone override — mirrors `validate_response_style` exactly, against `TONE_VALUES`.
+pub fn validate_tone(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !TONE_VALUES.contains(&trimmed) {
+        return Err(AppError::invalid_input(format!(
+            "Tone must be one of: {}.",
+            TONE_VALUES.join(", ")
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// FTR-003: validates a persona's instructions. Unlike `validate_system_prompt`, `None`/blank is
 /// rejected rather than normalized away — a persona's entire purpose is its prompt content, so
 /// (unlike a conversation's optional override) an empty one is a user error, not a valid "no
@@ -669,6 +724,53 @@ mod tests {
     fn system_prompt_rejects_over_the_character_limit() {
         let value = "a".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
         let error = validate_system_prompt(Some(value)).unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn response_style_none_and_blank_both_normalize_to_none() {
+        assert_eq!(validate_response_style(None).unwrap(), None);
+        assert_eq!(
+            validate_response_style(Some("   ".to_string())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn response_style_accepts_every_allowed_value() {
+        for value in RESPONSE_STYLE_VALUES {
+            assert_eq!(
+                validate_response_style(Some((*value).to_string())).unwrap(),
+                Some((*value).to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn response_style_rejects_a_value_outside_the_allow_list() {
+        let error = validate_response_style(Some("aggressive".to_string())).unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn tone_none_and_blank_both_normalize_to_none() {
+        assert_eq!(validate_tone(None).unwrap(), None);
+        assert_eq!(validate_tone(Some("  ".to_string())).unwrap(), None);
+    }
+
+    #[test]
+    fn tone_accepts_every_allowed_value() {
+        for value in TONE_VALUES {
+            assert_eq!(
+                validate_tone(Some((*value).to_string())).unwrap(),
+                Some((*value).to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn tone_rejects_a_value_outside_the_allow_list() {
+        let error = validate_tone(Some("sarcastic".to_string())).unwrap_err();
         assert_eq!(error.code, "invalid_input");
     }
 

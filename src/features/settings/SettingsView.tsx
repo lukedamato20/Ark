@@ -24,6 +24,7 @@ import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { downloadText, safeFilename } from "../../lib/download";
+import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
 import { detectIsMacPlatform, formatShortcutKeys } from "../../lib/platform";
 import { useBreakpoint } from "../../lib/useBreakpoint";
 import { validateNumberInput } from "../../lib/numberField";
@@ -47,11 +48,13 @@ import type {
   ProjectDeletionPreview,
   ProviderConfig,
   ProviderHealth,
+  ResponseStyle,
   RestorePreview,
   SecretMetadata,
   SecretStoreStatus,
   ThemeMode,
   ToolStatus,
+  Tone,
   WorkspaceImportPreview,
   WorkspaceImportResult,
   WorkspaceInfo,
@@ -922,6 +925,8 @@ function ProjectEditor({
   const [maxTokens, setMaxTokens] = React.useState(
     project.defaultMaxTokens != null ? String(project.defaultMaxTokens) : "",
   );
+  const [responseStyle, setResponseStyle] = React.useState(project.responseStyle ?? "");
+  const [tone, setTone] = React.useState(project.tone ?? "");
   const [saving, setSaving] = React.useState(false);
   const [archiving, setArchiving] = React.useState(false);
   const [deletePreview, setDeletePreview] = React.useState<ProjectDeletionPreview | null>(null);
@@ -934,6 +939,8 @@ function ProjectEditor({
     setDefaultModelId(project.defaultModelId ?? "");
     setTemperature(project.defaultTemperature != null ? String(project.defaultTemperature) : "");
     setMaxTokens(project.defaultMaxTokens != null ? String(project.defaultMaxTokens) : "");
+    setResponseStyle(project.responseStyle ?? "");
+    setTone(project.tone ?? "");
     setDeletePreview(null);
   }, [project]);
 
@@ -972,6 +979,8 @@ function ProjectEditor({
         defaultModelId: defaultModelId || null,
         defaultTemperature: temperatureNumber,
         defaultMaxTokens: maxTokensNumber,
+        responseStyle: (responseStyle || null) as ResponseStyle | null,
+        tone: (tone || null) as Tone | null,
       });
       onProjectSaved(saved);
     } catch (error) {
@@ -1027,6 +1036,30 @@ function ProjectEditor({
           placeholder="No project instructions — every conversation in this project inherits its own default"
         />
       </label>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="grid gap-1.5 text-sm">
+          Default response style
+          <Select value={responseStyle} onChange={(event) => setResponseStyle(event.target.value)}>
+            <option value="">Provider default (none)</option>
+            {RESPONSE_STYLE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="grid gap-1.5 text-sm">
+          Default tone
+          <Select value={tone} onChange={(event) => setTone(event.target.value)}>
+            <option value="">Provider default (none)</option>
+            {TONE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+      </div>
       <label className="grid gap-1.5 text-sm">
         Default provider
         <Select
@@ -1297,6 +1330,8 @@ function PersonaEditor({
   const [maxTokens, setMaxTokens] = React.useState(
     persona.defaultMaxTokens != null ? String(persona.defaultMaxTokens) : "",
   );
+  const [responseStyle, setResponseStyle] = React.useState(persona.responseStyle ?? "");
+  const [tone, setTone] = React.useState(persona.tone ?? "");
   const [saving, setSaving] = React.useState(false);
   const [archiving, setArchiving] = React.useState(false);
   const [deletePreview, setDeletePreview] = React.useState<PersonaDeletionPreview | null>(null);
@@ -1309,6 +1344,8 @@ function PersonaEditor({
     setInstructions(persona.instructions);
     setTemperature(persona.defaultTemperature != null ? String(persona.defaultTemperature) : "");
     setMaxTokens(persona.defaultMaxTokens != null ? String(persona.defaultMaxTokens) : "");
+    setResponseStyle(persona.responseStyle ?? "");
+    setTone(persona.tone ?? "");
     setDeletePreview(null);
     setVersions(null);
   }, [persona]);
@@ -1343,6 +1380,8 @@ function PersonaEditor({
         instructions,
         defaultTemperature: temperatureNumber,
         defaultMaxTokens: maxTokensNumber,
+        responseStyle: (responseStyle || null) as ResponseStyle | null,
+        tone: (tone || null) as Tone | null,
       });
       onPersonaSaved(saved);
       setVersions(null);
@@ -1414,6 +1453,30 @@ function PersonaEditor({
           </span>
         )}
       </label>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="grid gap-1.5 text-sm">
+          Default response style
+          <Select value={responseStyle} onChange={(event) => setResponseStyle(event.target.value)}>
+            <option value="">Provider default (none)</option>
+            {RESPONSE_STYLE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="grid gap-1.5 text-sm">
+          Default tone
+          <Select value={tone} onChange={(event) => setTone(event.target.value)}>
+            <option value="">Provider default (none)</option>
+            {TONE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+      </div>
       <label className="grid gap-1.5 text-sm">
         Default temperature
         <Input

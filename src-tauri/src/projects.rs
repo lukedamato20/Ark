@@ -10,12 +10,17 @@ pub struct Project {
     pub id: String,
     pub name: String,
     /// `None` means no project-level instructions are injected. See `generation.rs`'s
-    /// `resolve_system_prompt` for how this composes with a conversation's own override.
+    /// `resolve_text_settings` for how this composes with a conversation's own override.
     pub instructions: Option<String>,
     pub default_provider_id: Option<String>,
     pub default_model_id: Option<String>,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    /// UX: an Ark-level behavioral preset default for every conversation assigned to this
+    /// project — see `Conversation::response_style`'s doc comment; resolves at the same tier as
+    /// `instructions` (`generation.rs`'s `resolve_text_settings`).
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
     /// `None` means active. An ISO timestamp rather than a bare boolean, matching the
     /// `pinned_at`/`archived_at` convention already established for conversations.
     pub archived_at: Option<String>,
@@ -32,6 +37,8 @@ pub struct UpdateProjectChanges<'a> {
     pub default_model_id: Option<&'a str>,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    pub response_style: Option<&'a str>,
+    pub tone: Option<&'a str>,
 }
 
 /// The result of `Database::preview_project_deletion`: what deleting this project would affect,

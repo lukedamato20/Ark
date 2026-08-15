@@ -33,6 +33,8 @@ pub struct UpdateConversationSettingsRequest {
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
 }
 
 pub use crate::generation::{EditUserMessageRequest, RegenerateAssistantMessageRequest};
@@ -95,6 +97,8 @@ pub struct UpdateProjectRequest {
     pub default_model_id: Option<String>,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
 }
 
 /// FTR-003: `name` and `instructions` are always sent (unlike a project's optional
@@ -107,6 +111,8 @@ pub struct CreatePersonaRequest {
     pub instructions: String,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
 }
 
 /// FTR-003: mirrors `UpdateProjectRequest`'s "always send the complete current draft" convention.
@@ -120,6 +126,8 @@ pub struct UpdatePersonaRequest {
     pub instructions: String,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,11 +239,15 @@ pub fn update_conversation_settings(
     let system_prompt = crate::validation::validate_system_prompt(request.system_prompt)?;
     let temperature = crate::validation::validate_temperature(request.temperature)?;
     let max_tokens = crate::validation::validate_max_tokens(request.max_tokens)?;
+    let response_style = crate::validation::validate_response_style(request.response_style)?;
+    let tone = crate::validation::validate_tone(request.tone)?;
     lock_db(&state)?.update_conversation_settings(
         &id,
         system_prompt.as_deref(),
         temperature,
         max_tokens,
+        response_style.as_deref(),
+        tone.as_deref(),
     )
 }
 
@@ -298,6 +310,8 @@ pub fn update_project(
     let instructions = crate::validation::validate_system_prompt(request.instructions)?;
     let temperature = crate::validation::validate_temperature(request.default_temperature)?;
     let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
+    let response_style = crate::validation::validate_response_style(request.response_style)?;
+    let tone = crate::validation::validate_tone(request.tone)?;
     lock_db(&state)?.update_project(
         &id,
         crate::projects::UpdateProjectChanges {
@@ -307,6 +321,8 @@ pub fn update_project(
             default_model_id: request.default_model_id.as_deref(),
             default_temperature: temperature,
             default_max_tokens: max_tokens,
+            response_style: response_style.as_deref(),
+            tone: tone.as_deref(),
         },
     )
 }
@@ -366,7 +382,16 @@ pub fn create_persona(
     let instructions = crate::validation::validate_persona_instructions(&request.instructions)?;
     let temperature = crate::validation::validate_temperature(request.default_temperature)?;
     let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
-    lock_db(&state)?.create_persona(&request.name, &instructions, temperature, max_tokens)
+    let response_style = crate::validation::validate_response_style(request.response_style)?;
+    let tone = crate::validation::validate_tone(request.tone)?;
+    lock_db(&state)?.create_persona(
+        &request.name,
+        &instructions,
+        temperature,
+        max_tokens,
+        response_style.as_deref(),
+        tone.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -378,7 +403,17 @@ pub fn update_persona(
     let instructions = crate::validation::validate_persona_instructions(&request.instructions)?;
     let temperature = crate::validation::validate_temperature(request.default_temperature)?;
     let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
-    lock_db(&state)?.update_persona(&id, &request.name, &instructions, temperature, max_tokens)
+    let response_style = crate::validation::validate_response_style(request.response_style)?;
+    let tone = crate::validation::validate_tone(request.tone)?;
+    lock_db(&state)?.update_persona(
+        &id,
+        &request.name,
+        &instructions,
+        temperature,
+        max_tokens,
+        response_style.as_deref(),
+        tone.as_deref(),
+    )
 }
 
 #[tauri::command]

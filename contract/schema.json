@@ -15,7 +15,9 @@
       "archived",
       "projectId",
       "pinnedAt",
-      "personaId"
+      "personaId",
+      "responseStyle",
+      "tone"
     ],
     "ConversationPage": ["items", "nextCursor", "searchSnippets"],
     "Project": [
@@ -26,6 +28,8 @@
       "defaultModelId",
       "defaultTemperature",
       "defaultMaxTokens",
+      "responseStyle",
+      "tone",
       "archivedAt",
       "createdAt",
       "updatedAt"
@@ -37,6 +41,8 @@
       "instructions",
       "defaultTemperature",
       "defaultMaxTokens",
+      "responseStyle",
+      "tone",
       "versionNumber",
       "archivedAt",
       "createdAt",
@@ -48,6 +54,8 @@
       "instructions",
       "defaultTemperature",
       "defaultMaxTokens",
+      "responseStyle",
+      "tone",
       "createdAt"
     ],
     "PersonaDeletionPreview": ["persona", "conversationCount"],

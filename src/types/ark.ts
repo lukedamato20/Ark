@@ -1,5 +1,14 @@
 export type MessageStatus = "pending" | "streaming" | "complete" | "failed" | "cancelled" | "interrupted";
 
+/** UX: an Ark-level behavioral preset, distinct from a real provider parameter like temperature —
+ * composed into a fixed instruction sentence appended to the resolved system prompt (see
+ * `generation.rs`'s `response_style_instruction`). Not every low-level parameter a provider might
+ * support — a deliberately small, human-readable set. */
+export type ResponseStyle = "balanced" | "concise" | "detailed" | "explanatory" | "technical" | "creative";
+
+/** UX: mirrors `ResponseStyle` for tone — see `generation.rs`'s `tone_instruction`. */
+export type Tone = "neutral" | "professional" | "friendly" | "direct" | "casual";
+
 export interface Conversation {
   id: string;
   title: string;
@@ -22,6 +31,9 @@ export interface Conversation {
    * conversations by subject, a persona defines how the assistant behaves. Set via
    * `setConversationPersona`. */
   personaId?: string | null;
+  /** UX: `null` means "no conversation-level override, inherit persona/project." */
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
 }
 
 /** FTR-003: groups conversations under a shared name, instructions, and default
@@ -36,6 +48,10 @@ export interface Project {
   defaultModelId?: string | null;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  /** UX: a default for every conversation assigned to this project — resolves at the same tier
+   * as `instructions`. */
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
   /** `null` means active. An ISO timestamp, matching `Conversation.pinnedAt`'s convention. */
   archivedAt?: string | null;
   createdAt: string;
@@ -59,6 +75,10 @@ export interface Persona {
   instructions: string;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  /** UX: versioned alongside `instructions`/the defaults above — changing it creates a new
+   * immutable version, same as changing `instructions`. */
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
   /** Which version this is — increments only when `instructions`/the defaults actually change,
    * not on a plain rename. */
   versionNumber: number;
@@ -74,6 +94,8 @@ export interface PersonaVersionSummary {
   instructions: string;
   defaultTemperature?: number | null;
   defaultMaxTokens?: number | null;
+  responseStyle?: ResponseStyle | null;
+  tone?: Tone | null;
   createdAt: string;
 }
 

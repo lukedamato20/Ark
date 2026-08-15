@@ -340,6 +340,8 @@ mod tests {
                 project_id: None,
                 pinned_at: None,
                 persona_id: None,
+                response_style: None,
+                tone: None,
             },
             messages,
             provider: None,

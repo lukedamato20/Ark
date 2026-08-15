@@ -16,6 +16,11 @@ pub struct Persona {
     pub instructions: String,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    /// UX: an Ark-level behavioral preset, versioned alongside `instructions`/the defaults above
+    /// (not the mutable `personas` row) — see `Conversation::response_style`'s doc comment.
+    /// Changing it creates a new immutable version, same as changing `instructions`.
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
     /// Which `persona_versions` version this is — visible so "documented and visible" (FTR-003
     /// criterion 1) extends to versioning too: a user can tell a persona has been revised.
     pub version_number: i64,
@@ -36,6 +41,8 @@ pub struct PersonaVersionSummary {
     pub instructions: String,
     pub default_temperature: Option<f64>,
     pub default_max_tokens: Option<i64>,
+    pub response_style: Option<String>,
+    pub tone: Option<String>,
     pub created_at: String,
 }
 

@@ -558,6 +558,8 @@ export function createLongConversationFixtureClient(): ArkClient {
       systemPrompt: input.systemPrompt ?? null,
       temperature: input.temperature ?? null,
       maxTokens: input.maxTokens ?? null,
+      responseStyle: input.responseStyle ?? null,
+      tone: input.tone ?? null,
       updatedAt: new Date().toISOString(),
     }),
     // OPS-001: a static but realistic-looking bundle — every other fixture's diagnostics-bundle
@@ -1041,6 +1043,8 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       project.defaultModelId = input.defaultModelId ?? null;
       project.defaultTemperature = input.defaultTemperature ?? null;
       project.defaultMaxTokens = input.defaultMaxTokens ?? null;
+      project.responseStyle = input.responseStyle ?? null;
+      project.tone = input.tone ?? null;
       project.updatedAt = new Date().toISOString();
       return { ...project };
     },
@@ -1082,6 +1086,8 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
         instructions: input.instructions,
         defaultTemperature: input.defaultTemperature ?? null,
         defaultMaxTokens: input.defaultMaxTokens ?? null,
+        responseStyle: input.responseStyle ?? null,
+        tone: input.tone ?? null,
         versionNumber: 1,
         archivedAt: null,
         createdAt: new Date().toISOString(),
@@ -1095,6 +1101,8 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
           instructions: created.instructions,
           defaultTemperature: created.defaultTemperature,
           defaultMaxTokens: created.defaultMaxTokens,
+          responseStyle: created.responseStyle,
+          tone: created.tone,
           createdAt: created.createdAt,
         },
       ];
@@ -1106,13 +1114,17 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       const promptUnchanged =
         persona.instructions === input.instructions &&
         (persona.defaultTemperature ?? null) === (input.defaultTemperature ?? null) &&
-        (persona.defaultMaxTokens ?? null) === (input.defaultMaxTokens ?? null);
+        (persona.defaultMaxTokens ?? null) === (input.defaultMaxTokens ?? null) &&
+        (persona.responseStyle ?? null) === (input.responseStyle ?? null) &&
+        (persona.tone ?? null) === (input.tone ?? null);
       persona.name = input.name;
       persona.updatedAt = new Date().toISOString();
       if (!promptUnchanged) {
         persona.instructions = input.instructions;
         persona.defaultTemperature = input.defaultTemperature ?? null;
         persona.defaultMaxTokens = input.defaultMaxTokens ?? null;
+        persona.responseStyle = input.responseStyle ?? null;
+        persona.tone = input.tone ?? null;
         persona.versionNumber += 1;
         const versions = personaVersions[persona.id] ?? [];
         versions.unshift({
@@ -1121,6 +1133,8 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
           instructions: persona.instructions,
           defaultTemperature: persona.defaultTemperature,
           defaultMaxTokens: persona.defaultMaxTokens,
+          responseStyle: persona.responseStyle,
+          tone: persona.tone,
           createdAt: persona.updatedAt,
         });
         personaVersions[persona.id] = versions;

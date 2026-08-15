@@ -20,6 +20,7 @@ import { cn } from "../../lib/cn";
 import { CONNECTION_METADATA } from "../../lib/destinationClass";
 import { downloadText, safeFilename } from "../../lib/download";
 import { getErrorMessage } from "../../lib/arkErrors";
+import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
@@ -32,11 +33,14 @@ import type {
   Project,
   ProviderConfig,
   ProviderHealth,
+  ResponseStyle,
   SendChatResult,
   SideEffectPreview,
+  Tone,
 } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { Select } from "../../ui/select";
 import { Textarea } from "../../ui/textarea";
 import { SetupBanner } from "../onboarding/SetupBanner";
 import { ChatMessageList } from "./ChatMessageList";
@@ -1231,6 +1235,8 @@ function ConversationSettingsButton({
   const [systemPromptDraft, setSystemPromptDraft] = React.useState("");
   const [temperatureDraft, setTemperatureDraft] = React.useState("");
   const [maxTokensDraft, setMaxTokensDraft] = React.useState("");
+  const [responseStyleDraft, setResponseStyleDraft] = React.useState("");
+  const [toneDraft, setToneDraft] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [projectChanging, setProjectChanging] = React.useState(false);
   const [personaChanging, setPersonaChanging] = React.useState(false);
@@ -1241,6 +1247,8 @@ function ConversationSettingsButton({
     setSystemPromptDraft(conversation?.systemPrompt ?? "");
     setTemperatureDraft(conversation?.temperature != null ? String(conversation.temperature) : "");
     setMaxTokensDraft(conversation?.maxTokens != null ? String(conversation.maxTokens) : "");
+    setResponseStyleDraft(conversation?.responseStyle ?? "");
+    setToneDraft(conversation?.tone ?? "");
   }, [open, conversation]);
 
   React.useEffect(() => {
@@ -1291,6 +1299,8 @@ function ConversationSettingsButton({
         systemPrompt: systemPromptDraft.trim() || null,
         temperature: temperatureNumber,
         maxTokens: maxTokensNumber,
+        responseStyle: (responseStyleDraft || null) as ResponseStyle | null,
+        tone: (toneDraft || null) as Tone | null,
       });
       onSettingsSaved(updated);
       setOpen(false);
@@ -1302,11 +1312,20 @@ function ConversationSettingsButton({
   }
 
   const hasOverride = Boolean(
-    conversation?.systemPrompt || conversation?.temperature != null || conversation?.maxTokens != null,
+    conversation?.systemPrompt ||
+    conversation?.temperature != null ||
+    conversation?.maxTokens != null ||
+    conversation?.responseStyle ||
+    conversation?.tone,
   );
 
   return (
-    <div className="relative" ref={containerRef}>
+    <div className="relative flex items-center gap-1.5" ref={containerRef}>
+      {hasOverride && (
+        <span className="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+          Modified
+        </span>
+      )}
       <button
         type="button"
         aria-haspopup="dialog"
@@ -1317,9 +1336,6 @@ function ConversationSettingsButton({
         className="relative flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
       >
         <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
-        {hasOverride && (
-          <span aria-hidden="true" className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
-        )}
       </button>
 
       {open && conversation && (
@@ -1389,6 +1405,38 @@ function ConversationSettingsButton({
                 className="text-xs"
               />
             </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="grid gap-1.5 text-xs font-medium">
+                Response style
+                <Select
+                  value={responseStyleDraft}
+                  onChange={(event) => setResponseStyleDraft(event.target.value)}
+                  className="h-8 text-xs"
+                >
+                  <option value="">Inherit</option>
+                  {RESPONSE_STYLE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium">
+                Tone
+                <Select
+                  value={toneDraft}
+                  onChange={(event) => setToneDraft(event.target.value)}
+                  className="h-8 text-xs"
+                >
+                  <option value="">Inherit</option>
+                  {TONE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+            </div>
             <label className="grid gap-1.5 text-xs font-medium">
               Temperature
               <Input

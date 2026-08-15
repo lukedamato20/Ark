@@ -73,6 +73,13 @@ pub struct Conversation {
     /// on the same conversation. Set via `Database::set_conversation_persona`, which validates
     /// the referenced persona exists first — see `personas.rs`'s module doc.
     pub persona_id: Option<String>,
+    /// UX: `None` means "no conversation-level override, inherit persona/project." Ark-level
+    /// behavioral preset (see `generation.rs`'s `response_style_instruction`) — not a real
+    /// provider parameter, unlike `temperature`. Validated against a fixed allow-list by
+    /// `validation::validate_response_style`.
+    pub response_style: Option<String>,
+    /// UX: mirrors `response_style` — see `validation::validate_tone`.
+    pub tone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

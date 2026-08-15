@@ -119,6 +119,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "0012_tool_capabilities",
         sql: include_str!("../../migrations/0012_tool_capabilities.sql"),
     },
+    MigrationDef {
+        version: 13,
+        name: "0013_generation_style_presets",
+        sql: include_str!("../../migrations/0013_generation_style_presets.sql"),
+    },
 ];
 
 /// FTR-001: the highest schema version this build knows how to open/migrate — used by the
@@ -1003,7 +1008,8 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
-                    system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id
+                    system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id,
+                    response_style, tone
                  FROM conversations
                  WHERE id = ?1",
                 params![id],
@@ -1024,7 +1030,8 @@ impl Database {
     ) -> Result<Vec<Conversation>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
-                system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id
+                system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id,
+                response_style, tone
              FROM conversations
              WHERE ?1 IS NULL OR project_id = ?1
              ORDER BY created_at ASC, id ASC",
@@ -1117,18 +1124,21 @@ impl Database {
     /// current default," not "unset the value to zero/empty." Callers pass already-validated
     /// values (`validation::validate_system_prompt`/`validate_temperature`/`validate_max_tokens`
     /// have already normalized blank input to `None`), so this is a plain, unconditional write.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_conversation_settings(
         &self,
         id: &str,
         system_prompt: Option<&str>,
         temperature: Option<f64>,
         max_tokens: Option<i64>,
+        response_style: Option<&str>,
+        tone: Option<&str>,
     ) -> Result<Conversation, AppError> {
         self.connection.execute(
             "UPDATE conversations
-             SET system_prompt = ?1, temperature = ?2, max_tokens = ?3, updated_at = ?4
-             WHERE id = ?5",
-            params![system_prompt, temperature, max_tokens, now(), id],
+             SET system_prompt = ?1, temperature = ?2, max_tokens = ?3, response_style = ?4, tone = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![system_prompt, temperature, max_tokens, response_style, tone, now(), id],
         )?;
 
         self.get_conversation(id)
@@ -1232,7 +1242,7 @@ impl Database {
     pub fn list_projects(&self) -> Result<Vec<Project>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, instructions, default_provider_id, default_model_id,
-                default_temperature, default_max_tokens, archived_at, created_at, updated_at
+                default_temperature, default_max_tokens, response_style, tone, archived_at, created_at, updated_at
              FROM projects
              ORDER BY archived_at IS NOT NULL, name ASC",
         )?;
@@ -1244,7 +1254,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, name, instructions, default_provider_id, default_model_id,
-                    default_temperature, default_max_tokens, archived_at, created_at, updated_at
+                    default_temperature, default_max_tokens, response_style, tone, archived_at, created_at, updated_at
                  FROM projects
                  WHERE id = ?1",
                 params![id],
@@ -1269,8 +1279,8 @@ impl Database {
         self.connection.execute(
             "UPDATE projects
              SET name = ?1, instructions = ?2, default_provider_id = ?3, default_model_id = ?4,
-                 default_temperature = ?5, default_max_tokens = ?6, updated_at = ?7
-             WHERE id = ?8",
+                 default_temperature = ?5, default_max_tokens = ?6, response_style = ?7, tone = ?8, updated_at = ?9
+             WHERE id = ?10",
             params![
                 trimmed_name,
                 changes.instructions,
@@ -1278,6 +1288,8 @@ impl Database {
                 changes.default_model_id,
                 changes.default_temperature,
                 changes.default_max_tokens,
+                changes.response_style,
+                changes.tone,
                 now(),
                 id,
             ],
@@ -1336,12 +1348,15 @@ impl Database {
     /// FTR-003: creates a persona and its first version (version 1) in one transaction — the
     /// persona row's `current_version_id` is set to the version being inserted alongside it, so
     /// no reader can ever observe a persona without a version to resolve.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_persona(
         &self,
         name: &str,
         instructions: &str,
         default_temperature: Option<f64>,
         default_max_tokens: Option<i64>,
+        response_style: Option<&str>,
+        tone: Option<&str>,
     ) -> Result<Persona, AppError> {
         let trimmed_name = name.trim();
         if trimmed_name.is_empty() {
@@ -1359,14 +1374,16 @@ impl Database {
             self.connection.execute(
                 "INSERT INTO persona_versions (
                     id, persona_id, version_number, instructions, default_temperature,
-                    default_max_tokens, created_at
-                 ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6)",
+                    default_max_tokens, response_style, tone, created_at
+                 ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     version_id,
                     persona_id,
                     instructions,
                     default_temperature,
                     default_max_tokens,
+                    response_style,
+                    tone,
                     timestamp
                 ],
             )?;
@@ -1378,7 +1395,7 @@ impl Database {
     pub fn list_personas(&self) -> Result<Vec<Persona>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.name, pv.instructions, pv.default_temperature, pv.default_max_tokens,
-                    pv.version_number, p.archived_at, p.created_at, p.updated_at
+                    pv.response_style, pv.tone, pv.version_number, p.archived_at, p.created_at, p.updated_at
              FROM personas p
              JOIN persona_versions pv ON pv.id = p.current_version_id
              ORDER BY p.archived_at IS NOT NULL, p.name ASC",
@@ -1391,7 +1408,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT p.id, p.name, pv.instructions, pv.default_temperature, pv.default_max_tokens,
-                        pv.version_number, p.archived_at, p.created_at, p.updated_at
+                        pv.response_style, pv.tone, pv.version_number, p.archived_at, p.created_at, p.updated_at
                  FROM personas p
                  JOIN persona_versions pv ON pv.id = p.current_version_id
                  WHERE p.id = ?1",
@@ -1410,6 +1427,7 @@ impl Database {
     /// `current_version_id` moves to it — the *previous* version row is never mutated, so any
     /// generation's provenance that already recorded that version number keeps pointing at
     /// exactly the content that was live when it ran, even after this call returns.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_persona(
         &self,
         id: &str,
@@ -1417,6 +1435,8 @@ impl Database {
         instructions: &str,
         default_temperature: Option<f64>,
         default_max_tokens: Option<i64>,
+        response_style: Option<&str>,
+        tone: Option<&str>,
     ) -> Result<Persona, AppError> {
         let trimmed_name = name.trim();
         if trimmed_name.is_empty() {
@@ -1427,7 +1447,9 @@ impl Database {
 
         let prompt_unchanged = current.instructions == instructions
             && current.default_temperature == default_temperature
-            && current.default_max_tokens == default_max_tokens;
+            && current.default_max_tokens == default_max_tokens
+            && current.response_style.as_deref() == response_style
+            && current.tone.as_deref() == tone;
 
         if prompt_unchanged {
             self.connection.execute(
@@ -1441,8 +1463,8 @@ impl Database {
                 self.connection.execute(
                     "INSERT INTO persona_versions (
                         id, persona_id, version_number, instructions, default_temperature,
-                        default_max_tokens, created_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        default_max_tokens, response_style, tone, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         version_id,
                         id,
@@ -1450,6 +1472,8 @@ impl Database {
                         instructions,
                         default_temperature,
                         default_max_tokens,
+                        response_style,
+                        tone,
                         timestamp
                     ],
                 )?;
@@ -1468,7 +1492,8 @@ impl Database {
     /// that versioning is real, not just an internal implementation detail.
     pub fn list_persona_versions(&self, id: &str) -> Result<Vec<PersonaVersionSummary>, AppError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, version_number, instructions, default_temperature, default_max_tokens, created_at
+            "SELECT id, version_number, instructions, default_temperature, default_max_tokens,
+                    response_style, tone, created_at
              FROM persona_versions
              WHERE persona_id = ?1
              ORDER BY version_number DESC",
@@ -2670,17 +2695,19 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         project_id: row.get(11)?,
         pinned_at: row.get(12)?,
         persona_id: row.get(13)?,
+        response_style: row.get(14)?,
+        tone: row.get(15)?,
     })
 }
 
 /// FTR-002: used only by `list_conversations_page`, whose query always selects a trailing
 /// `match_snippet` column (real when searching, `NULL` otherwise — see
 /// `build_conversation_page_query`) in addition to every column `map_conversation` reads, so
-/// reusing it here for the shared columns is safe: it never touches index 14.
+/// reusing it here for the shared columns is safe: it never touches index 16.
 fn map_conversation_with_snippet(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<(Conversation, Option<String>)> {
-    Ok((map_conversation(row)?, row.get(14)?))
+    Ok((map_conversation(row)?, row.get(16)?))
 }
 
 fn build_conversation_page_query(
@@ -2717,7 +2744,7 @@ fn build_conversation_page_query(
     let mut select_columns = String::from(
         "c.id, c.title, c.created_at, c.updated_at, c.provider_id, c.model_id,
          c.current_message_id, c.system_prompt, c.temperature, c.max_tokens,
-         c.archived, c.project_id, c.pinned_at, c.persona_id",
+         c.archived, c.project_id, c.pinned_at, c.persona_id, c.response_style, c.tone",
     );
     let mut values = Vec::<Value>::new();
 
@@ -2883,9 +2910,11 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         default_model_id: row.get(4)?,
         default_temperature: row.get(5)?,
         default_max_tokens: row.get(6)?,
-        archived_at: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        response_style: row.get(7)?,
+        tone: row.get(8)?,
+        archived_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -2896,10 +2925,12 @@ fn map_persona(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persona> {
         instructions: row.get(2)?,
         default_temperature: row.get(3)?,
         default_max_tokens: row.get(4)?,
-        version_number: row.get(5)?,
-        archived_at: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        response_style: row.get(5)?,
+        tone: row.get(6)?,
+        version_number: row.get(7)?,
+        archived_at: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -2910,7 +2941,9 @@ fn map_persona_version_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pers
         instructions: row.get(2)?,
         default_temperature: row.get(3)?,
         default_max_tokens: row.get(4)?,
-        created_at: row.get(5)?,
+        response_style: row.get(5)?,
+        tone: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -4187,7 +4220,7 @@ mod tests {
         );
 
         let persona = db
-            .create_persona("Post-upgrade persona", "Be terse.", None, None)
+            .create_persona("Post-upgrade persona", "Be terse.", None, None, None, None)
             .expect("personas table is usable immediately after migration 10");
         let assigned = db
             .set_conversation_persona(&conversation_id, Some(&persona.id))
@@ -4369,7 +4402,14 @@ mod tests {
             .expect("conversation created");
 
         let updated = db
-            .update_conversation_settings(&created.id, Some("Be terse."), Some(0.3), Some(512))
+            .update_conversation_settings(
+                &created.id,
+                Some("Be terse."),
+                Some(0.3),
+                Some(512),
+                None,
+                None,
+            )
             .expect("settings updated");
         assert_eq!(updated.system_prompt.as_deref(), Some("Be terse."));
         assert_eq!(updated.temperature, Some(0.3));
@@ -4384,7 +4424,7 @@ mod tests {
         assert_eq!(refetched.max_tokens, Some(512));
 
         let cleared = db
-            .update_conversation_settings(&created.id, None, None, None)
+            .update_conversation_settings(&created.id, None, None, None, None, None)
             .expect("settings cleared");
         assert_eq!(cleared.system_prompt, None);
         assert_eq!(cleared.temperature, None);
@@ -4487,6 +4527,8 @@ mod tests {
                     default_model_id: Some("some-model"),
                     default_temperature: Some(0.2),
                     default_max_tokens: Some(4096),
+                    response_style: Some("concise"),
+                    tone: Some("friendly"),
                 },
             )
             .expect("project updated");
@@ -4498,6 +4540,8 @@ mod tests {
         );
         assert_eq!(updated.default_temperature, Some(0.2));
         assert_eq!(updated.default_max_tokens, Some(4096));
+        assert_eq!(updated.response_style.as_deref(), Some("concise"));
+        assert_eq!(updated.tone.as_deref(), Some("friendly"));
 
         let cleared = db
             .update_project(
@@ -4509,6 +4553,8 @@ mod tests {
                     default_model_id: None,
                     default_temperature: None,
                     default_max_tokens: None,
+                    response_style: None,
+                    tone: None,
                 },
             )
             .expect("project defaults cleared");
@@ -4516,6 +4562,8 @@ mod tests {
         assert_eq!(cleared.default_provider_id, None);
         assert_eq!(cleared.default_temperature, None);
         assert_eq!(cleared.default_max_tokens, None);
+        assert_eq!(cleared.response_style, None);
+        assert_eq!(cleared.tone, None);
 
         drop(db);
         let _ = fs::remove_file(path);
@@ -4616,12 +4664,19 @@ mod tests {
         let (db, path) = test_db();
 
         let error = db
-            .create_persona("   ", "Be terse.", None, None)
+            .create_persona("   ", "Be terse.", None, None, None, None)
             .expect_err("blank persona name is rejected");
         assert_eq!(error.code, "invalid_input");
 
         let persona = db
-            .create_persona("Terse reviewer", "Be terse.", Some(0.2), Some(512))
+            .create_persona(
+                "Terse reviewer",
+                "Be terse.",
+                Some(0.2),
+                Some(512),
+                None,
+                None,
+            )
             .expect("persona created");
         assert_eq!(persona.name, "Terse reviewer");
         assert_eq!(persona.instructions, "Be terse.");
@@ -4638,14 +4693,22 @@ mod tests {
     fn update_persona_creates_a_new_version_only_when_prompt_content_actually_changes() {
         let (db, path) = test_db();
         let created = db
-            .create_persona("Reviewer", "Be terse.", Some(0.2), None)
+            .create_persona("Reviewer", "Be terse.", Some(0.2), None, None, None)
             .expect("persona created");
         assert_eq!(created.version_number, 1);
 
         // FTR-003 criterion 2: a plain rename (identical instructions/defaults) must not create
         // a new version — only the mutable `name` metadata changes.
         let renamed = db
-            .update_persona(&created.id, "Terse reviewer", "Be terse.", Some(0.2), None)
+            .update_persona(
+                &created.id,
+                "Terse reviewer",
+                "Be terse.",
+                Some(0.2),
+                None,
+                None,
+                None,
+            )
             .expect("renamed");
         assert_eq!(renamed.name, "Terse reviewer");
         assert_eq!(
@@ -4660,6 +4723,8 @@ mod tests {
                 "Terse reviewer",
                 "Be terse and cite line numbers.",
                 Some(0.2),
+                None,
+                None,
                 None,
             )
             .expect("revised");
@@ -4687,10 +4752,10 @@ mod tests {
     fn set_persona_archived_excludes_it_from_the_default_listing_order() {
         let (db, path) = test_db();
         let active = db
-            .create_persona("Active persona", "Be helpful.", None, None)
+            .create_persona("Active persona", "Be helpful.", None, None, None, None)
             .expect("created");
         let archived = db
-            .create_persona("Archived persona", "Be helpful.", None, None)
+            .create_persona("Archived persona", "Be helpful.", None, None, None, None)
             .expect("created");
 
         let archived = db
@@ -4730,7 +4795,7 @@ mod tests {
         );
 
         let persona = db
-            .create_persona("Real persona", "Be helpful.", None, None)
+            .create_persona("Real persona", "Be helpful.", None, None, None, None)
             .expect("persona created");
         let assigned = db
             .set_conversation_persona(&conversation.id, Some(&persona.id))
@@ -4754,7 +4819,7 @@ mod tests {
             .expect("conversation created");
         let project = db.create_project("Research").expect("project created");
         let persona = db
-            .create_persona("Reviewer", "Be terse.", None, None)
+            .create_persona("Reviewer", "Be terse.", None, None, None, None)
             .expect("persona created");
 
         db.set_conversation_project(&conversation.id, Some(&project.id))
@@ -4773,7 +4838,7 @@ mod tests {
     fn delete_persona_unassigns_conversations_rather_than_deleting_them() {
         let (db, path) = test_db();
         let persona = db
-            .create_persona("Doomed persona", "Be terse.", None, None)
+            .create_persona("Doomed persona", "Be terse.", None, None, None, None)
             .expect("created");
         let conversation = db
             .create_conversation(Some("Survives persona deletion".to_string()))
@@ -6813,5 +6878,136 @@ mod tests {
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
         let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
+    fn seed_migration_0012_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..12] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1),
+                        (9, '0009_message_branch_names', ?1),
+                        (10, '0010_personas', ?1),
+                        (11, '0011_attachments', ?1),
+                        (12, '0012_tool_capabilities', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 12 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-12 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-12 conversation, from before style presets existed");
+        conversation_id
+    }
+
+    /// UX acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 13, the current latest — a pre-existing conversation row from a migration-12
+    /// workspace must survive migration 13's new `response_style`/`tone` columns on
+    /// `conversations`/`projects`/`persona_versions`, and each must actually be usable
+    /// afterward, including the CHECK constraint rejecting an out-of-allow-list value.
+    #[test]
+    fn upgrading_a_migration_0012_workspace_adds_response_style_and_tone_columns() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0012_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-12 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-12 conversation");
+        assert_eq!(conversation.response_style, None);
+        assert_eq!(conversation.tone, None);
+
+        let updated = db
+            .update_conversation_settings(
+                &conversation_id,
+                None,
+                None,
+                None,
+                Some("concise"),
+                Some("friendly"),
+            )
+            .expect("response_style/tone columns are usable immediately after migration 13");
+        assert_eq!(updated.response_style.as_deref(), Some("concise"));
+        assert_eq!(updated.tone.as_deref(), Some("friendly"));
+
+        let project = db
+            .create_project("Post-upgrade project")
+            .expect("project created");
+        let project = db
+            .update_project(
+                &project.id,
+                crate::projects::UpdateProjectChanges {
+                    name: "Post-upgrade project",
+                    instructions: None,
+                    default_provider_id: None,
+                    default_model_id: None,
+                    default_temperature: None,
+                    default_max_tokens: None,
+                    response_style: Some("technical"),
+                    tone: Some("direct"),
+                },
+            )
+            .expect("project response_style/tone usable immediately after migration 13");
+        assert_eq!(project.response_style.as_deref(), Some("technical"));
+
+        let persona = db
+            .create_persona(
+                "Post-upgrade persona",
+                "Be helpful.",
+                None,
+                None,
+                Some("detailed"),
+                Some("professional"),
+            )
+            .expect("persona_versions response_style/tone usable immediately after migration 13");
+        assert_eq!(persona.response_style.as_deref(), Some("detailed"));
+        assert_eq!(persona.tone.as_deref(), Some("professional"));
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
+    #[test]
+    fn conversation_response_style_check_constraint_rejects_an_unlisted_value() {
+        let (db, path) = test_db();
+        let conversation = db.create_conversation(None).expect("conversation created");
+        // Calls the DB layer directly with a value Rust-level `validate_response_style` would
+        // already reject — proving the storage-layer CHECK constraint (defense in depth) is
+        // itself real and not just documentation, independent of the Rust allow-list.
+        let error = db
+            .update_conversation_settings(
+                &conversation.id,
+                None,
+                None,
+                None,
+                Some("aggressive"),
+                None,
+            )
+            .expect_err("a value outside the CHECK constraint's allow-list must be rejected");
+        assert_eq!(error.code, "database_error");
+
+        drop(db);
+        let _ = fs::remove_file(path);
     }
 }

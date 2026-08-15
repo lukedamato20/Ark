@@ -109,6 +109,8 @@ fn sample_conversation() -> Conversation {
         project_id: None,
         pinned_at: None,
         persona_id: None,
+        response_style: Some("concise".to_string()),
+        tone: Some("friendly".to_string()),
     }
 }
 
@@ -181,6 +183,8 @@ fn sample_project() -> Project {
         default_model_id: Some("model-1".to_string()),
         default_temperature: Some(0.2),
         default_max_tokens: Some(4096),
+        response_style: Some("technical".to_string()),
+        tone: Some("direct".to_string()),
         archived_at: None,
         created_at: "2026-08-13T00:00:00Z".to_string(),
         updated_at: "2026-08-13T00:00:00Z".to_string(),
@@ -245,6 +249,8 @@ fn sample_persona() -> Persona {
         instructions: "Be terse and cite line numbers.".to_string(),
         default_temperature: Some(0.2),
         default_max_tokens: Some(512),
+        response_style: Some("explanatory".to_string()),
+        tone: Some("professional".to_string()),
         version_number: 2,
         archived_at: None,
         created_at: "2026-08-13T00:00:00Z".to_string(),
@@ -267,6 +273,8 @@ fn persona_version_summary_matches_contract() {
             instructions: "Be terse and cite line numbers.".to_string(),
             default_temperature: Some(0.2),
             default_max_tokens: Some(512),
+            response_style: Some("explanatory".to_string()),
+            tone: Some("professional".to_string()),
             created_at: "2026-08-13T00:00:00Z".to_string(),
         },
     );
