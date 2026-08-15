@@ -29,6 +29,12 @@ pub struct DeviceSettings {
     /// before this field existed still parses instead of falling back to the legacy-seed path.
     #[serde(default)]
     pub crash_capture_enabled: bool,
+    /// CMP-006: opt-in, off by default. When true, a generation that completes, fails, or is
+    /// interrupted while the main window is unfocused shows a generic native OS notification —
+    /// never the conversation title or any response content. `#[serde(default)]` for the same
+    /// back-compat reason as `crash_capture_enabled`.
+    #[serde(default)]
+    pub completion_notifications_enabled: bool,
 }
 
 impl Default for DeviceSettings {
@@ -37,6 +43,7 @@ impl Default for DeviceSettings {
             theme: "dark".to_string(),
             built_in_model_path: None,
             crash_capture_enabled: false,
+            completion_notifications_enabled: false,
         }
     }
 }
@@ -152,6 +159,7 @@ mod tests {
             theme: "light".to_string(),
             built_in_model_path: Some("C:\\models\\model.gguf".to_string()),
             crash_capture_enabled: true,
+            completion_notifications_enabled: true,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         let parsed: DeviceSettings = serde_json::from_str(&json).expect("deserializes");
@@ -161,6 +169,7 @@ mod tests {
             Some("C:\\models\\model.gguf")
         );
         assert!(parsed.crash_capture_enabled);
+        assert!(parsed.completion_notifications_enabled);
     }
 
     #[test]
@@ -169,10 +178,15 @@ mod tests {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
             crash_capture_enabled: false,
+            completion_notifications_enabled: false,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         assert!(
             json.contains("\"builtInModelPath\""),
+            "expected camelCase field name in: {json}"
+        );
+        assert!(
+            json.contains("\"completionNotificationsEnabled\""),
             "expected camelCase field name in: {json}"
         );
     }

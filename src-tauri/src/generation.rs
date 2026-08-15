@@ -327,6 +327,74 @@ fn record_generation_provenance(
     let _ = db.set_message_metadata_json(assistant_message_id, &json);
 }
 
+/// CMP-006: which terminal outcome a completion notification is for. Deliberately has no
+/// `Cancelled` variant — a user-initiated cancellation is not surprising to the person who just
+/// clicked Stop, so it never notifies (see the call sites: `mark_stream_cancelled` has no
+/// `notify_completion` call at all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationKind {
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+/// The actual decision logic behind `notify_completion`, factored out so it can be unit-tested
+/// without a running Tauri app — mirrors `device_settings::resolve_device_settings`'s own
+/// "factored out so it can be unit-tested without a running Tauri app" precedent (`AppHandle`
+/// can't be constructed in tests). Content is deliberately maximally generic: no conversation
+/// title (titles are auto-generated from the first user message and could themselves be
+/// sensitive on a lock screen) and no response content — satisfying this task's own "notification
+/// content defaults to generic and never includes prompts/output" acceptance criterion by
+/// construction, not by a separate opt-in-content path this pass doesn't build.
+fn should_notify(
+    settings: &crate::device_settings::DeviceSettings,
+    window_focused: bool,
+    kind: NotificationKind,
+) -> Option<(&'static str, &'static str)> {
+    if !settings.completion_notifications_enabled || window_focused {
+        return None;
+    }
+    let body = match kind {
+        NotificationKind::Complete => "A response is ready.",
+        NotificationKind::Failed => "A response couldn't be completed.",
+        NotificationKind::Interrupted => "A response was interrupted.",
+    };
+    Some(("Ark", body))
+}
+
+/// CMP-006: shows a native OS notification for a terminal generation outcome, if the user has
+/// opted in and the main window isn't currently focused. Called only from inside the same
+/// "did the DB transition actually happen" branch each terminal function already gates its
+/// `chat:stream-*` event emission on — a superseded/late/duplicate terminal transition (see
+/// `db::finish_message_if_active`'s conditional `UPDATE`) therefore can't double-notify either,
+/// for free, without any separate deduplication logic here.
+///
+/// Do-not-disturb is respected by construction: `tauri-plugin-notification` is a thin wrapper
+/// over each OS's native notification API (Windows Focus Assist / macOS Focus / Linux DND), so
+/// there is nothing for Ark to detect or reimplement — the OS itself suppresses or silences the
+/// call per the user's system-level settings.
+///
+/// Best-effort: a notification failure (permission not granted, plugin unavailable, OS API
+/// error) is silently ignored, matching `record_generation_provenance`'s established discipline
+/// of never letting a non-essential side effect fail the generation itself.
+fn notify_completion(app: &AppHandle, kind: NotificationKind) {
+    let settings = crate::device_settings::load_device_settings(app, None);
+    // Unknown focus state (no main window found, or the platform call itself errored) defaults
+    // to "assume focused" — i.e. don't notify. This task's own "Potential risks" names
+    // notification fatigue explicitly; under-notifying on a rare, unresolvable edge case is the
+    // safer failure direction than surprising the user with a notification while they're already
+    // looking at the app.
+    let window_focused = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(true);
+    let Some((title, body)) = should_notify(&settings, window_focused, kind) else {
+        return;
+    };
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditUserMessageRequest {
@@ -1237,6 +1305,7 @@ pub(crate) fn spawn_provider_stream(
                             },
                         )
                         .ok();
+                    notify_completion(&app_for_task, NotificationKind::Complete);
                 }
             }
             Ok(_) => {
@@ -1358,6 +1427,7 @@ fn mark_stream_interrupted(
     if !became_interrupted {
         return;
     }
+    notify_completion(app, NotificationKind::Interrupted);
 
     let final_content = db
         .as_ref()
@@ -1413,6 +1483,7 @@ fn mark_stream_failed(
         .unwrap_or(false);
 
     if emit_error && became_failed {
+        notify_completion(app, NotificationKind::Failed);
         let final_content = db
             .as_ref()
             .and_then(|db| db.get_message(message_id).ok())
@@ -1439,12 +1510,59 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_PROVIDER_ID;
     use crate::db::Database;
+    use crate::device_settings::DeviceSettings;
     use crate::providers::ProviderCapabilities;
     use crate::sidecar::SidecarState;
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Barrier, Mutex};
     use uuid::Uuid;
+
+    fn notifications_enabled() -> DeviceSettings {
+        DeviceSettings {
+            completion_notifications_enabled: true,
+            ..DeviceSettings::default()
+        }
+    }
+
+    #[test]
+    fn should_notify_is_none_when_the_setting_is_disabled() {
+        let settings = DeviceSettings::default();
+        assert_eq!(
+            should_notify(&settings, false, NotificationKind::Complete),
+            None
+        );
+    }
+
+    #[test]
+    fn should_notify_is_none_when_the_window_is_focused() {
+        assert_eq!(
+            should_notify(&notifications_enabled(), true, NotificationKind::Complete),
+            None
+        );
+    }
+
+    #[test]
+    fn should_notify_returns_generic_text_per_kind_when_enabled_and_unfocused() {
+        let settings = notifications_enabled();
+        let (complete_title, complete_body) =
+            should_notify(&settings, false, NotificationKind::Complete).expect("notifies");
+        assert_eq!(complete_title, "Ark");
+        assert_eq!(complete_body, "A response is ready.");
+        // Privacy: the generic text must never contain a conversation title or response
+        // content — there is none available to this function in the first place (it only
+        // receives `settings`/`window_focused`/`kind`), but assert on the exact fixed strings
+        // anyway so a future edit can't accidentally start interpolating something in.
+        assert!(!complete_body.contains("http"));
+
+        let (_, failed_body) =
+            should_notify(&settings, false, NotificationKind::Failed).expect("notifies");
+        assert_eq!(failed_body, "A response couldn't be completed.");
+
+        let (_, interrupted_body) =
+            should_notify(&settings, false, NotificationKind::Interrupted).expect("notifies");
+        assert_eq!(interrupted_body, "A response was interrupted.");
+    }
 
     fn test_state() -> (AppState, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(

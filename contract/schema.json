@@ -170,7 +170,7 @@
       "deviceSettings",
       "workspaceOpenError"
     ],
-    "DeviceSettings": ["theme", "builtInModelPath", "crashCaptureEnabled"],
+    "DeviceSettings": ["theme", "builtInModelPath", "crashCaptureEnabled", "completionNotificationsEnabled"],
     "WorkspaceInfo": ["rootPath", "databasePath", "defaultRootPath", "configPath", "isPortable", "requiresRestart"],
     "BackupManifest": ["appVersion", "createdAt", "databaseSha256", "databaseSizeBytes"],
     "BackupResult": ["backupPath", "manifest"],

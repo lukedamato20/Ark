@@ -183,6 +183,7 @@ fn install_crash_hook(app_handle: tauri::AppHandle, log_file_path: Option<std::p
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let (workspace, workspace_resolution_error) =

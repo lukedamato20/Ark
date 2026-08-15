@@ -556,6 +556,7 @@ fn app_bootstrap_matches_contract() {
                 theme: "dark".to_string(),
                 built_in_model_path: None,
                 crash_capture_enabled: false,
+                completion_notifications_enabled: false,
             },
             workspace_open_error: None,
         },
@@ -570,6 +571,7 @@ fn device_settings_matches_contract() {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
             crash_capture_enabled: true,
+            completion_notifications_enabled: true,
         },
     );
 }
