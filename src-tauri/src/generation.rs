@@ -6,9 +6,12 @@
 //! (streaming, cancellation, interruption) continues to pass unchanged, which is itself the
 //! acceptance evidence that no regression was introduced.
 
-use crate::chat::{ChatMessage, Message, SendChatRequest, SendChatResult, StreamEvent};
+use crate::chat::{
+    ChatMessage, Conversation, Message, SendChatRequest, SendChatResult, StreamEvent,
+};
 use crate::db::Database;
 use crate::errors::AppError;
+use crate::projects::Project;
 use crate::providers::{ProviderChatRequest, ProviderConfig, ProviderRegistry};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -17,28 +20,33 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// FTR-004: where an effective generation setting actually came from — recorded in the
+/// FTR-004/FTR-003: where an effective generation setting actually came from — recorded in the
 /// assistant message's provenance so "what settings produced this response" is answerable
-/// later without re-deriving it from the conversation/provider rows as they exist *now* (which
-/// may have since changed).
+/// later without re-deriving it from the conversation/project/provider rows as they exist *now*
+/// (which may have since changed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SettingSource {
     /// An explicit per-request override — today only ever sent by a caller that supplies a
-    /// value distinct from both tiers below (the frontend does not currently expose one, but
+    /// value distinct from every tier below (the frontend does not currently expose one, but
     /// the field/tier has existed since COR-003 and remains the highest-precedence override).
     Request,
     Conversation,
+    /// FTR-003: the conversation's assigned project's own default — sits between the
+    /// conversation's own override and the provider's default, so a project can steer every
+    /// conversation inside it without conversations having to repeat the same override.
+    Project,
     ProviderDefault,
 }
 
-/// FTR-004: the three-tier precedence — request override, then this conversation's own
-/// setting, then the provider's current default — resolved once per generation call, not
-/// three times with divergent logic at each of `send_chat_message`/`edit_user_message`/
-/// `regenerate_assistant_message`.
+/// FTR-004/FTR-003: the four-tier precedence — request override, then this conversation's own
+/// setting, then its assigned project's default (if any), then the provider's current default —
+/// resolved once per generation call, not three times with divergent logic at each of
+/// `send_chat_message`/`edit_user_message`/`regenerate_assistant_message`.
 fn resolve_setting<T>(
     request_value: Option<T>,
     conversation_value: Option<T>,
+    project_value: Option<T>,
     provider_value: Option<T>,
 ) -> (Option<T>, Option<SettingSource>) {
     if let Some(value) = request_value {
@@ -47,10 +55,39 @@ fn resolve_setting<T>(
     if let Some(value) = conversation_value {
         return (Some(value), Some(SettingSource::Conversation));
     }
+    if let Some(value) = project_value {
+        return (Some(value), Some(SettingSource::Project));
+    }
     if let Some(value) = provider_value {
         return (Some(value), Some(SettingSource::ProviderDefault));
     }
     (None, None)
+}
+
+/// FTR-003: the system prompt has no per-request override tier (unlike temperature/max_tokens),
+/// so this is a separate two-tier resolution rather than a degenerate call to `resolve_setting`
+/// with an always-`None` request tier — a conversation's own override, then its project's
+/// instructions.
+fn resolve_system_prompt(
+    conversation_value: Option<&str>,
+    project_value: Option<&str>,
+) -> (Option<String>, Option<SettingSource>) {
+    if let Some(value) = conversation_value {
+        return (Some(value.to_string()), Some(SettingSource::Conversation));
+    }
+    if let Some(value) = project_value {
+        return (Some(value.to_string()), Some(SettingSource::Project));
+    }
+    (None, None)
+}
+
+/// FTR-003: fetches the conversation's assigned project, if any. A conversation whose
+/// `project_id` no longer resolves (only reachable if something bypassed
+/// `Database::set_conversation_project`'s own existence check) is treated as unassigned rather
+/// than failing the generation — a stale reference on the send path shouldn't block a message.
+fn resolve_conversation_project(db: &Database, conversation: &Conversation) -> Option<Project> {
+    let project_id = conversation.project_id.as_deref()?;
+    db.get_project(project_id).ok()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,14 +95,19 @@ fn resolve_setting<T>(
 struct GenerationProvenance {
     provider_id: String,
     model: String,
+    /// FTR-003: the project this conversation was assigned to at generation time, if any — kept
+    /// alongside `system_prompt_source`/`*_source` below so a later reader can tell *which*
+    /// project contributed a `Project`-sourced setting without re-deriving it from the
+    /// conversation row as it exists *now*, which may have since been reassigned.
+    project_id: Option<String>,
     temperature: Option<f64>,
     temperature_source: Option<SettingSource>,
     max_tokens: Option<i64>,
     max_tokens_source: Option<SettingSource>,
-    /// Whether this conversation's own system-prompt override was applied to this generation —
-    /// not the prompt text itself, which stays out of provenance metadata the same way message
-    /// content itself is never duplicated into it.
-    system_prompt_applied: bool,
+    /// Which tier (if any) supplied the system prompt actually injected — not the prompt text
+    /// itself, which stays out of provenance metadata the same way message content itself is
+    /// never duplicated into it.
+    system_prompt_source: Option<SettingSource>,
 }
 
 /// FTR-004 acceptance: "effective settings ... stored in response provenance." Best-effort — a
@@ -202,8 +244,14 @@ pub fn send_chat_message(
                 &request.model,
             )?;
 
+            let project = resolve_conversation_project(&db, &conversation);
+
+            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
+                conversation.system_prompt.as_deref(),
+                project.as_ref().and_then(|p| p.instructions.as_deref()),
+            );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &conversation.system_prompt {
+            if let Some(system_prompt) = &effective_system_prompt {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
                     content: system_prompt.clone(),
@@ -225,11 +273,13 @@ pub fn send_chat_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
 
@@ -239,11 +289,12 @@ pub fn send_chat_message(
                 &GenerationProvenance {
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
+                    project_id: conversation.project_id.clone(),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_applied: conversation.system_prompt.is_some(),
+                    system_prompt_source,
                 },
             );
 
@@ -346,8 +397,14 @@ pub fn edit_user_message(
                 &request.model,
             )?;
 
+            let project = resolve_conversation_project(&db, &conversation);
+
+            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
+                conversation.system_prompt.as_deref(),
+                project.as_ref().and_then(|p| p.instructions.as_deref()),
+            );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &conversation.system_prompt {
+            if let Some(system_prompt) = &effective_system_prompt {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
                     content: system_prompt.clone(),
@@ -369,11 +426,13 @@ pub fn edit_user_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
 
@@ -383,11 +442,12 @@ pub fn edit_user_message(
                 &GenerationProvenance {
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
+                    project_id: conversation.project_id.clone(),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_applied: conversation.system_prompt.is_some(),
+                    system_prompt_source,
                 },
             );
 
@@ -460,6 +520,7 @@ pub fn regenerate_assistant_message(
 
         let conversation = db.get_conversation(&request.conversation_id)?;
         let provider = db.get_provider(&request.provider_id)?;
+        let project = resolve_conversation_project(&db, &conversation);
         let history = db.get_message_path(parent_message_id)?;
 
         // COR-004: the new assistant revision insert and the conversation pointer update
@@ -483,8 +544,12 @@ pub fn regenerate_assistant_message(
                 &request.model,
             )?;
 
+            let (effective_system_prompt, system_prompt_source) = resolve_system_prompt(
+                conversation.system_prompt.as_deref(),
+                project.as_ref().and_then(|p| p.instructions.as_deref()),
+            );
             let mut provider_messages: Vec<ChatMessage> = Vec::new();
-            if let Some(system_prompt) = &conversation.system_prompt {
+            if let Some(system_prompt) = &effective_system_prompt {
                 provider_messages.push(ChatMessage {
                     role: "system".to_string(),
                     content: system_prompt.clone(),
@@ -502,11 +567,13 @@ pub fn regenerate_assistant_message(
             let (effective_temperature, temperature_source) = resolve_setting(
                 temperature,
                 conversation.temperature,
+                project.as_ref().and_then(|p| p.default_temperature),
                 provider.default_temperature,
             );
             let (effective_max_tokens, max_tokens_source) = resolve_setting(
                 max_tokens,
                 conversation.max_tokens,
+                project.as_ref().and_then(|p| p.default_max_tokens),
                 provider.default_max_tokens,
             );
 
@@ -516,11 +583,12 @@ pub fn regenerate_assistant_message(
                 &GenerationProvenance {
                     provider_id: request.provider_id.clone(),
                     model: request.model.clone(),
+                    project_id: conversation.project_id.clone(),
                     temperature: effective_temperature,
                     temperature_source,
                     max_tokens: effective_max_tokens,
                     max_tokens_source,
-                    system_prompt_applied: conversation.system_prompt.is_some(),
+                    system_prompt_source,
                 },
             );
 
@@ -1631,23 +1699,46 @@ mod tests {
         }
     }
 
-    // ── FTR-004: three-tier settings precedence + provenance ───────────────────────────
+    // ── FTR-004/FTR-003: four-tier settings precedence + provenance ────────────────────
 
     #[test]
-    fn resolve_setting_prefers_request_then_conversation_then_provider_default() {
+    fn resolve_setting_prefers_request_then_conversation_then_project_then_provider_default() {
         assert_eq!(
-            resolve_setting(Some(1), Some(2), Some(3)),
+            resolve_setting(Some(1), Some(2), Some(3), Some(4)),
             (Some(1), Some(SettingSource::Request))
         );
         assert_eq!(
-            resolve_setting(None, Some(2), Some(3)),
+            resolve_setting(None, Some(2), Some(3), Some(4)),
             (Some(2), Some(SettingSource::Conversation))
         );
         assert_eq!(
-            resolve_setting(None, None, Some(3)),
-            (Some(3), Some(SettingSource::ProviderDefault))
+            resolve_setting(None, None, Some(3), Some(4)),
+            (Some(3), Some(SettingSource::Project))
         );
-        assert_eq!(resolve_setting::<i64>(None, None, None), (None, None));
+        assert_eq!(
+            resolve_setting(None, None, None, Some(4)),
+            (Some(4), Some(SettingSource::ProviderDefault))
+        );
+        assert_eq!(resolve_setting::<i64>(None, None, None, None), (None, None));
+    }
+
+    #[test]
+    fn resolve_system_prompt_prefers_conversation_then_project() {
+        assert_eq!(
+            resolve_system_prompt(Some("Be terse."), Some("Cite sources.")),
+            (
+                Some("Be terse.".to_string()),
+                Some(SettingSource::Conversation)
+            )
+        );
+        assert_eq!(
+            resolve_system_prompt(None, Some("Cite sources.")),
+            (
+                Some("Cite sources.".to_string()),
+                Some(SettingSource::Project)
+            )
+        );
+        assert_eq!(resolve_system_prompt(None, None), (None, None));
     }
 
     #[test]
@@ -1679,7 +1770,7 @@ mod tests {
         assert_eq!(parsed["temperatureSource"], "provider_default");
         assert_eq!(parsed["maxTokens"].as_i64(), provider.default_max_tokens);
         assert_eq!(parsed["maxTokensSource"], "provider_default");
-        assert_eq!(parsed["systemPromptApplied"], false);
+        assert!(parsed["systemPromptSource"].is_null());
 
         drop(db);
         drop(state);
@@ -1719,7 +1810,7 @@ mod tests {
         assert_eq!(parsed["temperatureSource"], "conversation");
         assert_eq!(parsed["maxTokens"].as_i64(), Some(64));
         assert_eq!(parsed["maxTokensSource"], "conversation");
-        assert_eq!(parsed["systemPromptApplied"], true);
+        assert_eq!(parsed["systemPromptSource"], "conversation");
 
         drop(db);
         drop(state);
@@ -1756,6 +1847,56 @@ mod tests {
         assert_eq!(parsed["temperatureSource"], "request");
         assert_eq!(parsed["maxTokens"].as_i64(), Some(128));
         assert_eq!(parsed["maxTokensSource"], "request");
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn send_chat_message_falls_through_to_the_projects_defaults_when_the_conversation_has_none() {
+        let (state, path) = test_state();
+        let conversation = {
+            let db = state.db.lock().expect("database lock");
+            let project = db.create_project("Research").expect("project created");
+            let project = db
+                .update_project(
+                    &project.id,
+                    crate::projects::UpdateProjectChanges {
+                        name: "Research",
+                        instructions: Some("Cite sources."),
+                        default_provider_id: None,
+                        default_model_id: None,
+                        default_temperature: Some(0.2),
+                        default_max_tokens: Some(256),
+                    },
+                )
+                .expect("project defaults saved");
+            let conversation = db
+                .create_conversation(Some("In a project".to_string()))
+                .expect("conversation created");
+            db.set_conversation_project(&conversation.id, Some(&project.id))
+                .expect("conversation assigned to project")
+        };
+
+        let result = send_chat_message(&state, basic_send_request(conversation.id, "hello"))
+            .expect("generation queued");
+
+        let db = state.db.lock().expect("database lock");
+        let assistant = db
+            .get_message(&result.assistant_message_id)
+            .expect("assistant placeholder readable");
+        let metadata = assistant
+            .metadata_json
+            .expect("provenance metadata was recorded");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata).expect("provenance is valid JSON");
+        assert_eq!(parsed["temperature"].as_f64(), Some(0.2));
+        assert_eq!(parsed["temperatureSource"], "project");
+        assert_eq!(parsed["maxTokens"].as_i64(), Some(256));
+        assert_eq!(parsed["maxTokensSource"], "project");
+        assert_eq!(parsed["systemPromptSource"], "project");
+        assert!(parsed["projectId"].is_string());
 
         drop(db);
         drop(state);

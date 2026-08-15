@@ -6,10 +6,12 @@ import {
   Database,
   Download,
   FileText,
+  Folder,
   HardDrive,
   Info,
   Loader2,
   Moon,
+  Plus,
   RefreshCw,
   Save,
   Shield,
@@ -29,6 +31,8 @@ import type {
   DiagnosticsBundle,
   ModelInfo,
   OllamaPullProgress,
+  Project,
+  ProjectDeletionPreview,
   ProviderConfig,
   ProviderHealth,
   RestorePreview,
@@ -44,6 +48,7 @@ import { Input } from "../../ui/input";
 import { NumberField } from "../../ui/numberField";
 import { Panel } from "../../ui/panel";
 import { Select } from "../../ui/select";
+import { Textarea } from "../../ui/textarea";
 import { DiagnosticsPanel } from "../diagnostics/DiagnosticsPanel";
 
 interface SettingsViewProps {
@@ -51,6 +56,7 @@ interface SettingsViewProps {
   providers: ProviderConfig[];
   models: ModelInfo[];
   providerHealth: Record<string, ProviderHealth>;
+  projects: Project[];
   theme: ThemeMode;
   workspace?: WorkspaceInfo | null;
   builtInStatus: BuiltInRuntimeStatus;
@@ -64,6 +70,8 @@ interface SettingsViewProps {
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
+  onProjectSaved: (project: Project) => void;
+  onProjectDeleted: (id: string) => void;
   /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) — see
    * `useArkController.ts`'s `refreshProviderModels` doc comment. */
   onRefreshProviderModels: (providerId: string) => Promise<void>;
@@ -76,6 +84,7 @@ export function SettingsView({
   providers,
   models,
   providerHealth,
+  projects,
   theme,
   workspace,
   builtInStatus,
@@ -87,6 +96,8 @@ export function SettingsView({
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
+  onProjectSaved,
+  onProjectDeleted,
   onRefreshProviderModels,
   onBack,
   onError,
@@ -332,6 +343,15 @@ export function SettingsView({
             </div>
           </Panel>
 
+          <ProjectsPanel
+            projects={projects}
+            providers={providers}
+            models={models}
+            onProjectSaved={onProjectSaved}
+            onProjectDeleted={onProjectDeleted}
+            onError={onError}
+          />
+
           <Panel className="p-4">
             <div className="mb-2 flex items-center gap-2">
               <Database className="h-4 w-4" />
@@ -560,6 +580,379 @@ export function SettingsView({
         </div>
       </div>
     </main>
+  );
+}
+
+const MIN_PROJECT_TEMPERATURE = 0;
+const MAX_PROJECT_TEMPERATURE = 2;
+const MIN_PROJECT_MAX_TOKENS = 1;
+const MAX_PROJECT_MAX_TOKENS = 1_000_000;
+
+/**
+ * FTR-003: a project groups conversations under a shared name, instructions, and default
+ * provider/model/temperature/max_tokens. This panel is the only UI surface for project CRUD —
+ * projects themselves are picked/assigned per-conversation from `ChatView`'s
+ * `ConversationSettingsButton`, which reads this same list from the bootstrap/controller store.
+ */
+function ProjectsPanel({
+  projects,
+  providers,
+  models,
+  onProjectSaved,
+  onProjectDeleted,
+  onError,
+}: {
+  projects: Project[];
+  providers: ProviderConfig[];
+  models: ModelInfo[];
+  onProjectSaved: (project: Project) => void;
+  onProjectDeleted: (id: string) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [newName, setNewName] = React.useState("");
+  const [creating, setCreating] = React.useState(false);
+  const [showArchived, setShowArchived] = React.useState(false);
+
+  const visibleProjects = projects
+    .filter((project) => showArchived || !project.archivedAt)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const selected = projects.find((project) => project.id === selectedId) ?? null;
+
+  async function createProject() {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    setCreating(true);
+    try {
+      const project = await client.createProject(trimmed);
+      onProjectSaved(project);
+      setNewName("");
+      setSelectedId(project.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Folder className="h-4 w-4" />
+          <h2 className="text-sm font-semibold">Projects</h2>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(event) => setShowArchived(event.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          Show archived
+        </label>
+      </div>
+
+      <div className="mb-3 flex gap-2">
+        <Input
+          value={newName}
+          onChange={(event) => setNewName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void createProject();
+          }}
+          placeholder="New project name"
+          maxLength={200}
+        />
+        <Button variant="secondary" disabled={creating || !newName.trim()} onClick={() => void createProject()}>
+          {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Create
+        </Button>
+      </div>
+
+      {visibleProjects.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No projects yet.</p>
+      ) : (
+        <div className="grid gap-1">
+          {visibleProjects.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              onClick={() => setSelectedId(project.id === selectedId ? null : project.id)}
+              aria-expanded={project.id === selectedId}
+              className={cn(
+                "flex items-center justify-between rounded-md border border-transparent px-2 py-1.5 text-left text-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring",
+                project.id === selectedId && "border-border bg-muted",
+              )}
+            >
+              <span className="truncate">{project.name}</span>
+              {project.archivedAt && <Badge tone="warning">Archived</Badge>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <ProjectEditor
+          key={selected.id}
+          project={selected}
+          providers={providers}
+          models={models}
+          onProjectSaved={onProjectSaved}
+          onProjectDeleted={(id) => {
+            onProjectDeleted(id);
+            setSelectedId(null);
+          }}
+          onError={onError}
+        />
+      )}
+    </Panel>
+  );
+}
+
+function ProjectEditor({
+  project,
+  providers,
+  models,
+  onProjectSaved,
+  onProjectDeleted,
+  onError,
+}: {
+  project: Project;
+  providers: ProviderConfig[];
+  models: ModelInfo[];
+  onProjectSaved: (project: Project) => void;
+  onProjectDeleted: (id: string) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [name, setName] = React.useState(project.name);
+  const [instructions, setInstructions] = React.useState(project.instructions ?? "");
+  const [defaultProviderId, setDefaultProviderId] = React.useState(project.defaultProviderId ?? "");
+  const [defaultModelId, setDefaultModelId] = React.useState(project.defaultModelId ?? "");
+  const [temperature, setTemperature] = React.useState(
+    project.defaultTemperature != null ? String(project.defaultTemperature) : "",
+  );
+  const [maxTokens, setMaxTokens] = React.useState(
+    project.defaultMaxTokens != null ? String(project.defaultMaxTokens) : "",
+  );
+  const [saving, setSaving] = React.useState(false);
+  const [archiving, setArchiving] = React.useState(false);
+  const [deletePreview, setDeletePreview] = React.useState<ProjectDeletionPreview | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
+
+  React.useEffect(() => {
+    setName(project.name);
+    setInstructions(project.instructions ?? "");
+    setDefaultProviderId(project.defaultProviderId ?? "");
+    setDefaultModelId(project.defaultModelId ?? "");
+    setTemperature(project.defaultTemperature != null ? String(project.defaultTemperature) : "");
+    setMaxTokens(project.defaultMaxTokens != null ? String(project.defaultMaxTokens) : "");
+    setDeletePreview(null);
+  }, [project]);
+
+  // FTR-003: empty is a valid, meaningful state here ("no project default, fall through to the
+  // provider's") — unlike `ProviderForm`'s temperature/max-tokens, which are always-required
+  // concrete values. `validateNumberInput`/`NumberField` are built for the latter case and treat
+  // empty as an error, so this mirrors `ConversationSettingsButton`'s own inline validation
+  // (the same "optional numeric override" shape) instead of reusing them.
+  const temperatureTrimmed = temperature.trim();
+  const maxTokensTrimmed = maxTokens.trim();
+  const temperatureNumber = temperatureTrimmed === "" ? null : Number(temperatureTrimmed);
+  const maxTokensNumber = maxTokensTrimmed === "" ? null : Number(maxTokensTrimmed);
+  const temperatureValid =
+    temperatureTrimmed === "" ||
+    (temperatureNumber !== null &&
+      Number.isFinite(temperatureNumber) &&
+      temperatureNumber >= MIN_PROJECT_TEMPERATURE &&
+      temperatureNumber <= MAX_PROJECT_TEMPERATURE);
+  const maxTokensValid =
+    maxTokensTrimmed === "" ||
+    (maxTokensNumber !== null &&
+      Number.isInteger(maxTokensNumber) &&
+      maxTokensNumber >= MIN_PROJECT_MAX_TOKENS &&
+      maxTokensNumber <= MAX_PROJECT_MAX_TOKENS);
+  const projectModels = models.filter((model) => model.providerId === defaultProviderId);
+
+  async function save() {
+    if (!name.trim() || !temperatureValid || !maxTokensValid) return;
+    setSaving(true);
+    try {
+      const saved = await client.updateProject({
+        id: project.id,
+        name,
+        instructions: instructions.trim() || null,
+        defaultProviderId: defaultProviderId || null,
+        defaultModelId: defaultModelId || null,
+        defaultTemperature: temperatureNumber,
+        defaultMaxTokens: maxTokensNumber,
+      });
+      onProjectSaved(saved);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleArchived() {
+    setArchiving(true);
+    try {
+      const saved = await client.setProjectArchived(project.id, !project.archivedAt);
+      onProjectSaved(saved);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setArchiving(false);
+    }
+  }
+
+  async function loadDeletePreview() {
+    try {
+      setDeletePreview(await client.previewProjectDeletion(project.id));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }
+
+  async function confirmDelete() {
+    setDeleting(true);
+    try {
+      await client.deleteProject(project.id);
+      onProjectDeleted(project.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 grid gap-3 rounded-md border border-border p-3">
+      <label className="grid gap-1.5 text-sm">
+        Name
+        <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={200} />
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Instructions
+        <Textarea
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          rows={3}
+          placeholder="No project instructions — every conversation in this project inherits its own default"
+        />
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Default provider
+        <Select
+          value={defaultProviderId}
+          onChange={(event) => {
+            setDefaultProviderId(event.target.value);
+            setDefaultModelId("");
+          }}
+        >
+          <option value="">Provider default (none)</option>
+          {providers.map((candidate) => (
+            <option key={candidate.id} value={candidate.id}>
+              {candidate.name}
+            </option>
+          ))}
+        </Select>
+      </label>
+      {defaultProviderId && (
+        <label className="grid gap-1.5 text-sm">
+          Default model
+          <Select value={defaultModelId} onChange={(event) => setDefaultModelId(event.target.value)}>
+            <option value="">No default model</option>
+            {projectModels.map((candidate) => (
+              <option key={candidate.id} value={candidate.name}>
+                {candidate.displayName ?? candidate.name}
+              </option>
+            ))}
+          </Select>
+        </label>
+      )}
+      <label className="grid gap-1.5 text-sm">
+        Default temperature
+        <Input
+          value={temperature}
+          onChange={(event) => setTemperature(event.target.value)}
+          inputMode="decimal"
+          placeholder="Provider default"
+          aria-invalid={!temperatureValid}
+          className={cn(!temperatureValid && "border-destructive focus-visible:ring-destructive")}
+        />
+        {!temperatureValid ? (
+          <span role="alert" className="text-xs text-destructive">
+            Must be between {MIN_PROJECT_TEMPERATURE} and {MAX_PROJECT_TEMPERATURE}, or empty to use the provider
+            default.
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">Falls through to the provider's default when empty.</span>
+        )}
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Default max tokens
+        <Input
+          value={maxTokens}
+          onChange={(event) => setMaxTokens(event.target.value)}
+          inputMode="numeric"
+          placeholder="Provider default"
+          aria-invalid={!maxTokensValid}
+          className={cn(!maxTokensValid && "border-destructive focus-visible:ring-destructive")}
+        />
+        {!maxTokensValid ? (
+          <span role="alert" className="text-xs text-destructive">
+            Must be a whole number between {MIN_PROJECT_MAX_TOKENS} and {MAX_PROJECT_MAX_TOKENS}, or empty to use the
+            provider default.
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">Falls through to the provider's default when empty.</span>
+        )}
+      </label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="secondary" onClick={() => void toggleArchived()} disabled={archiving}>
+            {project.archivedAt ? "Unarchive" : "Archive"}
+          </Button>
+          {deletePreview ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                {deletePreview.conversationCount === 0
+                  ? "No conversations are assigned."
+                  : `${deletePreview.conversationCount} conversation(s) will be unassigned, not deleted.`}
+              </span>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+              >
+                {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Confirm delete
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setDeletePreview(null)}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button type="button" variant="ghost" onClick={() => void loadDeletePreview()}>
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          )}
+        </div>
+        <Button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || !name.trim() || !temperatureValid || !maxTokensValid}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save
+        </Button>
+      </div>
+    </div>
   );
 }
 

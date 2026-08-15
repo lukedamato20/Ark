@@ -15,6 +15,7 @@ mod file_permissions;
 mod generation;
 mod import_export;
 mod observability;
+mod projects;
 mod provider_management;
 mod providers;
 mod proxy;
@@ -29,20 +30,22 @@ mod workspace;
 mod workspace_bootstrap;
 
 use commands::{
-    cancel_import, cancel_stream, create_conversation, create_workspace_backup,
-    delete_conversation, delete_ollama_model, delete_provider_secret, disable_workspace_encryption,
-    discard_interrupted_message, edit_user_message, enable_workspace_encryption,
-    export_conversation_json, export_conversation_markdown, export_diagnostics_bundle,
-    get_app_bootstrap, get_assistant_alternatives, get_built_in_runtime_status,
-    get_conversation_messages, get_provider_secret_metadata, get_secret_store_status,
-    get_workspace_protection_status, import_conversation_json, keep_partial_message,
-    list_conversations, preview_conversation_import, preview_workspace_restore, pull_ollama_model,
-    refresh_models, regenerate_assistant_message, rename_conversation, reset_workspace,
-    restore_workspace_backup, restore_workspace_recovery_key, retry_workspace_open,
-    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, send_chat_message,
-    set_conversation_archived, set_conversation_pinned, set_workspace, start_built_in_runtime,
-    start_pending_stream, stop_built_in_runtime, switch_active_branch,
-    update_conversation_settings, update_device_settings, update_provider, upsert_provider_secret,
+    cancel_import, cancel_stream, create_conversation, create_project, create_workspace_backup,
+    delete_conversation, delete_ollama_model, delete_project, delete_provider_secret,
+    disable_workspace_encryption, discard_interrupted_message, edit_user_message,
+    enable_workspace_encryption, export_conversation_json, export_conversation_markdown,
+    export_diagnostics_bundle, get_app_bootstrap, get_assistant_alternatives,
+    get_built_in_runtime_status, get_conversation_messages, get_provider_secret_metadata,
+    get_secret_store_status, get_workspace_protection_status, import_conversation_json,
+    keep_partial_message, list_conversations, list_projects, preview_conversation_import,
+    preview_project_deletion, preview_workspace_restore, pull_ollama_model, refresh_models,
+    regenerate_assistant_message, rename_conversation, reset_workspace, restore_workspace_backup,
+    restore_workspace_recovery_key, retry_workspace_open, rotate_workspace_encryption,
+    run_diagnostics, save_diagnostics_bundle, send_chat_message, set_conversation_archived,
+    set_conversation_pinned, set_conversation_project, set_project_archived, set_workspace,
+    start_built_in_runtime, start_pending_stream, stop_built_in_runtime, switch_active_branch,
+    update_conversation_settings, update_device_settings, update_project, update_provider,
+    upsert_provider_secret,
 };
 use db::Database;
 use errors::AppError;
@@ -232,6 +235,13 @@ pub fn run() {
             update_conversation_settings,
             set_conversation_archived,
             set_conversation_pinned,
+            set_conversation_project,
+            list_projects,
+            create_project,
+            update_project,
+            set_project_archived,
+            preview_project_deletion,
+            delete_project,
             delete_conversation,
             get_conversation_messages,
             get_assistant_alternatives,

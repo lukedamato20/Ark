@@ -37,6 +37,21 @@ pub struct UpdateConversationSettingsRequest {
 
 pub use crate::generation::{EditUserMessageRequest, RegenerateAssistantMessageRequest};
 
+/// FTR-003: `name` is always sent; every other field independently `None`/blank clears that
+/// project-level default, matching `UpdateConversationSettingsRequest`'s convention — the
+/// frontend always sends its complete current draft, not a partial patch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProjectRequest {
+    pub id: String,
+    pub name: String,
+    pub instructions: Option<String>,
+    pub default_provider_id: Option<String>,
+    pub default_model_id: Option<String>,
+    pub default_temperature: Option<f64>,
+    pub default_max_tokens: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantBranchRequest {
@@ -172,6 +187,83 @@ pub fn set_conversation_pinned(
 ) -> Result<crate::chat::Conversation, AppError> {
     let id = crate::validation::validate_entity_id(&id, "Conversation ID")?;
     lock_db(&state)?.set_conversation_pinned(id, pinned)
+}
+
+#[tauri::command]
+pub fn set_conversation_project(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<crate::chat::Conversation, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Conversation ID")?.to_string();
+    let project_id = project_id
+        .as_deref()
+        .map(|value| crate::validation::validate_entity_id(value, "Project ID"))
+        .transpose()?
+        .map(str::to_string);
+    lock_db(&state)?.set_conversation_project(&id, project_id.as_deref())
+}
+
+#[tauri::command]
+pub fn list_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::projects::Project>, AppError> {
+    lock_read_db(&state)?.list_projects()
+}
+
+#[tauri::command]
+pub fn create_project(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<crate::projects::Project, AppError> {
+    lock_db(&state)?.create_project(&name)
+}
+
+#[tauri::command]
+pub fn update_project(
+    state: State<'_, AppState>,
+    request: UpdateProjectRequest,
+) -> Result<crate::projects::Project, AppError> {
+    let id = crate::validation::validate_entity_id(&request.id, "Project ID")?.to_string();
+    let instructions = crate::validation::validate_system_prompt(request.instructions)?;
+    let temperature = crate::validation::validate_temperature(request.default_temperature)?;
+    let max_tokens = crate::validation::validate_max_tokens(request.default_max_tokens)?;
+    lock_db(&state)?.update_project(
+        &id,
+        crate::projects::UpdateProjectChanges {
+            name: &request.name,
+            instructions: instructions.as_deref(),
+            default_provider_id: request.default_provider_id.as_deref(),
+            default_model_id: request.default_model_id.as_deref(),
+            default_temperature: temperature,
+            default_max_tokens: max_tokens,
+        },
+    )
+}
+
+#[tauri::command]
+pub fn set_project_archived(
+    state: State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<crate::projects::Project, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Project ID")?;
+    lock_db(&state)?.set_project_archived(id, archived)
+}
+
+#[tauri::command]
+pub fn preview_project_deletion(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::projects::ProjectDeletionPreview, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Project ID")?;
+    lock_read_db(&state)?.preview_project_deletion(id)
+}
+
+#[tauri::command]
+pub fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Project ID")?;
+    lock_db(&state)?.delete_project(id)
 }
 
 #[tauri::command]

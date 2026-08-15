@@ -9,6 +9,7 @@ use crate::config::{
     LOCAL_INFERENCE_HOST_PROVIDER_NAME, LOCAL_INFERENCE_HOST_PROVIDER_TYPE,
 };
 use crate::errors::AppError;
+use crate::projects::{Project, ProjectDeletionPreview, UpdateProjectChanges};
 use crate::providers::{ModelInfo, ProviderConfig};
 use chrono::Utc;
 use rusqlite::types::Value;
@@ -85,6 +86,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 7,
         name: "0007_conversation_pinning",
         sql: include_str!("../../migrations/0007_conversation_pinning.sql"),
+    },
+    MigrationDef {
+        version: 8,
+        name: "0008_projects",
+        sql: include_str!("../../migrations/0008_projects.sql"),
     },
 ];
 
@@ -1121,6 +1127,146 @@ impl Database {
         Ok(())
     }
 
+    /// FTR-003: assigns or clears (`project_id = None`) a conversation's project. Validates the
+    /// project exists first — `projects.id` has no `FOREIGN KEY` constraint (see
+    /// `0008_projects.sql`'s header comment), so this check is the only thing standing between a
+    /// typo and a conversation silently pointing at nothing.
+    pub fn set_conversation_project(
+        &self,
+        id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Conversation, AppError> {
+        if let Some(project_id) = project_id {
+            self.get_project(project_id)?;
+        }
+        self.connection.execute(
+            "UPDATE conversations SET project_id = ?1 WHERE id = ?2",
+            params![project_id, id],
+        )?;
+        self.get_conversation(id)
+    }
+
+    /// FTR-003: `default_temperature`/`default_max_tokens` start `NULL` — "no project default,
+    /// fall through to the provider's default" — the same "start empty, resolve at generation
+    /// time" convention `create_conversation` established for its own override tier.
+    pub fn create_project(&self, name: &str) -> Result<Project, AppError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::invalid_input("Project name cannot be empty."));
+        }
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, trimmed, timestamp],
+        )?;
+        self.get_project(&id)
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<Project>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, instructions, default_provider_id, default_model_id,
+                default_temperature, default_max_tokens, archived_at, created_at, updated_at
+             FROM projects
+             ORDER BY archived_at IS NOT NULL, name ASC",
+        )?;
+        let rows = statement.query_map([], map_project)?;
+        collect_rows(rows)
+    }
+
+    pub fn get_project(&self, id: &str) -> Result<Project, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, name, instructions, default_provider_id, default_model_id,
+                    default_temperature, default_max_tokens, archived_at, created_at, updated_at
+                 FROM projects
+                 WHERE id = ?1",
+                params![id],
+                map_project,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Project"))
+    }
+
+    /// Callers pass already-validated values (`validation::validate_temperature`/
+    /// `validate_max_tokens`/`validate_system_prompt` have already normalized blank input to
+    /// `None`), matching `update_conversation_settings`'s convention.
+    pub fn update_project(
+        &self,
+        id: &str,
+        changes: UpdateProjectChanges<'_>,
+    ) -> Result<Project, AppError> {
+        let trimmed_name = changes.name.trim();
+        if trimmed_name.is_empty() {
+            return Err(AppError::invalid_input("Project name cannot be empty."));
+        }
+        self.connection.execute(
+            "UPDATE projects
+             SET name = ?1, instructions = ?2, default_provider_id = ?3, default_model_id = ?4,
+                 default_temperature = ?5, default_max_tokens = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                trimmed_name,
+                changes.instructions,
+                changes.default_provider_id,
+                changes.default_model_id,
+                changes.default_temperature,
+                changes.default_max_tokens,
+                now(),
+                id,
+            ],
+        )?;
+        self.get_project(id)
+    }
+
+    /// FTR-003: archiving a project is non-destructive and doesn't touch its conversations —
+    /// unlike deletion, there is nothing to preview. Undo is calling this again with `false`,
+    /// matching the established convention from conversation archive/pin.
+    pub fn set_project_archived(&self, id: &str, archived: bool) -> Result<Project, AppError> {
+        let archived_at = archived.then(now);
+        self.connection.execute(
+            "UPDATE projects SET archived_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![archived_at, now(), id],
+        )?;
+        self.get_project(id)
+    }
+
+    /// FTR-003: what `delete_project` is about to do, shown to the user before they confirm —
+    /// deleting a project only unassigns its conversations (`project_id` -> `NULL`), it never
+    /// deletes them, but the count still needs to be surfaced so the user isn't surprised by
+    /// conversations disappearing from a project-filtered view.
+    pub fn preview_project_deletion(&self, id: &str) -> Result<ProjectDeletionPreview, AppError> {
+        let project = self.get_project(id)?;
+        let conversation_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE project_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(ProjectDeletionPreview {
+            project,
+            conversation_count,
+        })
+    }
+
+    /// Unassigns every conversation referencing this project, then deletes it, inside one
+    /// transaction (see `Database::transaction`) so a mid-way failure can never leave
+    /// conversations pointing at a project that no longer exists.
+    pub fn delete_project(&self, id: &str) -> Result<(), AppError> {
+        self.transaction(|| {
+            self.connection.execute(
+                "UPDATE conversations SET project_id = NULL WHERE project_id = ?1",
+                params![id],
+            )?;
+            let affected = self
+                .connection
+                .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+            if affected == 0 {
+                return Err(AppError::not_found("Project"));
+            }
+            Ok(())
+        })
+    }
+
     pub fn get_active_messages(&self, conversation_id: &str) -> Result<Vec<Message>, AppError> {
         let conversation = self.get_conversation(conversation_id)?;
         let Some(current_message_id) = conversation.current_message_id else {
@@ -2048,6 +2194,21 @@ fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         token_count: row.get(12)?,
         error_message: row.get(13)?,
         metadata_json: row.get(14)?,
+    })
+}
+
+fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        instructions: row.get(2)?,
+        default_provider_id: row.get(3)?,
+        default_model_id: row.get(4)?,
+        default_temperature: row.get(5)?,
+        default_max_tokens: row.get(6)?,
+        archived_at: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -3034,6 +3195,67 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    fn seed_migration_0007_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..7] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 7 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-7 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-7 conversation, from before the projects table existed");
+        conversation_id
+    }
+
+    /// FTR-003 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 8, the current latest — a pre-existing conversation row from a migration-7
+    /// workspace must survive migration 8's new `projects` table (a new table, not a column on
+    /// an existing one, so the risk is a broken migration ordering, not data loss on the row
+    /// itself), and the new table must actually be usable afterward.
+    #[test]
+    fn upgrading_a_migration_0007_workspace_adds_the_projects_table() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0007_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-7 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-7 conversation");
+        assert_eq!(conversation.project_id, None);
+
+        let project = db
+            .create_project("Post-upgrade project")
+            .expect("projects table is usable immediately after migration 8");
+        assert_eq!(project.name, "Post-upgrade project");
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -3215,6 +3437,167 @@ mod tests {
             .set_conversation_pinned(&created.id, false)
             .expect("unpinned — undo is just the opposite call");
         assert_eq!(unpinned.pinned_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn create_project_rejects_a_blank_name_and_starts_every_default_unset() {
+        let (db, path) = test_db();
+
+        let error = db
+            .create_project("   ")
+            .expect_err("blank project name is rejected");
+        assert_eq!(error.code, "invalid_input");
+
+        let project = db.create_project("Research").expect("project created");
+        assert_eq!(project.name, "Research");
+        assert_eq!(project.instructions, None);
+        assert_eq!(project.default_provider_id, None);
+        assert_eq!(project.default_model_id, None);
+        assert_eq!(project.default_temperature, None);
+        assert_eq!(project.default_max_tokens, None);
+        assert_eq!(project.archived_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_project_persists_and_clears_every_default_independently() {
+        let (db, path) = test_db();
+        let created = db.create_project("Research").expect("project created");
+
+        let updated = db
+            .update_project(
+                &created.id,
+                crate::projects::UpdateProjectChanges {
+                    name: "Deep research",
+                    instructions: Some("Cite sources."),
+                    default_provider_id: Some(DEFAULT_PROVIDER_ID),
+                    default_model_id: Some("some-model"),
+                    default_temperature: Some(0.2),
+                    default_max_tokens: Some(4096),
+                },
+            )
+            .expect("project updated");
+        assert_eq!(updated.name, "Deep research");
+        assert_eq!(updated.instructions.as_deref(), Some("Cite sources."));
+        assert_eq!(
+            updated.default_provider_id.as_deref(),
+            Some(DEFAULT_PROVIDER_ID)
+        );
+        assert_eq!(updated.default_temperature, Some(0.2));
+        assert_eq!(updated.default_max_tokens, Some(4096));
+
+        let cleared = db
+            .update_project(
+                &created.id,
+                crate::projects::UpdateProjectChanges {
+                    name: "Deep research",
+                    instructions: None,
+                    default_provider_id: None,
+                    default_model_id: None,
+                    default_temperature: None,
+                    default_max_tokens: None,
+                },
+            )
+            .expect("project defaults cleared");
+        assert_eq!(cleared.instructions, None);
+        assert_eq!(cleared.default_provider_id, None);
+        assert_eq!(cleared.default_temperature, None);
+        assert_eq!(cleared.default_max_tokens, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_project_archived_excludes_it_from_the_default_listing_order() {
+        let (db, path) = test_db();
+        let active = db.create_project("Active project").expect("created");
+        let archived = db.create_project("Archived project").expect("created");
+
+        let archived = db
+            .set_project_archived(&archived.id, true)
+            .expect("archived");
+        assert!(archived.archived_at.is_some());
+
+        // FTR-003: `list_projects` sorts archived projects after active ones (not filtered out
+        // entirely — there's no separate "show archived" concept for projects the way FTR-002
+        // added one for conversations, since a project list is expected to stay small).
+        let listed = db.list_projects().expect("listed");
+        let ids: Vec<&str> = listed.iter().map(|project| project.id.as_str()).collect();
+        assert_eq!(ids, vec![active.id.as_str(), archived.id.as_str()]);
+
+        let unarchived = db
+            .set_project_archived(&archived.id, false)
+            .expect("unarchived — undo is just the opposite call");
+        assert_eq!(unarchived.archived_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_conversation_project_validates_the_project_exists_first() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Unassigned".to_string()))
+            .expect("conversation created");
+
+        let error = db
+            .set_conversation_project(&conversation.id, Some("does-not-exist"))
+            .expect_err("assigning a nonexistent project is rejected");
+        assert_eq!(error.code, "not_found");
+
+        let refetched = db.get_conversation(&conversation.id).expect("refetched");
+        assert_eq!(
+            refetched.project_id, None,
+            "a rejected assignment must not partially apply"
+        );
+
+        let project = db.create_project("Real project").expect("project created");
+        let assigned = db
+            .set_conversation_project(&conversation.id, Some(&project.id))
+            .expect("assigned to a real project");
+        assert_eq!(assigned.project_id.as_deref(), Some(project.id.as_str()));
+
+        let cleared = db
+            .set_conversation_project(&conversation.id, None)
+            .expect("cleared");
+        assert_eq!(cleared.project_id, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_project_unassigns_conversations_rather_than_deleting_them() {
+        let (db, path) = test_db();
+        let project = db.create_project("Doomed project").expect("created");
+        let conversation = db
+            .create_conversation(Some("Survives project deletion".to_string()))
+            .expect("conversation created");
+        db.set_conversation_project(&conversation.id, Some(&project.id))
+            .expect("assigned");
+
+        let preview = db
+            .preview_project_deletion(&project.id)
+            .expect("preview computed");
+        assert_eq!(preview.conversation_count, 1);
+        assert_eq!(preview.project.id, project.id);
+
+        db.delete_project(&project.id).expect("project deleted");
+
+        let refetched = db
+            .get_conversation(&conversation.id)
+            .expect("conversation still exists — deletion must not cascade");
+        assert_eq!(refetched.project_id, None);
+
+        let missing = db.get_project(&project.id).expect_err("project is gone");
+        assert_eq!(missing.code, "not_found");
 
         drop(db);
         let _ = fs::remove_file(path);

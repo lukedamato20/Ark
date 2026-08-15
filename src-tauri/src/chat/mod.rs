@@ -50,17 +50,14 @@ pub struct Conversation {
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
     pub current_message_id: Option<String>,
-    /// ARC-006: reserved for a future per-conversation custom-system-prompt feature (Phase 5
-    /// `FTR`); deliberately unimplemented today — no command writes a non-null value here. Kept
-    /// rather than removed because the feature is a clearly intended, near-term addition and the
-    /// column's shape won't need to change when it lands.
+    /// FTR-004: `None` means "no conversation-level override, inherit the effective provider/
+    /// project default." Set via `update_conversation_settings` and applied by `generation.rs`.
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,
     pub archived: bool,
-    /// ARC-007: nullable until FTR-003 introduces project entities and mutations. Exposed now
-    /// so the paginated history contract can already filter by project without later changing
-    /// its response shape.
+    /// FTR-003: `None` means unassigned. Set via `Database::set_conversation_project`, which
+    /// validates the referenced project exists first — see `projects.rs`'s module doc.
     pub project_id: Option<String>,
     /// FTR-002: `None` means unpinned. A timestamp rather than a bare boolean so pin order
     /// among multiple pinned conversations is deterministic (most-recently-pinned first) —

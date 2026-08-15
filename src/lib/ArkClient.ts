@@ -16,6 +16,8 @@ import type {
   ImportProgressEvent,
   Message,
   OllamaPullProgress,
+  Project,
+  ProjectDeletionPreview,
   ProviderConfig,
   RefreshModelsResult,
   RestorePreview,
@@ -75,6 +77,16 @@ export interface UpdateConversationSettingsInput {
   systemPrompt?: string | null;
   temperature?: number | null;
   maxTokens?: number | null;
+}
+
+export interface UpdateProjectInput {
+  id: string;
+  name: string;
+  instructions?: string | null;
+  defaultProviderId?: string | null;
+  defaultModelId?: string | null;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
 }
 
 export interface ListConversationsInput {
@@ -146,6 +158,8 @@ export interface ArkClient {
    * mechanism exists because none is needed for a mutation this cheap and reversible. */
   setConversationArchived(id: string, archived: boolean): Promise<Conversation>;
   setConversationPinned(id: string, pinned: boolean): Promise<Conversation>;
+  /** FTR-003: `projectId: null` unassigns the conversation from any project. */
+  setConversationProject(id: string, projectId: string | null): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
   getConversationMessages(conversationId: string): Promise<Message[]>;
   getAssistantAlternatives(conversationId: string, messageId: string): Promise<BranchAlternative[]>;
@@ -167,6 +181,18 @@ export interface ArkClient {
   deleteProviderSecret(providerId: string): Promise<void>;
   pullOllamaModel(providerId: string, modelName: string): Promise<void>;
   deleteOllamaModel(providerId: string, modelName: string): Promise<void>;
+
+  listProjects(): Promise<Project[]>;
+  createProject(name: string): Promise<Project>;
+  /** Sends the complete current draft, not a partial patch — matching
+   * `updateConversationSettings`'s convention. */
+  updateProject(input: UpdateProjectInput): Promise<Project>;
+  /** FTR-003: undo is calling this again with the opposite value. */
+  setProjectArchived(id: string, archived: boolean): Promise<Project>;
+  /** What deleting this project would affect — call before `deleteProject` so the user can
+   * confirm, since deletion unassigns (not deletes) every conversation still in the project. */
+  previewProjectDeletion(id: string): Promise<ProjectDeletionPreview>;
+  deleteProject(id: string): Promise<void>;
 
   runDiagnostics(providerId: string, model?: string | null, includeRuntimeLogs?: boolean): Promise<DiagnosticsResult>;
 
@@ -263,6 +289,7 @@ export function createTauriArkClient(): ArkClient {
       }),
     setConversationArchived: (id, archived) => invoke<Conversation>("set_conversation_archived", { id, archived }),
     setConversationPinned: (id, pinned) => invoke<Conversation>("set_conversation_pinned", { id, pinned }),
+    setConversationProject: (id, projectId) => invoke<Conversation>("set_conversation_project", { id, projectId }),
     deleteConversation: (id) => invoke<void>("delete_conversation", { id }),
     getConversationMessages: (conversationId) => invoke<Message[]>("get_conversation_messages", { conversationId }),
     getAssistantAlternatives: (conversationId, messageId) =>
@@ -334,6 +361,13 @@ export function createTauriArkClient(): ArkClient {
       invoke<void>("pull_ollama_model", { request: { providerId, modelName } }),
     deleteOllamaModel: (providerId, modelName) =>
       invoke<void>("delete_ollama_model", { request: { providerId, modelName } }),
+
+    listProjects: () => invoke<Project[]>("list_projects"),
+    createProject: (name) => invoke<Project>("create_project", { name }),
+    updateProject: (input) => invoke<Project>("update_project", { request: input }),
+    setProjectArchived: (id, archived) => invoke<Project>("set_project_archived", { id, archived }),
+    previewProjectDeletion: (id) => invoke<ProjectDeletionPreview>("preview_project_deletion", { id }),
+    deleteProject: (id) => invoke<void>("delete_project", { id }),
 
     runDiagnostics: (providerId, model, includeRuntimeLogs = false) =>
       invoke<DiagnosticsResult>("run_diagnostics", {
@@ -414,6 +448,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     updateConversationSettings: notImplemented("updateConversationSettings"),
     setConversationArchived: notImplemented("setConversationArchived"),
     setConversationPinned: notImplemented("setConversationPinned"),
+    setConversationProject: notImplemented("setConversationProject"),
     deleteConversation: async () => undefined,
     getConversationMessages: async () => [],
     getAssistantAlternatives: async () => [],
@@ -439,6 +474,13 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     deleteProviderSecret: async () => undefined,
     pullOllamaModel: async () => undefined,
     deleteOllamaModel: async () => undefined,
+
+    listProjects: async () => [],
+    createProject: notImplemented("createProject"),
+    updateProject: notImplemented("updateProject"),
+    setProjectArchived: notImplemented("setProjectArchived"),
+    previewProjectDeletion: notImplemented("previewProjectDeletion"),
+    deleteProject: async () => undefined,
 
     runDiagnostics: notImplemented("runDiagnostics"),
 

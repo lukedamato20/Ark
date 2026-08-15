@@ -17,6 +17,19 @@
       "pinnedAt"
     ],
     "ConversationPage": ["items", "nextCursor", "searchSnippets"],
+    "Project": [
+      "id",
+      "name",
+      "instructions",
+      "defaultProviderId",
+      "defaultModelId",
+      "defaultTemperature",
+      "defaultMaxTokens",
+      "archivedAt",
+      "createdAt",
+      "updatedAt"
+    ],
+    "ProjectDeletionPreview": ["project", "conversationCount"],
     "Message": [
       "id",
       "conversationId",
@@ -97,6 +110,7 @@
       "conversationPage",
       "providers",
       "models",
+      "projects",
       "workspacePath",
       "workspace",
       "deviceSettings",

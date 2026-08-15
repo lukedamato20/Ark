@@ -23,6 +23,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Project,
   ProviderConfig,
   RefreshModelsResult,
   StreamEvent,
@@ -43,9 +44,16 @@ export interface ArkController {
   /** FTR-002: undo is calling this again with the opposite value. */
   changeConversationArchived: (id: string, archived: boolean) => Promise<void>;
   changeConversationPinned: (id: string, pinned: boolean) => Promise<void>;
+  /** FTR-003: `projectId: null` unassigns. */
+  changeConversationProject: (id: string, projectId: string | null) => Promise<void>;
   setShowArchived: (showArchived: boolean) => void;
   refreshProviderModels: (providerId: string) => Promise<void>;
   saveProvider: (provider: ProviderConfig) => void;
+  /** FTR-003: the project CRUD/archive mutations themselves go straight from the settings UI
+   * through `useArkClient()`, matching `saveProvider`'s existing pattern — these two just sync
+   * an already-server-confirmed result into the store. */
+  saveProject: (project: Project) => void;
+  removeProject: (id: string) => void;
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
@@ -75,6 +83,11 @@ function replaceProvider(
   provider: ProviderConfig,
 ): EntityCollection<ProviderConfig> {
   return upsertEntity(providers, provider);
+}
+
+function removeEntity<T>(collection: EntityCollection<T>, id: string): EntityCollection<T> {
+  const { [id]: _removed, ...byId } = collection.byId as Record<string, T>;
+  return { ids: collection.ids.filter((candidate) => candidate !== id), byId };
 }
 
 function replaceModelsForProvider(
@@ -291,6 +304,7 @@ export function useArkController(): ArkController {
         models: entityCollection(data.models),
         health: {},
       });
+      stores.projects.set({ projects: entityCollection(data.projects) });
       stores.settings.set({
         workspacePath: data.workspacePath,
         workspace: data.workspace,
@@ -501,9 +515,34 @@ export function useArkController(): ArkController {
     [client, setError, stores],
   );
 
+  const changeConversationProject = React.useCallback(
+    async (id: string, projectId: string | null) => {
+      try {
+        const updated = await client.setConversationProject(id, projectId);
+        patchStore(stores.catalog, {
+          conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+        });
+      } catch (error) {
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
   const saveProvider = React.useCallback(
     (provider: ProviderConfig) =>
       stores.providers.set((current) => ({ ...current, providers: replaceProvider(current.providers, provider) })),
+    [stores],
+  );
+
+  const saveProject = React.useCallback(
+    (project: Project) =>
+      patchStore(stores.projects, { projects: upsertEntity(stores.projects.getSnapshot().projects, project) }),
+    [stores],
+  );
+
+  const removeProject = React.useCallback(
+    (id: string) => patchStore(stores.projects, { projects: removeEntity(stores.projects.getSnapshot().projects, id) }),
     [stores],
   );
 
@@ -794,9 +833,12 @@ export function useArkController(): ArkController {
       loadMoreConversations,
       changeConversationArchived,
       changeConversationPinned,
+      changeConversationProject,
       setShowArchived,
       refreshProviderModels,
       saveProvider,
+      saveProject,
+      removeProject,
       changeTheme,
       changeBuiltInModelPath,
       changeCrashCaptureEnabled,
@@ -816,6 +858,7 @@ export function useArkController(): ArkController {
       changeBuiltInModelPath,
       changeConversationArchived,
       changeConversationPinned,
+      changeConversationProject,
       changeCrashCaptureEnabled,
       changeTheme,
       createConversation,
@@ -824,8 +867,10 @@ export function useArkController(): ArkController {
       loadMoreConversations,
       openSearch,
       refreshProviderModels,
+      removeProject,
       renameConversation,
       retryWorkspace,
+      saveProject,
       saveProvider,
       searchConversations,
       selectConversation,

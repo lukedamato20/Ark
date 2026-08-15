@@ -19,6 +19,7 @@ use crate::errors::AppError;
 use crate::import_export::{
     ImportConversationPreview, ImportConversationResult, ImportProviderMapping,
 };
+use crate::projects::{Project, ProjectDeletionPreview};
 use crate::provider_management::{BuiltInRuntimeStatus, RefreshModelsResult};
 use crate::providers::{
     ModelInfo, OllamaPullProgress, ProviderCapabilities, ProviderConfig, ProviderHealth,
@@ -160,6 +161,21 @@ fn sample_model_info() -> ModelInfo {
     }
 }
 
+fn sample_project() -> Project {
+    Project {
+        id: "project-1".to_string(),
+        name: "Research".to_string(),
+        instructions: Some("Cite sources.".to_string()),
+        default_provider_id: Some("provider-1".to_string()),
+        default_model_id: Some("model-1".to_string()),
+        default_temperature: Some(0.2),
+        default_max_tokens: Some(4096),
+        archived_at: None,
+        created_at: "2026-08-13T00:00:00Z".to_string(),
+        updated_at: "2026-08-13T00:00:00Z".to_string(),
+    }
+}
+
 fn sample_provider_health() -> ProviderHealth {
     ProviderHealth {
         provider_id: "provider-1".to_string(),
@@ -193,6 +209,22 @@ fn conversation_page_matches_contract() {
 #[test]
 fn message_matches_contract() {
     assert_matches_contract("Message", &sample_message());
+}
+
+#[test]
+fn project_matches_contract() {
+    assert_matches_contract("Project", &sample_project());
+}
+
+#[test]
+fn project_deletion_preview_matches_contract() {
+    assert_matches_contract(
+        "ProjectDeletionPreview",
+        &ProjectDeletionPreview {
+            project: sample_project(),
+            conversation_count: 3,
+        },
+    );
 }
 
 #[test]
@@ -299,6 +331,7 @@ fn app_bootstrap_matches_contract() {
             },
             providers: vec![sample_provider_config()],
             models: vec![sample_model_info()],
+            projects: vec![sample_project()],
             workspace_path: "C:\\workspace\\ark.sqlite3".to_string(),
             workspace: sample_workspace_info(),
             device_settings: crate::device_settings::DeviceSettings {

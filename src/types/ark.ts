@@ -13,11 +13,36 @@ export interface Conversation {
   temperature?: number | null;
   maxTokens?: number | null;
   archived: boolean;
-  /** ARC-007: populated once FTR-003 project assignment exists; null for current conversations. */
+  /** FTR-003: null means unassigned. Set via `setConversationProject`. */
   projectId?: string | null;
   /** FTR-002: null means unpinned. An ISO timestamp (not a boolean) so pin order among
    * multiple pinned conversations is deterministic — most-recently-pinned first. */
   pinnedAt?: string | null;
+}
+
+/** FTR-003: groups conversations under a shared name, instructions, and default
+ * provider/model/temperature/max_tokens. See `generation.rs`'s precedence chain (request ->
+ * conversation -> project -> provider default) for how these defaults actually take effect. */
+export interface Project {
+  id: string;
+  name: string;
+  /** `null` means no project-level instructions are injected. */
+  instructions?: string | null;
+  defaultProviderId?: string | null;
+  defaultModelId?: string | null;
+  defaultTemperature?: number | null;
+  defaultMaxTokens?: number | null;
+  /** `null` means active. An ISO timestamp, matching `Conversation.pinnedAt`'s convention. */
+  archivedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** FTR-003: what deleting a project would affect, shown before the user confirms — deletion
+ * never deletes conversations, only unassigns them, but the count still needs surfacing. */
+export interface ProjectDeletionPreview {
+  project: Project;
+  conversationCount: number;
 }
 
 export interface ConversationPage {
@@ -158,6 +183,9 @@ export interface AppBootstrap {
   conversationPage: ConversationPage;
   providers: ProviderConfig[];
   models: ModelInfo[];
+  /** FTR-003: every project (active and archived) — expected to stay small, unpaginated like
+   * `providers`. */
+  projects: Project[];
   workspacePath: string;
   workspace: WorkspaceInfo;
   /** ARC-006: device-scoped (theme, built-in runtime model path) — see docs/settings-catalog.md. */

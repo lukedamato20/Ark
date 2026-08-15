@@ -14,6 +14,7 @@
 use crate::chat::{ConversationListRequest, ConversationPage};
 use crate::device_settings::DeviceSettings;
 use crate::errors::AppError;
+use crate::projects::Project;
 use crate::providers::{ModelInfo, ProviderConfig};
 use crate::workspace::WorkspaceInfo;
 use crate::AppState;
@@ -26,6 +27,9 @@ pub struct AppBootstrap {
     pub conversation_page: ConversationPage,
     pub providers: Vec<ProviderConfig>,
     pub models: Vec<ModelInfo>,
+    /// FTR-003: every project (active and archived) — expected to stay small, unlike
+    /// conversations, so this is a plain unpaginated list, the same choice `providers` made.
+    pub projects: Vec<Project>,
     pub workspace_path: String,
     pub workspace: WorkspaceInfo,
     /// ARC-006: device-scoped (theme, built-in runtime model path) — see
@@ -50,6 +54,7 @@ pub fn get_app_bootstrap(app: &AppHandle, state: &AppState) -> Result<AppBootstr
     db.recover_stale_messages()?;
     let providers = db.list_providers()?;
     let models = db.list_all_models()?;
+    let projects = db.list_projects()?;
 
     // ARC-006: `appearance.theme` is the pre-ARC-006 workspace-scoped setting this device
     // settings file replaces — read here only as a one-time migration seed (see
@@ -81,6 +86,7 @@ pub fn get_app_bootstrap(app: &AppHandle, state: &AppState) -> Result<AppBootstr
         })?,
         providers,
         models,
+        projects,
         workspace_path: workspace_info.database_path.clone(),
         workspace: workspace_info,
         device_settings,

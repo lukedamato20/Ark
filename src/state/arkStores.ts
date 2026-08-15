@@ -4,6 +4,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Project,
   ProviderConfig,
   ProviderHealth,
   StreamEvent,
@@ -58,6 +59,12 @@ export interface ProviderState {
   health: Record<string, ProviderHealth>;
 }
 
+/** FTR-003: expected to stay small (unlike conversations), so this is a plain unpaginated
+ * collection with no search/cursor concept — matching the plan's own scope decision. */
+export interface ProjectState {
+  projects: EntityCollection<Project>;
+}
+
 export interface SettingsState {
   workspacePath: string;
   workspace: WorkspaceInfo | null;
@@ -95,6 +102,7 @@ export interface ArkStores {
   transcript: ExternalStore<TranscriptState>;
   generation: ExternalStore<GenerationState>;
   providers: ExternalStore<ProviderState>;
+  projects: ExternalStore<ProjectState>;
   settings: ExternalStore<SettingsState>;
   shell: ExternalStore<ShellState>;
 }
@@ -119,6 +127,9 @@ export function createArkStores(initial?: {
       providers: emptyEntityCollection(),
       models: emptyEntityCollection(),
       health: {},
+    }),
+    projects: createExternalStore<ProjectState>({
+      projects: emptyEntityCollection(),
     }),
     settings: createExternalStore<SettingsState>({
       workspacePath: "",

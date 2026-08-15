@@ -18,7 +18,15 @@ import { downloadText, safeFilename } from "../../lib/download";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
-import type { Conversation, Message, ModelInfo, ProviderConfig, ProviderHealth, SendChatResult } from "../../types/ark";
+import type {
+  Conversation,
+  Message,
+  ModelInfo,
+  Project,
+  ProviderConfig,
+  ProviderHealth,
+  SendChatResult,
+} from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Textarea } from "../../ui/textarea";
@@ -43,6 +51,9 @@ interface ChatViewProps {
   providers: ProviderConfig[];
   models: ModelInfo[];
   providerHealth: Record<string, ProviderHealth>;
+  /** FTR-003: for the project picker in the conversation settings panel — expected to stay
+   * small, so passed as a plain list rather than paginated like conversations. */
+  projects: Project[];
   isLoading: boolean;
   /** UX-007: bumped by an explicit "New Chat"/conversation-select action (see `ShellState`'s own
    * doc comment) — focuses the composer, never on a passive background update. */
@@ -51,6 +62,7 @@ interface ChatViewProps {
   onConversationDeleted: () => void;
   onConversationImported: (conversation: Conversation) => void;
   onConversationRenamed: (conversation: Conversation) => void;
+  onConversationProjectChange: (id: string, projectId: string | null) => Promise<void>;
   /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) rather than
    * this component fetching and applying a result itself — see `useArkController.ts`'s
    * `refreshProviderModels` doc comment. */
@@ -65,12 +77,14 @@ export function ChatView({
   providers,
   models,
   providerHealth,
+  projects,
   isLoading,
   focusComposerSignal,
   onMessagesChange,
   onConversationDeleted,
   onConversationImported,
   onConversationRenamed,
+  onConversationProjectChange,
   onRefreshProviderModels,
   onError,
   onInfo,
@@ -703,6 +717,8 @@ export function ChatView({
           <ConversationSettingsButton
             conversation={conversation}
             provider={provider}
+            projects={projects}
+            onProjectChange={onConversationProjectChange}
             onSettingsSaved={onConversationRenamed}
             onError={onError}
           />
@@ -1021,11 +1037,15 @@ const MAX_MAX_TOKENS = 1_000_000;
 function ConversationSettingsButton({
   conversation,
   provider,
+  projects,
+  onProjectChange,
   onSettingsSaved,
   onError,
 }: {
   conversation?: Conversation;
   provider?: ProviderConfig;
+  projects: Project[];
+  onProjectChange: (id: string, projectId: string | null) => Promise<void>;
   onSettingsSaved: (conversation: Conversation) => void;
   onError: (message: string) => void;
 }) {
@@ -1035,6 +1055,7 @@ function ConversationSettingsButton({
   const [temperatureDraft, setTemperatureDraft] = React.useState("");
   const [maxTokensDraft, setMaxTokensDraft] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  const [projectChanging, setProjectChanging] = React.useState(false);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
@@ -1130,6 +1151,31 @@ function ConversationSettingsButton({
           className="absolute right-0 top-full z-50 mt-1.5 w-80 rounded-lg border border-border bg-popover p-3 shadow-lg"
         >
           <div className="grid gap-3">
+            <label className="grid gap-1.5 text-xs font-medium">
+              Project
+              <select
+                value={conversation.projectId ?? ""}
+                disabled={projectChanging}
+                onChange={async (event) => {
+                  setProjectChanging(true);
+                  try {
+                    await onProjectChange(conversation.id, event.target.value || null);
+                  } finally {
+                    setProjectChanging(false);
+                  }
+                }}
+                className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">No project</option>
+                {projects
+                  .filter((project) => !project.archivedAt || project.id === conversation.projectId)
+                  .map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
             <label className="grid gap-1.5 text-xs font-medium">
               System prompt
               <Textarea

@@ -4,6 +4,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  Project,
   ProviderConfig,
   WorkspaceProtectionStatus,
 } from "../types/ark";
@@ -110,6 +111,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [model],
+    projects: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -185,6 +187,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [],
+    projects: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -265,6 +268,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [],
     models: [],
+    projects: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -424,6 +428,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
     models: [model],
+    projects: [],
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -685,6 +690,24 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     return `${start > 0 ? "…" : ""}${source.slice(start, end)}${end < source.length ? "…" : ""}`;
   }
 
+  // FTR-003: one active project already assigned to a conversation so the picker/precedence UI
+  // has something real to show on load, not just an empty-state.
+  const projects: Project[] = [
+    {
+      id: "fixture-project-research",
+      name: "Research",
+      instructions: "Cite sources for every claim.",
+      defaultProviderId: provider.id,
+      defaultModelId: model.name,
+      defaultTemperature: 0.2,
+      defaultMaxTokens: 4096,
+      archivedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ];
+  conversations[2].projectId = "fixture-project-research";
+
   const bootstrap: AppBootstrap = {
     conversationPage: {
       items: conversations.filter((conversation) => !conversation.archived),
@@ -693,6 +716,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     },
     providers: [provider],
     models: [model],
+    projects,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -766,6 +790,64 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       };
       conversations.unshift(created);
       return created;
+    },
+    setConversationProject: async (id, projectId) => {
+      const conversation = conversations.find((item) => item.id === id);
+      if (!conversation) throw new Error(`fixture: conversation ${id} not found`);
+      if (projectId && !projects.some((project) => project.id === projectId)) {
+        throw new Error(`fixture: project ${projectId} not found`);
+      }
+      conversation.projectId = projectId;
+      return { ...conversation };
+    },
+    listProjects: async () => [...projects],
+    createProject: async (name) => {
+      const created: Project = {
+        id: `fixture-project-${projects.length}`,
+        name,
+        instructions: null,
+        defaultProviderId: null,
+        defaultModelId: null,
+        defaultTemperature: null,
+        defaultMaxTokens: null,
+        archivedAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      projects.push(created);
+      return created;
+    },
+    updateProject: async (input) => {
+      const project = projects.find((item) => item.id === input.id);
+      if (!project) throw new Error(`fixture: project ${input.id} not found`);
+      project.name = input.name;
+      project.instructions = input.instructions ?? null;
+      project.defaultProviderId = input.defaultProviderId ?? null;
+      project.defaultModelId = input.defaultModelId ?? null;
+      project.defaultTemperature = input.defaultTemperature ?? null;
+      project.defaultMaxTokens = input.defaultMaxTokens ?? null;
+      project.updatedAt = new Date().toISOString();
+      return { ...project };
+    },
+    setProjectArchived: async (id, archived) => {
+      const project = projects.find((item) => item.id === id);
+      if (!project) throw new Error(`fixture: project ${id} not found`);
+      project.archivedAt = archived ? new Date().toISOString() : null;
+      return { ...project };
+    },
+    previewProjectDeletion: async (id) => {
+      const project = projects.find((item) => item.id === id);
+      if (!project) throw new Error(`fixture: project ${id} not found`);
+      const conversationCount = conversations.filter((item) => item.projectId === id).length;
+      return { project: { ...project }, conversationCount };
+    },
+    deleteProject: async (id) => {
+      const index = projects.findIndex((item) => item.id === id);
+      if (index === -1) throw new Error(`fixture: project ${id} not found`);
+      projects.splice(index, 1);
+      for (const conversation of conversations) {
+        if (conversation.projectId === id) conversation.projectId = null;
+      }
     },
   });
 }
