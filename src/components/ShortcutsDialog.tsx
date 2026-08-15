@@ -1,21 +1,8 @@
 import * as React from "react";
 import { detectIsMacPlatform, formatShortcutKeys } from "../lib/platform";
+import { SHORTCUTS } from "../lib/shortcuts";
 import { useModalKeyboardBehavior } from "../lib/useModalKeyboardBehavior";
 import { Button } from "../ui/button";
-
-interface ShortcutEntry {
-  keys: string[];
-  description: string;
-}
-
-const SHORTCUTS: ShortcutEntry[] = [
-  { keys: ["Mod", "N"], description: "New chat" },
-  { keys: ["Mod", "F"], description: "Search conversations" },
-  { keys: ["Mod", ","], description: "Open Settings" },
-  { keys: ["Mod", "Enter"], description: "Send message (while composing)" },
-  { keys: ["Escape"], description: "Close the open menu, drawer, or dialog" },
-  { keys: ["Shift", "?"], description: "Show this shortcuts reference" },
-];
 
 interface ShortcutsDialogProps {
   open: boolean;

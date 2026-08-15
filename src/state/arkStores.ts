@@ -12,6 +12,7 @@ import type {
   ThemeMode,
   WorkspaceInfo,
 } from "../types/ark";
+import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "../lib/settingsSections.ts";
 import { createExternalStore, type ExternalStore } from "./externalStore.ts";
 
 export type ActiveView = "chat" | "settings";
@@ -92,6 +93,11 @@ export interface ShellState {
    * toast, which would otherwise strand the user on an empty chat view with no explanation. */
   bootstrapError: AppErrorShape | null;
   view: ActiveView;
+  /** UX: which Settings category is currently shown — lives here (not local `SettingsView`
+   * state) so it survives leaving and returning to Settings within the same app session, the
+   * same "shell store field + patchStore" convention every other cross-visit UI preference in
+   * this store already follows. */
+  settingsSection: SettingsSectionId;
   sidebarCollapsed: boolean;
   rightPanelCollapsed: boolean;
   focusSearchSignal: number;
@@ -162,6 +168,7 @@ export function createArkStores(initial?: {
       booting: true,
       bootstrapError: null,
       view: "chat",
+      settingsSection: DEFAULT_SETTINGS_SECTION,
       sidebarCollapsed: initial?.sidebarCollapsed ?? false,
       rightPanelCollapsed: initial?.rightPanelCollapsed ?? false,
       focusSearchSignal: 0,

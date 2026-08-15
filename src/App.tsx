@@ -259,8 +259,11 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
   const projectState = useStore(stores.projects);
   const personaState = useStore(stores.personas);
   const settings = useStore(stores.settings);
+  const settingsSection = useStoreSelector(stores.shell, (state) => state.settingsSection);
   return (
     <SettingsView
+      settingsSection={settingsSection}
+      onSettingsSectionChange={controller.setSettingsSection}
       workspacePath={settings.workspacePath}
       providers={entityList(providerState.providers)}
       models={entityList(providerState.models)}

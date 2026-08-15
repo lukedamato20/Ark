@@ -15,7 +15,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Shield,
   SlidersHorizontal,
   Sun,
   Trash2,
@@ -25,8 +24,12 @@ import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { downloadText, safeFilename } from "../../lib/download";
+import { detectIsMacPlatform, formatShortcutKeys } from "../../lib/platform";
+import { useBreakpoint } from "../../lib/useBreakpoint";
 import { validateNumberInput } from "../../lib/numberField";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
+import { SETTINGS_SECTIONS, type SettingsSectionId } from "../../lib/settingsSections";
+import { SHORTCUTS } from "../../lib/shortcuts";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
   AppErrorShape,
@@ -64,6 +67,8 @@ import { Textarea } from "../../ui/textarea";
 import { DiagnosticsPanel } from "../diagnostics/DiagnosticsPanel";
 
 interface SettingsViewProps {
+  settingsSection: SettingsSectionId;
+  onSettingsSectionChange: (section: SettingsSectionId) => void;
   workspacePath: string;
   providers: ProviderConfig[];
   models: ModelInfo[];
@@ -95,6 +100,8 @@ interface SettingsViewProps {
 }
 
 export function SettingsView({
+  settingsSection,
+  onSettingsSectionChange,
   workspacePath,
   providers,
   models,
@@ -121,6 +128,8 @@ export function SettingsView({
   onError,
 }: SettingsViewProps) {
   const client = useArkClient();
+  const breakpoint = useBreakpoint();
+  const isDesktopNav = breakpoint === "desktop";
   const visibleProviders = React.useMemo(
     () => providers.filter((candidate) => providerIsVisible(candidate.providerType)),
     [providers],
@@ -175,6 +184,9 @@ export function SettingsView({
   const provider = visibleProviders.find((candidate) => candidate.id === selectedProviderId) ?? visibleProviders[0];
   const health = providerHealth[provider?.id ?? ""] ?? null;
   const providerModels = models.filter((m) => m.providerId === (provider?.id ?? ""));
+  // ARC-003: capability-gated (pull support), not a hardcoded providerType check — see
+  // `OllamaModelsPanel`'s own doc comment on the same convention.
+  const modelPullProviders = visibleProviders.filter((candidate) => candidate.capabilities.modelPull);
 
   React.useEffect(() => {
     if (visibleProviders.length > 0 && !visibleProviders.some((candidate) => candidate.id === selectedProviderId)) {
@@ -253,115 +265,21 @@ export function SettingsView({
     }
   }
 
-  return (
-    <main aria-label="Settings" className="flex min-w-0 flex-1 flex-col">
-      <header className="flex h-14 items-center justify-between border-b border-border px-4">
-        <div className="flex items-center gap-3">
-          <Button size="icon" variant="ghost" onClick={onBack} aria-label="Back to chat">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <div>
-            <h1 className="text-sm font-semibold">Settings</h1>
-            <p className="text-xs text-muted-foreground">Control center for local runtime, storage, and privacy.</p>
-          </div>
-        </div>
-        <Badge tone={health?.isReachable ? "success" : "warning"}>{health?.status ?? "unknown"}</Badge>
-      </header>
+  const activeSectionMeta = SETTINGS_SECTIONS.find((section) => section.id === settingsSection) ?? SETTINGS_SECTIONS[0];
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <div className="mx-auto grid max-w-4xl gap-4">
+  let sectionContent: React.ReactNode;
+  switch (settingsSection) {
+    case "ai-behavior":
+      sectionContent = (
+        <>
           <Panel className="p-4">
-            <div className="mb-4 flex items-center gap-2">
-              <Sun className="h-4 w-4" />
-              <h2 className="text-sm font-semibold">Appearance</h2>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant={theme === "dark" ? "primary" : "secondary"}
-                aria-pressed={theme === "dark"}
-                onClick={() => onThemeChange("dark")}
-              >
-                <Moon className="h-4 w-4" />
-                Dark
-              </Button>
-              <Button
-                variant={theme === "light" ? "primary" : "secondary"}
-                aria-pressed={theme === "light"}
-                onClick={() => onThemeChange("light")}
-              >
-                <Sun className="h-4 w-4" />
-                Light
-              </Button>
-            </div>
+            <p className="text-sm text-muted-foreground">
+              A conversation&rsquo;s own settings always win. If it hasn&rsquo;t set something, Ark falls back to its
+              assigned persona, then its assigned project, then the provider&rsquo;s own default — in that order. Assign
+              a persona or project below, or open a conversation&rsquo;s own settings from the chat header to override
+              any of this for just that conversation.
+            </p>
           </Panel>
-
-          <Panel className="p-4">
-            <div className="mb-4 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <SlidersHorizontal className="h-4 w-4" />
-                <h2 className="text-sm font-semibold">Provider</h2>
-              </div>
-              {visibleProviders.length > 1 && (
-                <div
-                  role="tablist"
-                  aria-label="Providers"
-                  className="flex items-center gap-1 rounded-md border border-border bg-muted/40 p-0.5"
-                >
-                  {visibleProviders.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      role="tab"
-                      id={`provider-tab-${p.id}`}
-                      aria-selected={p.id === selectedProviderId}
-                      aria-controls={`provider-tabpanel-${p.id}`}
-                      onClick={() => setSelectedProviderId(p.id)}
-                      className={cn(
-                        "rounded px-2.5 py-1 text-xs font-medium transition-colors",
-                        p.id === selectedProviderId
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {p.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div
-              role="tabpanel"
-              id={provider ? `provider-tabpanel-${provider.id}` : undefined}
-              aria-labelledby={provider ? `provider-tab-${provider.id}` : undefined}
-            >
-              {provider?.providerType === "built_in" ? (
-                <BuiltInRuntimeForm
-                  key={provider.id}
-                  status={builtInStatus}
-                  onStatusChange={onBuiltInStatusChange}
-                  modelPath={builtInModelPath}
-                  onModelPathChange={onBuiltInModelPathChange}
-                  onRefreshProviderModels={onRefreshProviderModels}
-                  onError={onError}
-                />
-              ) : provider ? (
-                <ProviderForm
-                  key={provider.id}
-                  provider={provider}
-                  models={providerModels}
-                  health={health}
-                  onProviderSaved={onProviderSaved}
-                  onRefreshProviderModels={onRefreshProviderModels}
-                  onError={onError}
-                  secretStoreStatus={secretStoreStatus}
-                  onSecretStoreRetry={checkSecretStore}
-                />
-              ) : (
-                <p className="text-sm text-muted-foreground">No providers configured.</p>
-              )}
-            </div>
-          </Panel>
-
           <ProjectsPanel
             projects={projects}
             providers={providers}
@@ -370,19 +288,135 @@ export function SettingsView({
             onProjectDeleted={onProjectDeleted}
             onError={onError}
           />
-
           <PersonasPanel
             personas={personas}
             onPersonaSaved={onPersonaSaved}
             onPersonaDeleted={onPersonaDeleted}
             onError={onError}
           />
-
+        </>
+      );
+      break;
+    case "providers":
+      sectionContent = (
+        <Panel className="p-4">
+          <div className="mb-4 flex items-center justify-end gap-2">
+            {visibleProviders.length > 1 && (
+              <div
+                role="tablist"
+                aria-label="Providers"
+                className="flex items-center gap-1 rounded-md border border-border bg-muted/40 p-0.5"
+              >
+                {visibleProviders.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="tab"
+                    id={`provider-tab-${p.id}`}
+                    aria-selected={p.id === selectedProviderId}
+                    aria-controls={`provider-tabpanel-${p.id}`}
+                    onClick={() => setSelectedProviderId(p.id)}
+                    className={cn(
+                      "rounded px-2.5 py-1 text-xs font-medium transition-colors",
+                      p.id === selectedProviderId
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div
+            role="tabpanel"
+            id={provider ? `provider-tabpanel-${provider.id}` : undefined}
+            aria-labelledby={provider ? `provider-tab-${provider.id}` : undefined}
+          >
+            {provider?.providerType === "built_in" ? (
+              <BuiltInRuntimeForm
+                key={provider.id}
+                status={builtInStatus}
+                onStatusChange={onBuiltInStatusChange}
+                modelPath={builtInModelPath}
+                onModelPathChange={onBuiltInModelPathChange}
+                onRefreshProviderModels={onRefreshProviderModels}
+                onError={onError}
+              />
+            ) : provider ? (
+              <ProviderForm
+                key={provider.id}
+                provider={provider}
+                models={providerModels}
+                onProviderSaved={onProviderSaved}
+                onRefreshProviderModels={onRefreshProviderModels}
+                onError={onError}
+                secretStoreStatus={secretStoreStatus}
+                onSecretStoreRetry={checkSecretStore}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">No providers configured.</p>
+            )}
+          </div>
+        </Panel>
+      );
+      break;
+    case "models":
+      sectionContent =
+        modelPullProviders.length === 0 ? (
+          <Panel className="p-6 text-center">
+            <p className="text-sm text-muted-foreground">No Ollama provider configured yet.</p>
+            <Button variant="secondary" className="mt-3" onClick={() => onSettingsSectionChange("providers")}>
+              Go to Providers
+            </Button>
+          </Panel>
+        ) : (
+          <>
+            {modelPullProviders.map((p) => (
+              <OllamaModelsPanel
+                key={p.id}
+                provider={p}
+                models={models.filter((model) => model.providerId === p.id)}
+                health={providerHealth[p.id] ?? null}
+                onRefreshProviderModels={onRefreshProviderModels}
+                onError={onError}
+              />
+            ))}
+          </>
+        );
+      break;
+    case "appearance":
+      sectionContent = (
+        <Panel className="p-4">
+          <div className="flex gap-2">
+            <Button
+              variant={theme === "dark" ? "primary" : "secondary"}
+              aria-pressed={theme === "dark"}
+              onClick={() => onThemeChange("dark")}
+            >
+              <Moon className="h-4 w-4" />
+              Dark
+            </Button>
+            <Button
+              variant={theme === "light" ? "primary" : "secondary"}
+              aria-pressed={theme === "light"}
+              onClick={() => onThemeChange("light")}
+            >
+              <Sun className="h-4 w-4" />
+              Light
+            </Button>
+          </div>
+        </Panel>
+      );
+      break;
+    case "shortcuts":
+      sectionContent = <ShortcutsPanel />;
+      break;
+    case "storage":
+      sectionContent = (
+        <>
           <Panel className="p-4">
-            <div className="mb-2 flex items-center gap-2">
-              <Database className="h-4 w-4" />
-              <h2 className="text-sm font-semibold">Storage</h2>
-            </div>
             <div className="grid gap-3">
               <div className="grid gap-1.5 text-sm">
                 <span>Workspace folder</span>
@@ -555,29 +589,18 @@ export function SettingsView({
               </div>
             </div>
           </Panel>
-
           <BackupRestorePanel onError={onError} />
-
           <DataPortabilityPanel projects={projects} onError={onError} />
-
-          <DiagnosticsBundlePanel
-            onError={onError}
-            crashCaptureEnabled={crashCaptureEnabled}
-            onCrashCaptureEnabledChange={onCrashCaptureEnabledChange}
-          />
-
-          <CompanionApiPanel onError={onError} />
-
-          <ToolsPanel onError={onError} />
-
+        </>
+      );
+      break;
+    case "privacy":
+      sectionContent = (
+        <>
           <Panel className="p-4">
-            <div className="mb-2 flex items-center gap-2">
-              <Shield className="h-4 w-4" />
-              <h2 className="text-sm font-semibold">Privacy</h2>
-            </div>
             <p className="text-sm text-muted-foreground">
-              Chats stay local and use the configured provider endpoints. Cloud providers, telemetry, tools, memory, and
-              document chat are not enabled in this milestone.
+              Chats stay local and use the configured provider endpoints. Cloud providers and telemetry are not enabled
+              in this milestone.
             </p>
             <div
               className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2"
@@ -607,8 +630,62 @@ export function SettingsView({
               </div>
             </div>
           </Panel>
-
+          <ToolsPanel onError={onError} />
+          <CompanionApiPanel onError={onError} />
+        </>
+      );
+      break;
+    case "advanced":
+      sectionContent = (
+        <>
+          <DiagnosticsBundlePanel
+            onError={onError}
+            crashCaptureEnabled={crashCaptureEnabled}
+            onCrashCaptureEnabledChange={onCrashCaptureEnabledChange}
+          />
           <DiagnosticsPanel provider={provider} selectedModel={provider?.defaultModelId ?? ""} onError={onError} />
+        </>
+      );
+      break;
+  }
+
+  return (
+    <main aria-label="Settings" className="flex min-w-0 flex-1 flex-col">
+      <header className="flex h-14 items-center justify-between border-b border-border px-4">
+        <div className="flex items-center gap-3">
+          <Button size="icon" variant="ghost" onClick={onBack} aria-label="Back to chat">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h1 className="text-sm font-semibold">Settings</h1>
+            <p className="text-xs text-muted-foreground">Control center for local runtime, storage, and privacy.</p>
+          </div>
+        </div>
+        <Badge tone={health?.isReachable ? "success" : "warning"}>{health?.status ?? "unknown"}</Badge>
+      </header>
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {isDesktopNav && (
+          <SettingsNav active={settingsSection} onSelect={onSettingsSectionChange} orientation="vertical" />
+        )}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {!isDesktopNav && (
+            <SettingsNav active={settingsSection} onSelect={onSettingsSectionChange} orientation="horizontal" />
+          )}
+          <div
+            id="settings-panel"
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${settingsSection}`}
+            className="min-h-0 flex-1 overflow-y-auto p-5"
+          >
+            <div className="mx-auto grid max-w-3xl gap-4">
+              <div>
+                <h2 className="text-base font-semibold">{activeSectionMeta.label}</h2>
+                <p className="text-sm text-muted-foreground">{activeSectionMeta.description}</p>
+              </div>
+              {sectionContent}
+            </div>
+          </div>
         </div>
       </div>
     </main>
@@ -619,6 +696,82 @@ const MIN_PROJECT_TEMPERATURE = 0;
 const MAX_PROJECT_TEMPERATURE = 2;
 const MIN_PROJECT_MAX_TOKENS = 1;
 const MAX_PROJECT_MAX_TOKENS = 1_000_000;
+
+/**
+ * UX: the Settings navigation itself — the single place that renders `SETTINGS_SECTIONS`, so a
+ * category can never appear in one layout (desktop/narrow) without the other. `orientation`
+ * switches between a docked left column (desktop) and a horizontal scrollable strip (narrower
+ * widths, via `useBreakpoint` in the parent) — the same `role="tablist"`/`role="tab"` semantics
+ * either way, just a different `aria-orientation` and layout direction.
+ */
+function SettingsNav({
+  active,
+  onSelect,
+  orientation,
+}: {
+  active: SettingsSectionId;
+  onSelect: (section: SettingsSectionId) => void;
+  orientation: "vertical" | "horizontal";
+}) {
+  return (
+    <nav
+      role="tablist"
+      aria-label="Settings sections"
+      aria-orientation={orientation}
+      className={cn(
+        "shrink-0 gap-0.5",
+        orientation === "vertical"
+          ? "flex w-56 flex-col overflow-y-auto border-r border-border p-3"
+          : "flex gap-1 overflow-x-auto border-b border-border px-3 py-2",
+      )}
+    >
+      {SETTINGS_SECTIONS.map((section) => (
+        <button
+          key={section.id}
+          type="button"
+          role="tab"
+          id={`settings-tab-${section.id}`}
+          aria-selected={section.id === active}
+          aria-controls="settings-panel"
+          onClick={() => onSelect(section.id)}
+          className={cn(
+            "shrink-0 whitespace-nowrap rounded-md px-3 text-left text-sm font-medium transition-colors",
+            orientation === "vertical" ? "py-2" : "py-1.5",
+            section.id === active
+              ? "bg-accent text-accent-foreground"
+              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+          )}
+        >
+          {section.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/** UX: Settings' Keyboard Shortcuts section — renders `SHORTCUTS` (`src/lib/shortcuts.ts`), the
+ * same registry `useArkController.ts`'s global keydown handler matches against and
+ * `ShortcutsDialog` (`Shift+?`) also renders, so this list can never drift from what actually
+ * fires. */
+function ShortcutsPanel() {
+  const isMac = React.useMemo(() => detectIsMacPlatform(navigator.userAgent), []);
+  return (
+    <Panel className="p-4">
+      <dl className="grid gap-2">
+        {SHORTCUTS.map((shortcut) => (
+          <div key={shortcut.id} className="flex items-center justify-between gap-3 text-sm">
+            <dt className="text-muted-foreground">{shortcut.description}</dt>
+            <dd>
+              <kbd className="rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
+                {formatShortcutKeys(shortcut.keys, isMac)}
+              </kbd>
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Panel>
+  );
+}
 
 /**
  * FTR-003: a project groups conversations under a shared name, instructions, and default
@@ -1362,7 +1515,6 @@ function PersonaEditor({
 function ProviderForm({
   provider,
   models,
-  health,
   onProviderSaved,
   onRefreshProviderModels,
   onError,
@@ -1371,7 +1523,6 @@ function ProviderForm({
 }: {
   provider: ProviderConfig;
   models: ModelInfo[];
-  health: ProviderHealth | null;
   onProviderSaved: (provider: ProviderConfig) => void;
   onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
@@ -1724,17 +1875,13 @@ function ProviderForm({
           Refresh models
         </Button>
       </div>
-      {/* ARC-003: gated on the capability (pull/delete support), not a hardcoded providerType
-          check — a future provider type that also supports model pull/delete would show this
-          panel without any change here. */}
+      {/* ARC-003: capability-gated (pull support) — installed-model management itself now lives
+          in its own Settings → Models section rather than nested here, since it's meaningful
+          standalone destination-level functionality, not provider-configuration detail. */}
       {provider.capabilities.modelPull && (
-        <OllamaModelsPanel
-          provider={provider}
-          models={models}
-          health={health}
-          onRefreshProviderModels={onRefreshProviderModels}
-          onError={onError}
-        />
+        <p className="text-xs text-muted-foreground">
+          Manage installed models in <span className="font-medium text-foreground">Settings → Models</span>.
+        </p>
       )}
     </div>
   );

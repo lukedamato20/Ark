@@ -1,5 +1,7 @@
 import * as React from "react";
 import { getErrorMessage, normalizeError } from "../lib/arkErrors";
+import type { SettingsSectionId } from "../lib/settingsSections";
+import { findShortcut, matchesShortcut } from "../lib/shortcuts";
 import { useArkClient } from "../lib/useArkClient";
 import {
   entityCollection,
@@ -67,6 +69,7 @@ export interface ArkController {
   setBuiltInStatus: (status: BuiltInRuntimeStatus) => void;
   setWorkspace: (workspace: WorkspaceInfo) => void;
   setView: (view: ActiveView) => void;
+  setSettingsSection: (section: SettingsSectionId) => void;
   toggleSidebar: () => void;
   toggleRightPanel: () => void;
   openSearch: () => void;
@@ -799,6 +802,10 @@ export function useArkController(): ArkController {
   }, [stores]);
 
   const setView = React.useCallback((view: ActiveView) => patchStore(stores.shell, { view }), [stores]);
+  const setSettingsSection = React.useCallback(
+    (settingsSection: SettingsSectionId) => patchStore(stores.shell, { settingsSection }),
+    [stores],
+  );
   const toggleSidebar = React.useCallback(
     () => patchStore(stores.shell, { sidebarCollapsed: !stores.shell.getSnapshot().sidebarCollapsed }),
     [stores],
@@ -829,21 +836,20 @@ export function useArkController(): ArkController {
       // UX-007: "?" (Shift+/ on most layouts, but browsers already report it as `event.key ===
       // "?"`) is a normal typable character, unlike the Mod-prefixed shortcuts below — it must
       // not fire while the user is typing it into an editable field.
-      if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target)) {
+      if (matchesShortcut(event, findShortcut("showShortcuts").keys) && !isEditableTarget(event.target)) {
         event.preventDefault();
         setShortcutsOpen(true);
         return;
       }
 
-      const modifier = event.metaKey || event.ctrlKey;
-      if (!modifier || event.altKey || event.shiftKey || event.isComposing) return;
-      if (event.key.toLowerCase() === "n") {
+      if (event.isComposing) return;
+      if (matchesShortcut(event, findShortcut("newChat").keys)) {
         event.preventDefault();
         void createConversation();
-      } else if (event.key.toLowerCase() === "f") {
+      } else if (matchesShortcut(event, findShortcut("search").keys)) {
         event.preventDefault();
         openSearch();
-      } else if (event.key === ",") {
+      } else if (matchesShortcut(event, findShortcut("settings").keys)) {
         event.preventDefault();
         setView("settings");
       }
@@ -881,6 +887,7 @@ export function useArkController(): ArkController {
       setBuiltInStatus,
       setWorkspace,
       setView,
+      setSettingsSection,
       toggleSidebar,
       toggleRightPanel,
       openSearch,
@@ -917,6 +924,7 @@ export function useArkController(): ArkController {
       setError,
       setInfo,
       setMessages,
+      setSettingsSection,
       setShortcutsOpen,
       setView,
       setWorkspace,
