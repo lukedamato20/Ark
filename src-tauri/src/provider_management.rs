@@ -544,6 +544,7 @@ mod tests {
                 observability_log: std::sync::Arc::new(Mutex::new(
                     crate::observability::DiagnosticsLog::new(),
                 )),
+                companion_api: Mutex::new(None),
             },
             path,
         )

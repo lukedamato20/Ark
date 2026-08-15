@@ -34,6 +34,7 @@ const productionSources = [
 assert(secretStore.includes("pub struct SecretValue(String);"), "raw secrets must have a dedicated non-serializable type");
 assert(!/derive\([^)]*(?:Debug|Serialize)[^)]*\)\s*pub struct SecretValue/.test(secretStore), "SecretValue must not implement Debug or Serialize");
 assert(!commands.includes("read_provider_secret"), "IPC must not expose raw-secret reads");
+assert(!commands.includes("read_companion_api_token"), "IPC must not expose raw companion API token reads");
 assert(!arkClient.includes("getProviderSecret("), "ArkClient must not expose raw-secret reads");
 assert(arkClient.includes("getProviderSecretMetadata("), "ArkClient must expose metadata-only reads");
 

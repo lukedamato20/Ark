@@ -11,6 +11,7 @@ import {
   Info,
   Loader2,
   Moon,
+  Network,
   Plus,
   RefreshCw,
   Save,
@@ -30,6 +31,7 @@ import type {
   AppErrorShape,
   BackupResult,
   BuiltInRuntimeStatus,
+  CompanionApiStatus,
   DiagnosticsBundle,
   ModelInfo,
   OllamaPullProgress,
@@ -544,6 +546,8 @@ export function SettingsView({
             crashCaptureEnabled={crashCaptureEnabled}
             onCrashCaptureEnabledChange={onCrashCaptureEnabledChange}
           />
+
+          <CompanionApiPanel onError={onError} />
 
           <Panel className="p-4">
             <div className="mb-2 flex items-center gap-2">
@@ -1985,6 +1989,122 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
             </p>
           )}
         </div>
+      </div>
+    </Panel>
+  );
+}
+
+function CompanionApiPanel({ onError }: { onError: (message: string) => void }) {
+  const client = useArkClient();
+  const [status, setStatus] = React.useState<CompanionApiStatus | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [toggling, setToggling] = React.useState(false);
+  const [regenerating, setRegenerating] = React.useState(false);
+  const [revealedToken, setRevealedToken] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    client
+      .getCompanionApiStatus()
+      .then((next) => {
+        if (!cancelled) setStatus(next);
+      })
+      .catch((error) => onError(getErrorMessage(error)))
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function toggle() {
+    if (!status) return;
+    setToggling(true);
+    try {
+      setStatus(await client.setCompanionApiEnabled(!status.enabled));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setToggling(false);
+    }
+  }
+
+  async function regenerate() {
+    setRegenerating(true);
+    try {
+      const reveal = await client.regenerateCompanionApiToken();
+      setStatus(reveal.status);
+      setRevealedToken(reveal.token);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Network className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Companion API</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        A local API for integrations and the future mobile companion. Off by default. Loopback (this device) only —
+        network/LAN pairing is not available yet. Every request requires the bearer token below; there is no
+        unauthenticated route, including health checks.
+      </p>
+      <div className="mt-3 grid gap-3">
+        {loading ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading status…
+          </div>
+        ) : (
+          status && (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={status.running ? "success" : "muted"}>{status.running ? "running" : "stopped"}</Badge>
+                {status.running && status.port && (
+                  <span className="text-xs text-muted-foreground">http://127.0.0.1:{status.port}</span>
+                )}
+                <Button variant="secondary" onClick={() => void toggle()} disabled={toggling} className="ml-auto">
+                  {toggling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {status.enabled ? "Disable" : "Enable"}
+                </Button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+                <span className="text-xs text-muted-foreground">
+                  {status.tokenConfigured ? "A bearer token is configured." : "No bearer token generated yet."}
+                </span>
+                <Button
+                  variant="secondary"
+                  onClick={() => void regenerate()}
+                  disabled={regenerating}
+                  className="ml-auto"
+                >
+                  {regenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  {status.tokenConfigured ? "Regenerate token" : "Generate token"}
+                </Button>
+              </div>
+
+              {revealedToken && (
+                <div className="grid gap-2 rounded-md border border-warning/50 bg-warning/10 p-3" role="alert">
+                  <div className="text-sm font-medium">Save this token now</div>
+                  <p className="text-xs text-muted-foreground">
+                    Ark shows it once and does not store a second recoverable copy. The previous token, if any, stops
+                    working immediately.
+                  </p>
+                  <code className="select-all break-all rounded bg-background p-2 text-xs">{revealedToken}</code>
+                  <Button variant="secondary" onClick={() => setRevealedToken(null)}>
+                    I saved this token
+                  </Button>
+                </div>
+              )}
+            </>
+          )
+        )}
       </div>
     </Panel>
   );

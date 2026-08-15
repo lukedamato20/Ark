@@ -1237,6 +1237,7 @@ mod tests {
                 observability_log: Arc::new(
                     Mutex::new(crate::observability::DiagnosticsLog::new()),
                 ),
+                companion_api: Mutex::new(None),
             },
             path,
         )

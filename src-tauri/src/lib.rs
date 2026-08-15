@@ -1,6 +1,7 @@
 mod backup;
 mod chat;
 mod commands;
+mod companion_api;
 mod config;
 #[cfg(test)]
 mod contract;
@@ -36,14 +37,15 @@ use commands::{
     edit_user_message, enable_workspace_encryption, export_conversation_json,
     export_conversation_markdown, export_diagnostics_bundle, export_workspace_json,
     export_workspace_markdown, get_app_bootstrap, get_assistant_alternatives,
-    get_built_in_runtime_status, get_conversation_messages, get_message,
+    get_built_in_runtime_status, get_companion_api_status, get_conversation_messages, get_message,
     get_provider_secret_metadata, get_secret_store_status, get_workspace_protection_status,
     import_conversation_json, import_workspace_json, keep_partial_message, list_conversations,
     list_projects, preview_conversation_import, preview_project_deletion, preview_workspace_import,
     preview_workspace_restore, pull_ollama_model, refresh_models, regenerate_assistant_message,
-    rename_conversation, reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
-    retry_workspace_open, rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle,
-    send_chat_message, set_branch_name, set_conversation_archived, set_conversation_pinned,
+    regenerate_companion_api_token, rename_conversation, reset_workspace, restore_workspace_backup,
+    restore_workspace_recovery_key, retry_workspace_open, rotate_workspace_encryption,
+    run_diagnostics, save_diagnostics_bundle, send_chat_message, set_branch_name,
+    set_companion_api_enabled, set_conversation_archived, set_conversation_pinned,
     set_conversation_project, set_project_archived, set_workspace, start_built_in_runtime,
     start_pending_stream, stop_built_in_runtime, switch_active_branch,
     update_conversation_settings, update_device_settings, update_project, update_provider,
@@ -92,6 +94,9 @@ pub struct AppState {
     /// same reason as `sidecar` — the panic hook installed in `run()` needs a handle to it that
     /// outlives any single command invocation.
     pub(crate) observability_log: Arc<Mutex<observability::DiagnosticsLog>>,
+    /// FTR-010: `Some` exactly while the loopback companion API listener is running. Disabled by
+    /// default and started only by an explicit `set_companion_api_enabled(true)` command.
+    pub(crate) companion_api: Mutex<Option<companion_api::RunningCompanionApi>>,
 }
 
 impl Drop for AppState {
@@ -110,6 +115,11 @@ impl Drop for AppState {
                     "Failed to stop managed runtime during shutdown: {}",
                     failure.message
                 );
+            }
+        }
+        if let Ok(mut running) = self.companion_api.lock() {
+            if let Some(handle) = running.take() {
+                handle.stop();
             }
         }
     }
@@ -229,6 +239,7 @@ pub fn run() {
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: Arc::new(Mutex::new(diagnostics_log)),
+                companion_api: Mutex::new(None),
             });
 
             Ok(())
@@ -288,6 +299,9 @@ pub fn run() {
             export_workspace_markdown,
             preview_workspace_import,
             import_workspace_json,
+            get_companion_api_status,
+            set_companion_api_enabled,
+            regenerate_companion_api_token,
             import_conversation_json,
             preview_conversation_import,
             cancel_import,

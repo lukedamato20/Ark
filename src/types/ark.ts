@@ -444,3 +444,15 @@ export interface WorkspaceImportResult {
   importedCount: number;
   skippedCount: number;
 }
+
+export interface CompanionApiStatus {
+  enabled: boolean;
+  running: boolean;
+  port?: number | null;
+  tokenConfigured: boolean;
+}
+
+export interface CompanionApiTokenReveal {
+  token: string;
+  status: CompanionApiStatus;
+}

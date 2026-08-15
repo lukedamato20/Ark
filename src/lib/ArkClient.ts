@@ -11,6 +11,8 @@ import type {
   DeviceSettings,
   DiagnosticsBundle,
   DiagnosticsResult,
+  CompanionApiStatus,
+  CompanionApiTokenReveal,
   ImportConversationPreview,
   ImportConversationResult,
   ImportProgressEvent,
@@ -222,6 +224,14 @@ export interface ArkClient {
    * in the bundle is skipped, matching the preview's per-entry include choice. */
   importWorkspaceJson(json: string, includeConversationIds: string[]): Promise<WorkspaceImportResult>;
 
+  /** FTR-010: the local companion/integration API — disabled by default, loopback-only in this
+   * build (paired-LAN mode depends on MOB-009's device pairing, not yet built). */
+  getCompanionApiStatus(): Promise<CompanionApiStatus>;
+  setCompanionApiEnabled(enabled: boolean): Promise<CompanionApiStatus>;
+  /** Returns the new bearer token exactly once — it is never retrievable again after this call,
+   * matching the workspace-encryption recovery-key convention. */
+  regenerateCompanionApiToken(): Promise<CompanionApiTokenReveal>;
+
   getBuiltInRuntimeStatus(): Promise<BuiltInRuntimeStatus>;
   startBuiltInRuntime(modelPath: string, modelSource: string, modelLicense: string): Promise<BuiltInRuntimeStatus>;
   stopBuiltInRuntime(): Promise<void>;
@@ -413,6 +423,10 @@ export function createTauriArkClient(): ArkClient {
     importWorkspaceJson: (json, includeConversationIds) =>
       invoke<WorkspaceImportResult>("import_workspace_json", { json, includeConversationIds }),
 
+    getCompanionApiStatus: () => invoke<CompanionApiStatus>("get_companion_api_status"),
+    setCompanionApiEnabled: (enabled) => invoke<CompanionApiStatus>("set_companion_api_enabled", { enabled }),
+    regenerateCompanionApiToken: () => invoke<CompanionApiTokenReveal>("regenerate_companion_api_token"),
+
     getBuiltInRuntimeStatus: () => invoke<BuiltInRuntimeStatus>("get_built_in_runtime_status"),
     startBuiltInRuntime: (modelPath, modelSource, modelLicense) =>
       invoke<BuiltInRuntimeStatus>("start_built_in_runtime", { modelPath, modelSource, modelLicense }),
@@ -527,6 +541,15 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     exportWorkspaceMarkdown: notImplemented("exportWorkspaceMarkdown"),
     previewWorkspaceImport: notImplemented("previewWorkspaceImport"),
     importWorkspaceJson: notImplemented("importWorkspaceJson"),
+
+    getCompanionApiStatus: async () => ({
+      enabled: false,
+      running: false,
+      port: null,
+      tokenConfigured: false,
+    }),
+    setCompanionApiEnabled: notImplemented("setCompanionApiEnabled"),
+    regenerateCompanionApiToken: notImplemented("regenerateCompanionApiToken"),
 
     getBuiltInRuntimeStatus: async () => ({
       running: false,

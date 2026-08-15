@@ -205,6 +205,8 @@
     "OllamaPullProgress": ["providerId", "modelName", "status", "total", "completed", "digest", "error"],
     "WorkspaceImportPreviewEntry": ["conversationId", "title", "messageCount", "duplicateOfLocalId"],
     "WorkspaceImportPreview": ["scope", "entries", "providerMappings"],
-    "WorkspaceImportResult": ["importedCount", "skippedCount"]
+    "WorkspaceImportResult": ["importedCount", "skippedCount"],
+    "CompanionApiStatus": ["enabled", "running", "port", "tokenConfigured"],
+    "CompanionApiTokenReveal": ["token", "status"]
   }
 }

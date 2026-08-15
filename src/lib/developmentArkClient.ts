@@ -1,6 +1,7 @@
 import type {
   AppBootstrap,
   BuiltInRuntimeStatus,
+  CompanionApiStatus,
   Conversation,
   Message,
   ModelInfo,
@@ -788,6 +789,13 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
   ];
   conversations[2].projectId = "fixture-project-research";
 
+  const companionApiState: CompanionApiStatus = {
+    enabled: false,
+    running: false,
+    port: null,
+    tokenConfigured: false,
+  };
+
   const bootstrap: AppBootstrap = {
     conversationPage: {
       items: conversations.filter((conversation) => !conversation.archived),
@@ -1002,6 +1010,27 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
         });
       }
       return { importedCount, skippedCount };
+    },
+
+    // FTR-010: in-memory companion API state — enabling generates a token if none exists yet
+    // (matching the real backend's `set_enabled`), disabling stops the "server" but keeps the
+    // token configured for next time, and regenerating always reveals a fresh value once.
+    getCompanionApiStatus: async () => ({ ...companionApiState }),
+    setCompanionApiEnabled: async (enabled) => {
+      if (enabled && !companionApiState.tokenConfigured) {
+        companionApiState.tokenConfigured = true;
+      }
+      companionApiState.enabled = enabled;
+      companionApiState.running = enabled;
+      companionApiState.port = enabled ? 52341 : null;
+      return { ...companionApiState };
+    },
+    regenerateCompanionApiToken: async () => {
+      companionApiState.tokenConfigured = true;
+      return {
+        token: `fixture-token-${Math.random().toString(36).slice(2)}`,
+        status: { ...companionApiState },
+      };
     },
   });
 }

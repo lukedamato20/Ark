@@ -11,6 +11,7 @@ use crate::chat::{
     BranchAlternative, Conversation, ConversationPage, Message, SendChatResult, StreamEvent,
 };
 use crate::commands::ImportProgressEvent;
+use crate::companion_api::{CompanionApiStatus, CompanionApiTokenReveal};
 use crate::data_protection::{
     WorkspaceProtectionChange, WorkspaceProtectionMode, WorkspaceProtectionStatus,
 };
@@ -708,6 +709,31 @@ fn workspace_import_result_matches_contract() {
         &WorkspaceImportResult {
             imported_count: 3,
             skipped_count: 1,
+        },
+    );
+}
+
+fn sample_companion_api_status() -> CompanionApiStatus {
+    CompanionApiStatus {
+        enabled: true,
+        running: true,
+        port: Some(51234),
+        token_configured: true,
+    }
+}
+
+#[test]
+fn companion_api_status_matches_contract() {
+    assert_matches_contract("CompanionApiStatus", &sample_companion_api_status());
+}
+
+#[test]
+fn companion_api_token_reveal_matches_contract() {
+    assert_matches_contract(
+        "CompanionApiTokenReveal",
+        &CompanionApiTokenReveal {
+            token: "example-token-value".to_string(),
+            status: sample_companion_api_status(),
         },
     );
 }

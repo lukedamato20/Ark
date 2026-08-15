@@ -8,8 +8,10 @@ use zeroize::Zeroize;
 
 const PROVIDER_SERVICE: &str = "dev.ark.desktop.provider-secret";
 const WORKSPACE_KEY_SERVICE: &str = "dev.ark.desktop.workspace-key";
+const COMPANION_API_TOKEN_SERVICE: &str = "dev.ark.desktop.companion-api-token";
 const REFERENCE_PREFIX: &str = "secret:v1:";
 const WORKSPACE_KEY_REFERENCE_PREFIX: &str = "workspace-key:v1:";
+const COMPANION_API_TOKEN_REFERENCE_PREFIX: &str = "companion-api-token:v1:";
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 
 pub struct SecretValue(String);
@@ -168,11 +170,20 @@ pub(crate) fn new_workspace_key_reference() -> String {
     format!("{WORKSPACE_KEY_REFERENCE_PREFIX}{}", uuid::Uuid::new_v4())
 }
 
+pub(crate) fn new_companion_api_token_reference() -> String {
+    format!(
+        "{COMPANION_API_TOKEN_REFERENCE_PREFIX}{}",
+        uuid::Uuid::new_v4()
+    )
+}
+
 fn validate_reference(reference: &str) -> Result<&'static str, SecretStoreError> {
     let (uuid, service) = if let Some(uuid) = reference.strip_prefix(REFERENCE_PREFIX) {
         (uuid, PROVIDER_SERVICE)
     } else if let Some(uuid) = reference.strip_prefix(WORKSPACE_KEY_REFERENCE_PREFIX) {
         (uuid, WORKSPACE_KEY_SERVICE)
+    } else if let Some(uuid) = reference.strip_prefix(COMPANION_API_TOKEN_REFERENCE_PREFIX) {
+        (uuid, COMPANION_API_TOKEN_SERVICE)
     } else {
         return Err(SecretStoreError::new(
             SecretStoreErrorKind::Invalid,
@@ -218,6 +229,42 @@ pub(crate) fn delete_workspace_key(reference: &str) -> Result<(), AppError> {
 /// function's name, so a raw secret can never be one accidental `#[tauri::command]` away from
 /// reaching the frontend.
 pub(crate) fn read_provider_secret(
+    reference: &str,
+) -> Result<zeroize::Zeroizing<String>, AppError> {
+    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    SystemSecretStore
+        .read(reference)
+        .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
+        .map_err(|error| error.to_app_error())
+}
+
+/// FTR-010: stores a freshly generated companion API bearer token under a new reference —
+/// mirrors `store_workspace_key`'s "create" shape, kept as its own function (rather than reused
+/// directly) so the companion API's storage concern stays self-contained here even though the
+/// underlying keychain call is identical.
+pub(crate) fn store_companion_api_token(reference: &str, token: &str) -> Result<(), AppError> {
+    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    SystemSecretStore
+        .create(reference, SecretValue(token.to_string()))
+        .map_err(|error| error.to_app_error())
+}
+
+/// FTR-010: replaces an existing companion API token's value in place (regeneration) — the
+/// reference itself, and therefore the frontend's `tokenConfigured` signal, is unchanged.
+pub(crate) fn update_companion_api_token(reference: &str, token: &str) -> Result<(), AppError> {
+    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    SystemSecretStore
+        .update(reference, SecretValue(token.to_string()))
+        .map_err(|error| error.to_app_error())
+}
+
+/// FTR-010: reads the companion API's stored bearer token for internal use only — checked
+/// against each inbound request's `Authorization` header by `companion_api.rs`. Never exposed to
+/// the frontend (unlike the one-time reveal returned by `regenerate_companion_api_token` itself,
+/// which is the token's only intentional trip across the IPC boundary) and, like
+/// `read_provider_secret`, deliberately not referenced from `commands/mod.rs` —
+/// `scripts/check-secret-boundaries.mjs` guards both by name.
+pub(crate) fn read_companion_api_token(
     reference: &str,
 ) -> Result<zeroize::Zeroizing<String>, AppError> {
     validate_reference(reference).map_err(|error| error.to_app_error())?;
@@ -584,6 +631,7 @@ mod tests {
             storage_maintenance: AtomicBool::new(false),
             sidecar: Arc::new(Mutex::new(SidecarState::new())),
             observability_log: Arc::new(Mutex::new(crate::observability::DiagnosticsLog::new())),
+            companion_api: Mutex::new(None),
         };
 
         let first = format!("platform-first-{}", uuid::Uuid::new_v4());

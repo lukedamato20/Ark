@@ -651,6 +651,28 @@ pub fn import_workspace_json(
 }
 
 #[tauri::command]
+pub fn get_companion_api_status(
+    app: AppHandle,
+) -> Result<crate::companion_api::CompanionApiStatus, AppError> {
+    crate::companion_api::get_status(&app)
+}
+
+#[tauri::command]
+pub async fn set_companion_api_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<crate::companion_api::CompanionApiStatus, AppError> {
+    crate::companion_api::set_enabled(&app, enabled).await
+}
+
+#[tauri::command]
+pub async fn regenerate_companion_api_token(
+    app: AppHandle,
+) -> Result<crate::companion_api::CompanionApiTokenReveal, AppError> {
+    crate::companion_api::regenerate_token(&app).await
+}
+
+#[tauri::command]
 pub fn import_conversation_json(
     app: AppHandle,
     state: State<'_, AppState>,
