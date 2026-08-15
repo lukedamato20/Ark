@@ -218,6 +218,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `lock_api` | 0.4.14 | MIT OR Apache-2.0 |
 | cargo | `log` | 0.4.33 | MIT OR Apache-2.0 |
 | cargo | `lru-slab` | 0.1.2 | MIT OR Apache-2.0 OR Zlib |
+| cargo | `mac-notification-sys` | 0.6.15 | MIT/Apache-2.0 |
 | cargo | `markup5ever` | 0.38.0 | MIT OR Apache-2.0 |
 | cargo | `memchr` | 2.8.2 | Unlicense OR MIT |
 | cargo | `memoffset` | 0.9.1 | MIT |
@@ -228,6 +229,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `ndk` | 0.9.0 | MIT OR Apache-2.0 |
 | cargo | `ndk-sys` | 0.6.0+11769913 | MIT OR Apache-2.0 |
 | cargo | `new_debug_unreachable` | 1.0.6 | MIT |
+| cargo | `notify-rust` | 4.18.0 | MIT OR Apache-2.0 |
 | cargo | `ntapi` | 0.4.3 | Apache-2.0 OR MIT |
 | cargo | `num` | 0.4.3 | MIT OR Apache-2.0 |
 | cargo | `num_enum` | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 |
@@ -380,11 +382,13 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `tauri-codegen` | 2.6.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-macros` | 2.6.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-plugin` | 2.6.3 | Apache-2.0 OR MIT |
+| cargo | `tauri-plugin-notification` | 2.3.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-plugin-opener` | 2.5.4 | Apache-2.0 OR MIT |
 | cargo | `tauri-runtime` | 2.11.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-runtime-wry` | 2.11.4 | Apache-2.0 OR MIT |
 | cargo | `tauri-utils` | 2.9.3 | Apache-2.0 OR MIT |
 | cargo | `tauri-winres` | 0.3.6 | MIT |
+| cargo | `tauri-winrt-notification` | 0.7.3 | MIT OR Apache-2.0 |
 | cargo | `tempfile` | 3.27.0 | MIT OR Apache-2.0 |
 | cargo | `tendril` | 0.5.0 | MIT OR Apache-2.0 |
 | cargo | `thiserror` | 1.0.69 | MIT OR Apache-2.0 |
@@ -590,6 +594,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | npm | `@rolldown/pluginutils` | 1.0.0-beta.27 | MIT |
 | npm | `@tauri-apps/api` | 2.11.1 | Apache-2.0 OR MIT |
 | npm | `@tauri-apps/cli` | 2.11.4 | Apache-2.0 OR MIT |
+| npm | `@tauri-apps/plugin-notification` | 2.3.3 | MIT OR Apache-2.0 |
 | npm | `@tauri-apps/plugin-opener` | 2.5.4 | MIT OR Apache-2.0 |
 | npm | `@types/babel__core` | 7.20.5 | MIT |
 | npm | `@types/babel__generator` | 7.27.0 | MIT |

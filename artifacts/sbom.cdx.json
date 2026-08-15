@@ -5374,6 +5374,30 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/mac-notification-sys@0.6.15",
+      "name": "mac-notification-sys",
+      "version": "0.6.15",
+      "purl": "pkg:cargo/mac-notification-sys@0.6.15",
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/h4llow3En/mac-notification-sys"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/markup5ever@0.38.0",
       "name": "markup5ever",
       "version": "0.38.0",
@@ -5603,6 +5627,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/mbrubeck/rust-debug-unreachable"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/notify-rust@4.18.0",
+      "name": "notify-rust",
+      "version": "4.18.0",
+      "purl": "pkg:cargo/notify-rust@4.18.0",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/hoodie/notify-rust"
         }
       ],
       "properties": [
@@ -9214,6 +9262,30 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/tauri-plugin-notification@2.3.3",
+      "name": "tauri-plugin-notification",
+      "version": "2.3.3",
+      "purl": "pkg:cargo/tauri-plugin-notification@2.3.3",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/plugins-workspace"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/tauri-plugin-opener@2.5.4",
       "name": "tauri-plugin-opener",
       "version": "2.5.4",
@@ -9347,6 +9419,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/tauri-apps/winres"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/tauri-winrt-notification@0.7.3",
+      "name": "tauri-winrt-notification",
+      "version": "0.7.3",
+      "purl": "pkg:cargo/tauri-winrt-notification@0.7.3",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/winrt-notification"
         }
       ],
       "properties": [
@@ -14291,6 +14387,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/tauri-apps/tauri.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "npm"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40tauri-apps/plugin-notification@2.3.3",
+      "name": "@tauri-apps/plugin-notification",
+      "version": "2.3.3",
+      "purl": "pkg:npm/%40tauri-apps/plugin-notification@2.3.3",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/tauri-apps/plugins-workspace"
         }
       ],
       "properties": [
