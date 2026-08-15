@@ -30,6 +30,7 @@ mod supply_chain;
 mod tool_policy;
 mod tools;
 mod validation;
+mod web_search;
 mod workspace;
 mod workspace_bootstrap;
 
@@ -37,28 +38,29 @@ use commands::{
     attach_text_file, cancel_import, cancel_ollama_pull, cancel_stream, check_disk_space,
     create_conversation, create_note, create_persona, create_project, create_workspace_backup,
     delete_attachment, delete_conversation, delete_note, delete_ollama_model, delete_persona,
-    delete_project, delete_provider_secret, disable_workspace_encryption,
+    delete_project, delete_provider_secret, delete_tool_secret, disable_workspace_encryption,
     discard_interrupted_message, edit_user_message, enable_workspace_encryption,
     export_conversation_json, export_conversation_markdown, export_diagnostics_bundle,
     export_workspace_json, export_workspace_markdown, get_app_bootstrap,
     get_assistant_alternatives, get_attachment_content, get_built_in_runtime_status,
     get_companion_api_status, get_conversation_messages, get_message, get_provider_secret_metadata,
-    get_secret_store_status, get_workspace_protection_status, grant_tool_capability,
-    import_conversation_json, import_workspace_json, keep_partial_message,
+    get_secret_store_status, get_tool_secret_metadata, get_workspace_protection_status,
+    grant_tool_capability, import_conversation_json, import_workspace_json, keep_partial_message,
     list_conversation_attachments, list_conversation_notes, list_conversations,
     list_persona_versions, list_personas, list_projects, list_tool_audit_events, list_tools,
     preview_conversation_import, preview_note_write, preview_persona_deletion,
-    preview_project_deletion, preview_workspace_import, preview_workspace_restore,
-    pull_ollama_model, refresh_models, regenerate_assistant_message,
+    preview_project_deletion, preview_web_search, preview_workspace_import,
+    preview_workspace_restore, pull_ollama_model, refresh_models, regenerate_assistant_message,
     regenerate_companion_api_token, rename_conversation, reset_workspace, restore_workspace_backup,
     restore_workspace_recovery_key, retry_workspace_open, revoke_tool_capability,
-    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, send_chat_message,
-    set_branch_name, set_companion_api_enabled, set_conversation_archived,
+    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, search_web,
+    send_chat_message, set_branch_name, set_companion_api_enabled, set_conversation_archived,
     set_conversation_persona, set_conversation_pinned, set_conversation_project,
     set_persona_archived, set_project_archived, set_workspace, start_built_in_runtime,
     start_pending_stream, stop_built_in_runtime, switch_active_branch,
     update_conversation_settings, update_device_settings, update_note, update_persona,
-    update_project, update_provider, upsert_provider_secret, verify_tool_audit_trail,
+    update_project, update_provider, upsert_provider_secret, upsert_tool_secret,
+    verify_tool_audit_trail,
 };
 use db::Database;
 use errors::AppError;
@@ -342,7 +344,12 @@ pub fn run() {
             pull_ollama_model,
             delete_ollama_model,
             cancel_ollama_pull,
-            check_disk_space
+            check_disk_space,
+            preview_web_search,
+            search_web,
+            upsert_tool_secret,
+            get_tool_secret_metadata,
+            delete_tool_secret
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

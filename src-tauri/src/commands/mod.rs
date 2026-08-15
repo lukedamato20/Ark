@@ -84,6 +84,21 @@ pub struct DeleteNoteRequest {
     pub approve: bool,
 }
 
+/// CMP-004: previews a web search before it runs.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewWebSearchRequest {
+    pub query: String,
+}
+
+/// CMP-004: `approve` mirrors `CreateNoteRequest`'s established shape.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchWebRequest {
+    pub query: String,
+    pub approve: bool,
+}
+
 /// FTR-003: `name` is always sent; every other field independently `None`/blank clears that
 /// project-level default, matching `UpdateConversationSettingsRequest`'s convention — the
 /// frontend always sends its complete current draft, not a partial patch.
@@ -635,6 +650,51 @@ pub fn delete_note(state: State<'_, AppState>, request: DeleteNoteRequest) -> Re
             Ok(())
         }
     }
+}
+
+#[tauri::command]
+pub fn preview_web_search(
+    request: PreviewWebSearchRequest,
+) -> Result<crate::tool_policy::SideEffectPreview, AppError> {
+    let query = crate::validation::validate_search_query(&request.query)?;
+    Ok(crate::web_search::preview_web_search(&query))
+}
+
+#[tauri::command]
+pub async fn search_web(
+    state: State<'_, AppState>,
+    request: SearchWebRequest,
+) -> Result<crate::web_search::WebSearchResult, AppError> {
+    let query = crate::validation::validate_search_query(&request.query)?;
+    match crate::web_search::search_web(&state, query, request.approve).await? {
+        crate::web_search::WebSearchOutcome::ApprovalRequired => Err(approval_required_error()),
+        crate::web_search::WebSearchOutcome::Applied(result) => Ok(result),
+    }
+}
+
+#[tauri::command]
+pub async fn upsert_tool_secret(
+    state: State<'_, AppState>,
+    tool_id: String,
+    secret: String,
+) -> Result<SecretMetadata, AppError> {
+    crate::secret_store::upsert_tool_secret(&state, tool_id, secret).await
+}
+
+#[tauri::command]
+pub async fn get_tool_secret_metadata(
+    state: State<'_, AppState>,
+    tool_id: String,
+) -> Result<Option<SecretMetadata>, AppError> {
+    crate::secret_store::get_tool_secret_metadata(&state, tool_id).await
+}
+
+#[tauri::command]
+pub async fn delete_tool_secret(
+    state: State<'_, AppState>,
+    tool_id: String,
+) -> Result<(), AppError> {
+    crate::secret_store::delete_tool_secret(&state, tool_id).await
 }
 
 #[tauri::command]

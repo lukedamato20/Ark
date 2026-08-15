@@ -123,6 +123,22 @@ pub struct SendChatRequest {
     /// caller to pass an empty array.
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// CMP-004: already-fetched web search results (the frontend calls `search_web` — its own
+    /// preview/approval-gated command — before `sendChatMessage`, since a network call cannot
+    /// happen inside this request's DB transaction). `None` means search was not used for this
+    /// send.
+    #[serde(default)]
+    pub web_search: Option<WebSearchInput>,
+}
+
+/// CMP-004: what the frontend already fetched via `search_web`, threaded through as plain data —
+/// `generation.rs` composes it into the outgoing provider message and provenance record; it
+/// performs no network I/O of its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchInput {
+    pub query: String,
+    pub citations: Vec<crate::web_search::SearchCitation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

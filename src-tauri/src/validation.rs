@@ -266,6 +266,25 @@ pub fn validate_note_content(value: &str) -> Result<String, AppError> {
 pub const MIN_GRANT_TTL_MINUTES: i64 = 1;
 pub const MAX_GRANT_TTL_MINUTES: i64 = 60;
 
+/// CMP-004: a web search query is short by nature — far tighter than a note's 8,000-character
+/// ceiling. Bounds what's sent to Brave and, by extension, what shows up in the preview/audit
+/// paths.
+pub const MAX_SEARCH_QUERY_CHARS: usize = 400;
+
+/// Validates a web search query before it's previewed/sent to Brave Search.
+pub fn validate_search_query(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_input("Search query cannot be empty."));
+    }
+    if trimmed.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Search query must be at most {MAX_SEARCH_QUERY_CHARS} characters."
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Validates a capability grant TTL in minutes.
 pub fn validate_grant_ttl_minutes(value: i64) -> Result<i64, AppError> {
     if !(MIN_GRANT_TTL_MINUTES..=MAX_GRANT_TTL_MINUTES).contains(&value) {
@@ -848,6 +867,33 @@ mod tests {
     fn note_content_accepts_content_at_exactly_the_character_limit() {
         let exact = "a".repeat(MAX_NOTE_CONTENT_CHARS);
         assert!(validate_note_content(&exact).is_ok());
+    }
+
+    #[test]
+    fn search_query_trims_and_rejects_blank() {
+        assert_eq!(
+            validate_search_query("  latest rust release  ").unwrap(),
+            "latest rust release"
+        );
+        assert_eq!(
+            validate_search_query("   ").unwrap_err().code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn search_query_rejects_over_the_character_limit() {
+        let oversized = "a".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+        assert_eq!(
+            validate_search_query(&oversized).unwrap_err().code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn search_query_accepts_content_at_exactly_the_character_limit() {
+        let exact = "a".repeat(MAX_SEARCH_QUERY_CHARS);
+        assert!(validate_search_query(&exact).is_ok());
     }
 
     #[test]

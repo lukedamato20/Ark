@@ -77,6 +77,8 @@
     ],
     "ToolStatus": ["definition", "activeGrant"],
     "ConversationNote": ["id", "conversationId", "content", "createdAt", "updatedAt"],
+    "SearchCitation": ["title", "url", "snippet"],
+    "WebSearchResult": ["citations"],
     "SideEffectPreview": ["toolId", "summary", "idempotency"],
     "AuditEvent": ["sequence", "timestamp", "kind", "toolId", "redactedDetail", "chainHash"],
     "Message": [

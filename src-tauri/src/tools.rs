@@ -21,6 +21,11 @@ use crate::tool_policy::{CapabilityScope, CapabilityTier, IdempotencyPolicy, Sid
 use serde::{Deserialize, Serialize};
 
 pub const NOTES_TOOL_ID: &str = "notes";
+/// CMP-004: the second built-in tool. Its scope's `data` field names exactly what leaves the
+/// device (the query text) and what comes back (result titles/URLs/snippets) — `network: true`
+/// and `secret: true` both independently make it side-effecting per `is_side_effecting()`, so it
+/// goes through the same preview/grant gate as a write.
+pub const WEB_SEARCH_TOOL_ID: &str = "web_search";
 
 /// A short-lived grant automatically created the moment a user approves a previewed write — kept
 /// deliberately narrow (ADR 0002 §3: "narrow, time-boxed grants only") rather than matching the
@@ -44,24 +49,42 @@ pub struct ToolDefinition {
     pub scope: CapabilityScope,
 }
 
-/// The one built-in tool this pass ships. A future MCP client would extend this list from
+/// The built-in tools this build ships. A future MCP client would extend this list from
 /// discovered servers rather than replace it.
 pub fn built_in_tools() -> Vec<ToolDefinition> {
-    vec![ToolDefinition {
-        id: NOTES_TOOL_ID.to_string(),
-        name: "Notes".to_string(),
-        description: "Read and write a short scratch note attached to this conversation."
-            .to_string(),
-        publisher: "Ark (built-in)".to_string(),
-        scope: CapabilityScope {
-            tier: CapabilityTier::ChatSafe,
-            read: true,
-            write: true,
-            network: false,
-            secret: false,
-            data: "This conversation's own notes".to_string(),
+    vec![
+        ToolDefinition {
+            id: NOTES_TOOL_ID.to_string(),
+            name: "Notes".to_string(),
+            description: "Read and write a short scratch note attached to this conversation."
+                .to_string(),
+            publisher: "Ark (built-in)".to_string(),
+            scope: CapabilityScope {
+                tier: CapabilityTier::ChatSafe,
+                read: true,
+                write: true,
+                network: false,
+                secret: false,
+                data: "This conversation's own notes".to_string(),
+            },
         },
-    }]
+        ToolDefinition {
+            id: WEB_SEARCH_TOOL_ID.to_string(),
+            name: "Web Search".to_string(),
+            description: "Search the web via Brave Search and bring back cited results."
+                .to_string(),
+            publisher: "Brave Search (via Ark)".to_string(),
+            scope: CapabilityScope {
+                tier: CapabilityTier::ChatSafe,
+                read: true,
+                write: false,
+                network: true,
+                secret: true,
+                data: "Search query text sent to Brave Search API; result titles/URLs/snippets returned"
+                    .to_string(),
+            },
+        },
+    ]
 }
 
 /// A persisted `tool_policy::CapabilityGrant` — adds the row's own `id` (the abstract type has
@@ -176,41 +199,57 @@ fn truncate_for_preview(content: &str) -> String {
     format!("{truncated}…")
 }
 
-/// The result of attempting a notes write: either it ran (with the outcome), or it was blocked
-/// pending approval. This is deliberately an in-process return type, not a wire type — the Tauri
-/// command layer (`commands::mod`) turns the blocked case into a typed `AppError` ("approval
-/// required") rather than sending a tagged union across IPC for what is, from the frontend's
-/// perspective, the same "attempt, get an error, resubmit with acknowledgement" shape SEC-001's
-/// `acknowledge_remote_risk` already uses.
-pub enum NoteWriteAttempt {
+/// The result of attempting a tool invocation: either it ran (with the outcome), or it was
+/// blocked pending approval. This is deliberately an in-process return type, not a wire type —
+/// the Tauri command layer (`commands::mod`) turns the blocked case into a typed `AppError`
+/// ("approval required") rather than sending a tagged union across IPC for what is, from the
+/// frontend's perspective, the same "attempt, get an error, resubmit with acknowledgement" shape
+/// SEC-001's `acknowledge_remote_risk` already uses.
+#[derive(Debug)]
+pub enum ToolInvocationAttempt {
     Applied,
     ApprovalRequired,
 }
 
+/// CMP-004: `NoteWriteAttempt` predates the second tool consumer; kept as an alias rather than
+/// renamed at every existing Notes call site, minimizing blast radius on already-shipped code.
+pub type NoteWriteAttempt = ToolInvocationAttempt;
+
 /// Checks whether `tool_id` currently has a valid grant; if not and `approve` is `false`, tells
-/// the caller approval is required without performing any write or creating any grant. If
+/// the caller approval is required without performing any side effect or creating any grant. If
 /// `approve` is `true` and no valid grant exists, creates one (`AUTO_APPROVAL_GRANT_TTL_MINUTES`,
-/// recording a `Granted` audit event) before proceeding. Returns the grant to use either way once
-/// `NoteWriteAttempt::Applied` is returned to the caller, which still must record its own
-/// `Invoked` audit event once it has actually performed the write (this function only decides
-/// *whether* the write may proceed, not what it does).
-pub fn authorize_note_write(db: &Database, approve: bool) -> Result<NoteWriteAttempt, AppError> {
+/// recording a `Granted` audit event) before proceeding. Returns `Applied` either way once the
+/// call may proceed — the caller still must record its own `Invoked` audit event once it has
+/// actually performed the action (this function only decides *whether* it may proceed, not what
+/// it does). `tool_id` must be one `built_in_tools()` actually registers; an unknown id is a
+/// genuinely reachable case now that it's a runtime parameter (a stale/forged id from IPC), so it
+/// returns a typed "not found" error rather than panicking.
+pub fn authorize_tool_invocation(
+    db: &Database,
+    tool_id: &str,
+    approve: bool,
+) -> Result<ToolInvocationAttempt, AppError> {
     let now_ts = now();
-    if let Some(grant) = db.get_active_grant_for_tool(NOTES_TOOL_ID)? {
+    if let Some(grant) = db.get_active_grant_for_tool(tool_id)? {
         if grant.is_valid_at(&now_ts) {
-            return Ok(NoteWriteAttempt::Applied);
+            return Ok(ToolInvocationAttempt::Applied);
         }
     }
     if !approve {
-        return Ok(NoteWriteAttempt::ApprovalRequired);
+        return Ok(ToolInvocationAttempt::ApprovalRequired);
     }
     let scope = built_in_tools()
         .into_iter()
-        .find(|tool| tool.id == NOTES_TOOL_ID)
-        .expect("notes tool is always registered")
+        .find(|tool| tool.id == tool_id)
+        .ok_or_else(|| AppError::not_found("Tool"))?
         .scope;
-    db.create_capability_grant(NOTES_TOOL_ID, &scope, AUTO_APPROVAL_GRANT_TTL_MINUTES)?;
-    Ok(NoteWriteAttempt::Applied)
+    db.create_capability_grant(tool_id, &scope, AUTO_APPROVAL_GRANT_TTL_MINUTES)?;
+    Ok(ToolInvocationAttempt::Applied)
+}
+
+/// Notes-specific convenience wrapper — kept so existing call sites read the same as before.
+pub fn authorize_note_write(db: &Database, approve: bool) -> Result<NoteWriteAttempt, AppError> {
+    authorize_tool_invocation(db, NOTES_TOOL_ID, approve)
 }
 
 #[cfg(test)]
@@ -218,13 +257,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn built_in_tools_includes_exactly_the_chat_safe_notes_tool() {
+    fn built_in_tools_includes_exactly_two_chat_safe_tools() {
         let tools = built_in_tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].id, NOTES_TOOL_ID);
-        assert_eq!(tools[0].scope.tier, CapabilityTier::ChatSafe);
-        assert!(tools[0].scope.read && tools[0].scope.write);
-        assert!(!tools[0].scope.network && !tools[0].scope.secret);
+        assert_eq!(tools.len(), 2);
+        assert!(tools
+            .iter()
+            .all(|tool| tool.scope.tier == CapabilityTier::ChatSafe));
+    }
+
+    #[test]
+    fn notes_tool_is_read_write_with_no_network_or_secret_axis() {
+        let tools = built_in_tools();
+        let notes = tools.iter().find(|tool| tool.id == NOTES_TOOL_ID).unwrap();
+        assert!(notes.scope.read && notes.scope.write);
+        assert!(!notes.scope.network && !notes.scope.secret);
+    }
+
+    #[test]
+    fn web_search_tool_is_read_only_with_network_and_secret_axes() {
+        let tools = built_in_tools();
+        let web_search = tools
+            .iter()
+            .find(|tool| tool.id == WEB_SEARCH_TOOL_ID)
+            .unwrap();
+        assert!(web_search.scope.read && !web_search.scope.write);
+        assert!(web_search.scope.network && web_search.scope.secret);
     }
 
     #[test]
@@ -247,5 +304,50 @@ mod tests {
         let preview = preview_note_write(NoteWriteAction::Update, Some("short note"));
         assert!(preview.summary.contains("short note"));
         assert!(!preview.summary.contains('…'));
+    }
+
+    fn test_db() -> (Database, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("ark-tools-test-{}.sqlite3", uuid::Uuid::new_v4()));
+        (Database::open(&path).expect("database opens"), path)
+    }
+
+    /// CMP-004: `authorize_note_write`/`authorize_tool_invocation` previously had no direct test
+    /// of any kind — this is the first, parametrized over both built-in tools so the
+    /// generalization is proven correct for the tool it already shipped for, not just the new one.
+    #[test]
+    fn authorize_tool_invocation_grants_and_reuses_a_valid_grant() {
+        for tool_id in [NOTES_TOOL_ID, WEB_SEARCH_TOOL_ID] {
+            let (db, path) = test_db();
+
+            assert!(matches!(
+                authorize_tool_invocation(&db, tool_id, false).unwrap(),
+                ToolInvocationAttempt::ApprovalRequired
+            ));
+
+            assert!(matches!(
+                authorize_tool_invocation(&db, tool_id, true).unwrap(),
+                ToolInvocationAttempt::Applied
+            ));
+
+            // A second attempt, still within the auto-approval TTL, reuses the existing grant
+            // without requiring approval again.
+            assert!(matches!(
+                authorize_tool_invocation(&db, tool_id, false).unwrap(),
+                ToolInvocationAttempt::Applied
+            ));
+
+            drop(db);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn authorize_tool_invocation_rejects_an_unknown_tool_id() {
+        let (db, path) = test_db();
+        let error = authorize_tool_invocation(&db, "not_a_real_tool", true).unwrap_err();
+        assert_eq!(error.code, "not_found");
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

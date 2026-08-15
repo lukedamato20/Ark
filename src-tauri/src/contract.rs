@@ -39,6 +39,7 @@ use crate::tool_policy::{
     SideEffectPreview,
 };
 use crate::tools::{ConversationNote, ToolCapabilityGrant, ToolDefinition, ToolStatus};
+use crate::web_search::{SearchCitation, WebSearchResult};
 use crate::workspace::WorkspaceInfo;
 use crate::workspace_bootstrap::AppBootstrap;
 use serde::Serialize;
@@ -387,6 +388,29 @@ fn conversation_note_matches_contract() {
             content: "Remember to follow up".to_string(),
             created_at: "2026-08-15T00:00:00Z".to_string(),
             updated_at: "2026-08-15T00:00:00Z".to_string(),
+        },
+    );
+}
+
+fn sample_search_citation() -> SearchCitation {
+    SearchCitation {
+        title: "Rust Release Notes".to_string(),
+        url: "https://example.test/rust-notes".to_string(),
+        snippet: "Recent changes to the language.".to_string(),
+    }
+}
+
+#[test]
+fn search_citation_matches_contract() {
+    assert_matches_contract("SearchCitation", &sample_search_citation());
+}
+
+#[test]
+fn web_search_result_matches_contract() {
+    assert_matches_contract(
+        "WebSearchResult",
+        &WebSearchResult {
+            citations: vec![sample_search_citation()],
         },
     );
 }

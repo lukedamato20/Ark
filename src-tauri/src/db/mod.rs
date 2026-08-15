@@ -124,6 +124,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "0013_generation_style_presets",
         sql: include_str!("../../migrations/0013_generation_style_presets.sql"),
     },
+    MigrationDef {
+        version: 14,
+        name: "0014_tool_secrets",
+        sql: include_str!("../../migrations/0014_tool_secrets.sql"),
+    },
 ];
 
 /// FTR-001: the highest schema version this build knows how to open/migrate — used by the
@@ -2632,6 +2637,38 @@ impl Database {
              VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![key, value, now()],
+        )?;
+        Ok(())
+    }
+
+    /// CMP-004: the linkage from a tool id to its opaque `secret_store.rs` reference — mirrors
+    /// `providers.api_key_ref`'s role for LLM providers, but tool-agnostic (any secret-scoped
+    /// built-in tool can reuse this one table, not just `web_search`).
+    pub fn get_tool_secret_ref(&self, tool_id: &str) -> Result<Option<String>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT secret_ref FROM tool_secrets WHERE tool_id = ?1",
+                params![tool_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn set_tool_secret_ref(&self, tool_id: &str, secret_ref: &str) -> Result<(), AppError> {
+        self.connection.execute(
+            "INSERT INTO tool_secrets (tool_id, secret_ref)
+             VALUES (?1, ?2)
+             ON CONFLICT(tool_id) DO UPDATE SET secret_ref = excluded.secret_ref",
+            params![tool_id, secret_ref],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_tool_secret_ref(&self, tool_id: &str) -> Result<(), AppError> {
+        self.connection.execute(
+            "DELETE FROM tool_secrets WHERE tool_id = ?1",
+            params![tool_id],
         )?;
         Ok(())
     }
@@ -7009,5 +7046,102 @@ mod tests {
 
         drop(db);
         let _ = fs::remove_file(path);
+    }
+
+    fn seed_migration_0013_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..13] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1),
+                        (9, '0009_message_branch_names', ?1),
+                        (10, '0010_personas', ?1),
+                        (11, '0011_attachments', ?1),
+                        (12, '0012_tool_capabilities', ?1),
+                        (13, '0013_generation_style_presets', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 13 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-13 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-13 conversation, from before tool secrets existed");
+        conversation_id
+    }
+
+    /// CMP-004: a pre-existing conversation row from a migration-13 workspace must survive
+    /// migration 14's new `tool_secrets` table, and the table must be immediately usable
+    /// afterward — the same "every supported release upgrades cleanly" requirement every prior
+    /// migration in this chain proves for itself.
+    #[test]
+    fn upgrading_a_migration_0013_workspace_adds_tool_secrets_table() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0013_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-13 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-13 conversation");
+
+        assert_eq!(
+            db.get_tool_secret_ref("web_search")
+                .expect("tool_secrets table is queryable immediately after migration 14"),
+            None,
+            "no reference exists yet for a tool that was never granted a secret"
+        );
+
+        db.set_tool_secret_ref(
+            "web_search",
+            "tool-secret:v1:11111111-1111-1111-1111-111111111111",
+        )
+        .expect("tool_secrets table is writable immediately after migration 14");
+        assert_eq!(
+            db.get_tool_secret_ref("web_search")
+                .expect("re-read succeeds"),
+            Some("tool-secret:v1:11111111-1111-1111-1111-111111111111".to_string())
+        );
+
+        db.set_tool_secret_ref(
+            "web_search",
+            "tool-secret:v1:22222222-2222-2222-2222-222222222222",
+        )
+        .expect("re-setting the same tool_id upserts rather than duplicating");
+        assert_eq!(
+            db.get_tool_secret_ref("web_search")
+                .expect("re-read after upsert succeeds"),
+            Some("tool-secret:v1:22222222-2222-2222-2222-222222222222".to_string())
+        );
+
+        db.delete_tool_secret_ref("web_search")
+            .expect("deletion succeeds");
+        assert_eq!(
+            db.get_tool_secret_ref("web_search")
+                .expect("re-read after delete succeeds"),
+            None
+        );
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 }

@@ -9,9 +9,11 @@ use zeroize::Zeroize;
 const PROVIDER_SERVICE: &str = "dev.ark.desktop.provider-secret";
 const WORKSPACE_KEY_SERVICE: &str = "dev.ark.desktop.workspace-key";
 const COMPANION_API_TOKEN_SERVICE: &str = "dev.ark.desktop.companion-api-token";
+const TOOL_SECRET_SERVICE: &str = "dev.ark.desktop.tool-secret";
 const REFERENCE_PREFIX: &str = "secret:v1:";
 const WORKSPACE_KEY_REFERENCE_PREFIX: &str = "workspace-key:v1:";
 const COMPANION_API_TOKEN_REFERENCE_PREFIX: &str = "companion-api-token:v1:";
+const TOOL_SECRET_REFERENCE_PREFIX: &str = "tool-secret:v1:";
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 
 pub struct SecretValue(String);
@@ -177,6 +179,10 @@ pub(crate) fn new_companion_api_token_reference() -> String {
     )
 }
 
+fn new_tool_secret_reference() -> String {
+    format!("{TOOL_SECRET_REFERENCE_PREFIX}{}", uuid::Uuid::new_v4())
+}
+
 fn validate_reference(reference: &str) -> Result<&'static str, SecretStoreError> {
     let (uuid, service) = if let Some(uuid) = reference.strip_prefix(REFERENCE_PREFIX) {
         (uuid, PROVIDER_SERVICE)
@@ -184,6 +190,8 @@ fn validate_reference(reference: &str) -> Result<&'static str, SecretStoreError>
         (uuid, WORKSPACE_KEY_SERVICE)
     } else if let Some(uuid) = reference.strip_prefix(COMPANION_API_TOKEN_REFERENCE_PREFIX) {
         (uuid, COMPANION_API_TOKEN_SERVICE)
+    } else if let Some(uuid) = reference.strip_prefix(TOOL_SECRET_REFERENCE_PREFIX) {
+        (uuid, TOOL_SECRET_SERVICE)
     } else {
         return Err(SecretStoreError::new(
             SecretStoreErrorKind::Invalid,
@@ -267,6 +275,19 @@ pub(crate) fn update_companion_api_token(reference: &str, token: &str) -> Result
 pub(crate) fn read_companion_api_token(
     reference: &str,
 ) -> Result<zeroize::Zeroizing<String>, AppError> {
+    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    SystemSecretStore
+        .read(reference)
+        .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
+        .map_err(|error| error.to_app_error())
+}
+
+/// CMP-004: reads a built-in tool's stored credential (e.g. `web_search`'s Brave Search API key)
+/// for internal use only — attaching it to an outgoing tool request. Never exposed to the
+/// frontend or logged, unlike `get_tool_secret_metadata`, which returns only masked/availability
+/// info over IPC. Deliberately kept out of `commands/mod.rs`, like `read_provider_secret`/
+/// `read_companion_api_token` — see `scripts/check-secret-boundaries.mjs`'s matching guard.
+pub(crate) fn read_tool_secret(reference: &str) -> Result<zeroize::Zeroizing<String>, AppError> {
     validate_reference(reference).map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .read(reference)
@@ -466,6 +487,108 @@ pub async fn delete_provider_secret(
     Ok(())
 }
 
+/// CMP-004: stores or replaces a built-in tool's credential — structurally identical to
+/// `upsert_provider_secret` above (existing-reference lookup, `spawn_blocking` keyring
+/// create/update, compensating deletion if the DB link write fails), keyed by `tool_id` against
+/// `tool_secrets` instead of `providers.api_key_ref`.
+pub async fn upsert_tool_secret(
+    state: &crate::AppState,
+    tool_id: String,
+    secret: String,
+) -> Result<SecretMetadata, AppError> {
+    let tool_id = crate::validation::validate_entity_id(&tool_id, "Tool ID")?.to_string();
+    let value = validate_secret(secret)?;
+    let existing = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)?;
+    let reference = existing.clone().unwrap_or_else(new_tool_secret_reference);
+    let is_update = existing.is_some();
+    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    let reference_for_store = reference.clone();
+    tokio::task::spawn_blocking(move || {
+        if is_update {
+            SystemSecretStore.update(&reference_for_store, value)
+        } else {
+            SystemSecretStore.create(&reference_for_store, value)
+        }
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            "secret_store_failed",
+            "Credential-store worker did not complete. Retry.",
+        )
+    })?
+    .map_err(|error| error.to_app_error())?;
+
+    if !is_update {
+        let linkage_result =
+            crate::commands::lock_db(state)?.set_tool_secret_ref(&tool_id, &reference);
+        if let Err(database_error) = linkage_result {
+            let compensation_reference = reference.clone();
+            let compensation = tokio::task::spawn_blocking(move || {
+                SystemSecretStore.delete(&compensation_reference)
+            })
+            .await;
+            if !matches!(compensation, Ok(Ok(()))) {
+                return Err(AppError::new(
+                    "secret_store_compensation_failed",
+                    "Credential storage succeeded but linking it to the tool failed, and Ark could not remove the orphaned credential. Retry deletion from the tool's credential controls.",
+                ));
+            }
+            return Err(database_error);
+        }
+    }
+    Ok(metadata(reference, true))
+}
+
+pub async fn get_tool_secret_metadata(
+    state: &crate::AppState,
+    tool_id: String,
+) -> Result<Option<SecretMetadata>, AppError> {
+    let tool_id = crate::validation::validate_entity_id(&tool_id, "Tool ID")?.to_string();
+    let Some(reference) = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)? else {
+        return Ok(None);
+    };
+    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    let reference_for_store = reference.clone();
+    let result = tokio::task::spawn_blocking(move || SystemSecretStore.read(&reference_for_store))
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "secret_store_failed",
+                "Credential-store worker did not complete. Retry.",
+            )
+        })?;
+    match result {
+        Ok(value) => {
+            drop(value);
+            Ok(Some(metadata(reference, true)))
+        }
+        Err(error) if error.kind == SecretStoreErrorKind::NotFound => {
+            Ok(Some(metadata(reference, false)))
+        }
+        Err(error) => Err(error.to_app_error()),
+    }
+}
+
+pub async fn delete_tool_secret(state: &crate::AppState, tool_id: String) -> Result<(), AppError> {
+    let tool_id = crate::validation::validate_entity_id(&tool_id, "Tool ID")?.to_string();
+    let Some(reference) = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)? else {
+        return Ok(());
+    };
+    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    tokio::task::spawn_blocking(move || SystemSecretStore.delete(&reference))
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "secret_store_failed",
+                "Credential-store worker did not complete. Retry.",
+            )
+        })?
+        .map_err(|error| error.to_app_error())?;
+    crate::commands::lock_db(state)?.delete_tool_secret_ref(&tool_id)?;
+    Ok(())
+}
+
 fn metadata(id: String, available: bool) -> SecretMetadata {
     SecretMetadata {
         id,
@@ -577,9 +700,35 @@ mod tests {
     #[test]
     fn opaque_references_and_secret_limits_fail_closed() {
         assert!(validate_reference(&new_reference()).is_ok());
+        assert!(validate_reference(&new_tool_secret_reference()).is_ok());
         assert!(validate_reference("provider:openai").is_err());
         assert!(validate_secret(String::new()).is_err());
         assert!(validate_secret("x".repeat(MAX_SECRET_BYTES + 1)).is_err());
+    }
+
+    /// CMP-004: the tool-secret reference family (4th prefix) round-trips through the same
+    /// generic `SecretStore` port as the other three — proving `validate_reference`'s new arm and
+    /// `new_tool_secret_reference` actually produce a working reference, not just a
+    /// pattern-matchable string.
+    #[test]
+    fn tool_secret_reference_round_trips_through_the_in_memory_port() {
+        let store = InMemorySecretStore::default();
+        let reference = new_tool_secret_reference();
+        store
+            .create(&reference, SecretValue("brave-api-key".to_string()))
+            .expect("create");
+        assert_eq!(
+            store.read(&reference).expect("read").expose(),
+            "brave-api-key"
+        );
+        store.delete(&reference).expect("delete");
+        assert!(matches!(
+            store.read(&reference),
+            Err(SecretStoreError {
+                kind: SecretStoreErrorKind::NotFound,
+                ..
+            })
+        ));
     }
 
     #[test]
