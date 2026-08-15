@@ -2969,6 +2969,8 @@ function ToolsPanel({ onError }: { onError: (message: string) => void }) {
                 </span>
               </div>
 
+              {tool.definition.scope.secret && <ToolSecretField toolId={tool.definition.id} onError={onError} />}
+
               <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-2">
                 {tool.activeGrant ? (
                   <>
@@ -3048,6 +3050,102 @@ function ToolsPanel({ onError }: { onError: (message: string) => void }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+/** CMP-004: a small, self-contained credential entry for any secret-scoped built-in tool —
+ * shown inline in its `ToolsPanel` card. Mirrors `ProviderForm`'s masked-input save/delete
+ * state shape, adapted to `upsertToolSecret`/`getToolSecretMetadata`/`deleteToolSecret` instead
+ * of the provider-secret equivalents. */
+function ToolSecretField({ toolId, onError }: { toolId: string; onError: (message: string) => void }) {
+  const client = useArkClient();
+  const [secretDraft, setSecretDraft] = React.useState("");
+  const [secretMetadata, setSecretMetadata] = React.useState<SecretMetadata | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    void client
+      .getToolSecretMetadata(toolId)
+      .then((metadata) => {
+        if (active) setSecretMetadata(metadata);
+      })
+      .catch((error) => {
+        if (active) onError(getErrorMessage(error));
+      })
+      .finally(() => {
+        if (active) setLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, toolId]);
+
+  async function saveSecret() {
+    if (!secretDraft) return;
+    const secret = secretDraft;
+    setSecretDraft("");
+    setBusy(true);
+    try {
+      setSecretMetadata(await client.upsertToolSecret(toolId, secret));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSecret() {
+    setBusy(true);
+    try {
+      await client.deleteToolSecret(toolId);
+      setSecretMetadata(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 grid gap-2 rounded-md border border-border bg-muted/20 p-3">
+      <div className="text-xs font-medium">API credential</div>
+      {loaded && secretMetadata && (
+        <div className="flex items-center gap-2 text-xs">
+          <Badge tone={secretMetadata.available ? "success" : "warning"}>
+            {secretMetadata.available ? "configured" : "reconnection required"}
+          </Badge>
+          <span aria-label="Saved credential">{secretMetadata.masked}</span>
+        </div>
+      )}
+      <label className="grid gap-1.5 text-xs">
+        {secretMetadata ? "Replace credential" : "Credential"}
+        <Input
+          type="password"
+          value={secretDraft}
+          onChange={(event) => setSecretDraft(event.target.value)}
+          autoComplete="new-password"
+          autoCapitalize="none"
+          spellCheck={false}
+          disabled={busy}
+          className="text-xs"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => void saveSecret()} disabled={!secretDraft || busy}>
+          <Save className="h-3.5 w-3.5" />
+          Save credential
+        </Button>
+        {secretMetadata && (
+          <Button size="sm" variant="secondary" onClick={() => void deleteSecret()} disabled={busy}>
+            <Trash2 className="h-3.5 w-3.5" />
+            Remove credential
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 

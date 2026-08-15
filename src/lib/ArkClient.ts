@@ -40,6 +40,8 @@ import type {
   ToolCapabilityGrant,
   ToolStatus,
   Tone,
+  WebSearchInput,
+  WebSearchResult,
   WorkspaceImportPreview,
   WorkspaceImportResult,
   WorkspaceInfo,
@@ -56,6 +58,9 @@ export interface SendChatMessageInput {
   maxTokens?: number | null;
   /** CMP-001: ids of staged attachments to link to this message and disclose to the provider. */
   attachmentIds?: string[];
+  /** CMP-004: already-fetched web search results (from `searchWeb`, called before this) to
+   * disclose to the provider and record in provenance. */
+  webSearch?: WebSearchInput | null;
 }
 
 export interface EditUserMessageInput {
@@ -306,6 +311,18 @@ export interface ArkClient {
   updateNote(id: string, content: string, approve: boolean): Promise<ConversationNote>;
   deleteNote(id: string, approve: boolean): Promise<void>;
 
+  /** CMP-004: a human-readable preview of a web search — the exact query and destination
+   * provider — shown before the user approves it. */
+  previewWebSearch(query: string): Promise<SideEffectPreview>;
+  /** `approve: true` only after the user has seen `previewWebSearch`'s output and confirmed it —
+   * unnecessary (and ignored) while a still-valid grant already covers this tool. Rejects with
+   * `{ code: "approval_required" }` if no valid grant exists and `approve` is `false`, or
+   * `{ code: "tool_secret_not_configured" }` if no Brave Search API key has been saved yet. */
+  searchWeb(query: string, approve: boolean): Promise<WebSearchResult>;
+  upsertToolSecret(toolId: string, secret: string): Promise<SecretMetadata>;
+  getToolSecretMetadata(toolId: string): Promise<SecretMetadata | null>;
+  deleteToolSecret(toolId: string): Promise<void>;
+
   runDiagnostics(providerId: string, model?: string | null, includeRuntimeLogs?: boolean): Promise<DiagnosticsResult>;
 
   exportConversationMarkdown(conversationId: string): Promise<string>;
@@ -440,6 +457,7 @@ export function createTauriArkClient(): ArkClient {
           temperature: input.temperature ?? undefined,
           maxTokens: input.maxTokens ?? undefined,
           attachmentIds: input.attachmentIds ?? [],
+          webSearch: input.webSearch ?? undefined,
         },
       }),
     editUserMessage: (input) =>
@@ -534,6 +552,12 @@ export function createTauriArkClient(): ArkClient {
     updateNote: (id, content, approve) =>
       invoke<ConversationNote>("update_note", { request: { id, content, approve } }),
     deleteNote: (id, approve) => invoke<void>("delete_note", { request: { id, approve } }),
+
+    previewWebSearch: (query) => invoke<SideEffectPreview>("preview_web_search", { request: { query } }),
+    searchWeb: (query, approve) => invoke<WebSearchResult>("search_web", { request: { query, approve } }),
+    upsertToolSecret: (toolId, secret) => invoke<SecretMetadata>("upsert_tool_secret", { toolId, secret }),
+    getToolSecretMetadata: (toolId) => invoke<SecretMetadata | null>("get_tool_secret_metadata", { toolId }),
+    deleteToolSecret: (toolId) => invoke<void>("delete_tool_secret", { toolId }),
 
     runDiagnostics: (providerId, model, includeRuntimeLogs = false) =>
       invoke<DiagnosticsResult>("run_diagnostics", {
@@ -687,6 +711,12 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     createNote: notImplemented("createNote"),
     updateNote: notImplemented("updateNote"),
     deleteNote: async () => undefined,
+
+    previewWebSearch: notImplemented("previewWebSearch"),
+    searchWeb: notImplemented("searchWeb"),
+    upsertToolSecret: notImplemented("upsertToolSecret"),
+    getToolSecretMetadata: async () => null,
+    deleteToolSecret: async () => undefined,
 
     runDiagnostics: notImplemented("runDiagnostics"),
 

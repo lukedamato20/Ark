@@ -3,11 +3,12 @@ import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
 import { CONNECTION_METADATA } from "../../lib/destinationClass";
+import { checkExternalLink } from "../../lib/externalLinks";
 import { computeAnnouncementDelta } from "../../lib/streamAnnouncement";
 import { messageWithGenerationOverlay } from "../../state/arkStores";
 import { useStoreSelector } from "../../state/externalStore";
 import { useArkStores } from "../../state/useArkStores";
-import type { Attachment, BranchAlternative, Message, ProviderConfig } from "../../types/ark";
+import type { Attachment, BranchAlternative, Message, ProviderConfig, SearchCitation } from "../../types/ark";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -171,6 +172,18 @@ const MessageBubble = React.memo(function MessageBubble({
   // suggested-implementation-notes ("a compact disclosure row with an expandable detail view"),
   // since always-visible per-message metadata was flagged as a clutter risk.
   const [metadataOpen, setMetadataOpen] = React.useState(false);
+  // CMP-004: the first frontend consumer of `message.metadataJson` — parsed leniently (a missing
+  // or malformed blob just means "no citations to show", never a rendering error), mirroring
+  // `SettingsView.tsx`'s `modelDetails` precedent for parsing an opaque metadata JSON column.
+  const searchCitations = React.useMemo<SearchCitation[]>(() => {
+    if (!message.metadataJson) return [];
+    try {
+      const parsed = JSON.parse(message.metadataJson) as { webSearch?: { citations?: SearchCitation[] } };
+      return parsed.webSearch?.citations ?? [];
+    } catch {
+      return [];
+    }
+  }, [message.metadataJson]);
   const activeAlternativeIndex = alternatives?.findIndex((alternative) => alternative.isActive) ?? -1;
   const branchLabel =
     alternatives && alternatives.length > 1 && activeAlternativeIndex >= 0
@@ -382,6 +395,38 @@ const MessageBubble = React.memo(function MessageBubble({
               detail={CONNECTION_METADATA[provider.destinationClass].description}
             />
             {message.tokenCount != null && <MetadataRow label="Tokens" value={String(message.tokenCount)} />}
+            {searchCitations.length > 0 && (
+              <div className="mt-1 border-t border-current/10 pt-1">
+                <div className="mb-1 opacity-60">Sources</div>
+                <ul className="grid gap-1">
+                  {searchCitations.map((citation, index) => {
+                    // SEC-008: citations come from a third-party API response — the same
+                    // scheme-allowlist check used for model/Markdown-rendered links, applied here
+                    // too rather than trusting the response's URLs unconditionally.
+                    const link = checkExternalLink(citation.url);
+                    return (
+                      <li key={`${citation.url}-${index}`} className="grid gap-0.5">
+                        {link.safe ? (
+                          <a
+                            href={link.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="truncate underline decoration-dotted underline-offset-2 hover:opacity-80"
+                            title={citation.snippet}
+                          >
+                            {citation.title || citation.url}
+                          </a>
+                        ) : (
+                          <span className="truncate opacity-70" title={citation.snippet}>
+                            {citation.title || citation.url}
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </div>
         )}
         {alternatives && !isUser && (

@@ -4,6 +4,7 @@ import {
   Download,
   FileJson,
   FileText,
+  Globe,
   Loader2,
   MoreVertical,
   Paperclip,
@@ -23,6 +24,7 @@ import { getErrorMessage } from "../../lib/arkErrors";
 import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
+import { useToolApproval } from "../../lib/useToolApproval";
 import type {
   Attachment,
   Conversation,
@@ -35,8 +37,8 @@ import type {
   ProviderHealth,
   ResponseStyle,
   SendChatResult,
-  SideEffectPreview,
   Tone,
+  WebSearchInput,
 } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -126,6 +128,9 @@ export function ChatView({
   const [stagedAttachments, setStagedAttachments] = React.useState<Attachment[]>([]);
   const [sentAttachmentsByMessageId, setSentAttachmentsByMessageId] = React.useState<Record<string, Attachment[]>>({});
   const [attaching, setAttaching] = React.useState(false);
+  // CMP-004: per-send, not per-conversation — mirrors `stagedAttachments`, cleared after send.
+  const [webSearchEnabled, setWebSearchEnabled] = React.useState(false);
+  const webSearchApproval = useToolApproval();
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const attachmentInputRef = React.useRef<HTMLInputElement | null>(null);
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -343,6 +348,23 @@ export function ChatView({
 
     const content = draft.trim();
     const attachmentIds = stagedAttachments.map((a) => a.id);
+
+    // CMP-004: resolved *before* clearing the draft/entering the sending state — a cancelled or
+    // failed search must leave the composer exactly as the user left it, the same as any other
+    // send precondition failing. `attempt` itself shows the approval panel and waits for the
+    // user, so this only proceeds once search either wasn't needed, already had a valid grant, or
+    // was just approved.
+    let webSearch: WebSearchInput | undefined;
+    if (webSearchEnabled) {
+      const searched = await webSearchApproval.attempt(
+        (approve) => client.searchWeb(content, approve),
+        () => client.previewWebSearch(content),
+        onError,
+      );
+      if (!searched) return;
+      webSearch = { query: content, citations: searched.citations };
+    }
+
     setDraft("");
     setIsSending(true);
 
@@ -355,6 +377,7 @@ export function ChatView({
         temperature: provider?.defaultTemperature,
         maxTokens: provider?.defaultMaxTokens,
         attachmentIds,
+        webSearch,
       });
       if (stagedAttachments.length > 0) {
         setSentAttachmentsByMessageId((current) => ({
@@ -363,6 +386,7 @@ export function ChatView({
         }));
       }
       setStagedAttachments([]);
+      setWebSearchEnabled(false);
 
       const now = new Date().toISOString();
       onMessagesChange([
@@ -939,6 +963,24 @@ export function ChatView({
               void handleAttachFiles(event.dataTransfer.files);
             }}
           >
+            {webSearchApproval.pendingApproval && (
+              <div className="mb-2 grid gap-2 rounded-md border border-warning/50 bg-warning/10 p-2 text-xs">
+                <div>{webSearchApproval.pendingApproval.preview.summary}</div>
+                <div className="flex justify-end gap-2">
+                  <Button size="sm" variant="ghost" onClick={webSearchApproval.cancel}>
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={webSearchApproval.busy}
+                    onClick={webSearchApproval.approve}
+                  >
+                    Approve
+                  </Button>
+                </div>
+              </div>
+            )}
             {stagedAttachments.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                 {stagedAttachments.map((attachment) => (
@@ -1008,6 +1050,19 @@ export function ChatView({
                     event.target.value = "";
                   }}
                 />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-pressed={webSearchEnabled}
+                  aria-label={
+                    webSearchEnabled ? "Web search enabled for next message" : "Enable web search for next message"
+                  }
+                  onClick={() => setWebSearchEnabled((value) => !value)}
+                  disabled={!conversation}
+                  className={cn(webSearchEnabled && "bg-accent text-accent-foreground")}
+                >
+                  <Globe className="h-4 w-4" />
+                </Button>
                 <div className="text-xs text-muted-foreground">Ctrl/Cmd + Enter to send</div>
               </div>
               {activeAssistant ? (
@@ -1520,11 +1575,7 @@ function ConversationNotesButton({
   const [draft, setDraft] = React.useState("");
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [editDraft, setEditDraft] = React.useState("");
-  const [pendingApproval, setPendingApproval] = React.useState<{
-    preview: SideEffectPreview;
-    run: () => Promise<void>;
-  } | null>(null);
-  const [busy, setBusy] = React.useState(false);
+  const toolApproval = useToolApproval();
   const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   const refresh = React.useCallback(
@@ -1564,43 +1615,18 @@ function ConversationNotesButton({
     };
   }, [open]);
 
-  /** Runs `attempt` with `approve: false` first; if the backend reports `approval_required`,
-   * fetches the preview and stashes a retry (`approve: true`) for the user to confirm instead of
-   * failing outright. */
-  async function attemptWrite(attempt: (approve: boolean) => Promise<void>, preview: () => Promise<SideEffectPreview>) {
-    setBusy(true);
-    try {
-      await attempt(false);
-      setPendingApproval(null);
-    } catch (error) {
-      const code =
-        error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
-      if (code === "approval_required") {
-        try {
-          const shown = await preview();
-          setPendingApproval({ preview: shown, run: () => attempt(true) });
-        } catch (previewError) {
-          onError(getErrorMessage(previewError));
-        }
-      } else {
-        onError(getErrorMessage(error));
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function addNote() {
     const content = draft.trim();
     if (!content || !conversation) return;
     const conversationId = conversation.id;
-    await attemptWrite(
+    await toolApproval.attempt(
       async (approve) => {
         await client.createNote(conversationId, content, approve);
         setDraft("");
         await refresh(conversationId);
       },
       () => client.previewNoteWrite("create", content),
+      onError,
     );
   }
 
@@ -1608,25 +1634,27 @@ function ConversationNotesButton({
     const content = editDraft.trim();
     if (!content || !conversation) return;
     const conversationId = conversation.id;
-    await attemptWrite(
+    await toolApproval.attempt(
       async (approve) => {
         await client.updateNote(id, content, approve);
         setEditingId(null);
         await refresh(conversationId);
       },
       () => client.previewNoteWrite("update", content),
+      onError,
     );
   }
 
   async function removeNote(id: string) {
     if (!conversation) return;
     const conversationId = conversation.id;
-    await attemptWrite(
+    await toolApproval.attempt(
       async (approve) => {
         await client.deleteNote(id, approve);
         await refresh(conversationId);
       },
       () => client.previewNoteWrite("delete"),
+      onError,
     );
   }
 
@@ -1652,31 +1680,14 @@ function ConversationNotesButton({
         >
           <div className="text-sm font-semibold">Notes</div>
 
-          {pendingApproval && (
+          {toolApproval.pendingApproval && (
             <div className="grid gap-2 rounded-md border border-warning/50 bg-warning/10 p-2 text-xs">
-              <div>{pendingApproval.preview.summary}</div>
+              <div>{toolApproval.pendingApproval.preview.summary}</div>
               <div className="flex justify-end gap-2">
-                <Button variant="ghost" onClick={() => setPendingApproval(null)}>
+                <Button variant="ghost" onClick={toolApproval.cancel}>
                   Cancel
                 </Button>
-                <Button
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() => {
-                    const run = pendingApproval.run;
-                    setPendingApproval(null);
-                    void (async () => {
-                      setBusy(true);
-                      try {
-                        await run();
-                      } catch (error) {
-                        onError(getErrorMessage(error));
-                      } finally {
-                        setBusy(false);
-                      }
-                    })();
-                  }}
-                >
+                <Button variant="secondary" disabled={toolApproval.busy} onClick={toolApproval.approve}>
                   Approve
                 </Button>
               </div>
@@ -1704,7 +1715,7 @@ function ConversationNotesButton({
                         <Button variant="ghost" onClick={() => setEditingId(null)}>
                           Cancel
                         </Button>
-                        <Button variant="secondary" disabled={busy} onClick={() => void saveEdit(note.id)}>
+                        <Button variant="secondary" disabled={toolApproval.busy} onClick={() => void saveEdit(note.id)}>
                           Save
                         </Button>
                       </div>
@@ -1748,7 +1759,7 @@ function ConversationNotesButton({
               rows={2}
               className="text-xs"
             />
-            <Button variant="secondary" disabled={busy || !draft.trim()} onClick={() => void addNote()}>
+            <Button variant="secondary" disabled={toolApproval.busy || !draft.trim()} onClick={() => void addNote()}>
               Add
             </Button>
           </div>

@@ -179,6 +179,25 @@ export interface ConversationNote {
 
 export type NoteWriteAction = "create" | "update" | "delete";
 
+/** CMP-004: one Brave Search result surfaced through the web_search tool. */
+export interface SearchCitation {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface WebSearchResult {
+  citations: SearchCitation[];
+}
+
+/** CMP-004: already-fetched search results (from `searchWeb`) threaded into `sendChatMessage` as
+ * plain data — the frontend performs the search before sending, since a network call cannot
+ * happen inside the backend's send-message transaction. */
+export interface WebSearchInput {
+  query: string;
+  citations: SearchCitation[];
+}
+
 /** CMP-003: the human-readable preview shown before a side-effecting tool call runs, unless a
  * still-valid narrow grant already covers it. */
 export interface SideEffectPreview {

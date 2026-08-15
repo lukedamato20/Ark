@@ -868,10 +868,29 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       data: "This conversation's own notes",
     },
   };
+  // CMP-004: the second built-in tool — mirrors `tools::built_in_tools()`'s web_search entry.
+  const webSearchToolDefinition = {
+    id: "web_search",
+    name: "Web Search",
+    description: "Search the web via Brave Search and bring back cited results.",
+    publisher: "Brave Search (via Ark)",
+    scope: {
+      tier: "chat_safe" as const,
+      read: true,
+      write: false,
+      network: true,
+      secret: true,
+      data: "Search query text sent to Brave Search API; result titles/URLs/snippets returned",
+    },
+  };
   const notes: ConversationNote[] = [];
   const grants: ToolCapabilityGrant[] = [];
   const auditEvents: AuditEvent[] = [];
   let nextAuditSequence = 0;
+  // CMP-004: whether a Brave Search API key has been "saved" — mirrors `tool_secrets`'
+  // presence/absence, not the key's actual value (never round-tripped, matching the real
+  // secret store's own metadata-only IPC surface).
+  let webSearchSecretConfigured = false;
 
   function recordAuditEvent(kind: AuditEvent["kind"], toolId: string, redactedDetail: string) {
     auditEvents.push({
@@ -884,29 +903,35 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     });
   }
 
-  function activeGrant(): ToolCapabilityGrant | null {
+  function activeGrant(toolId: string): ToolCapabilityGrant | null {
     const now = new Date().toISOString();
-    return grants.find((grant) => !grant.revoked && grant.expiresAt > now) ?? null;
+    return grants.find((grant) => grant.toolId === toolId && !grant.revoked && grant.expiresAt > now) ?? null;
   }
 
-  /** Mirrors `tools::authorize_note_write`'s auto-grant: a short-lived (5 min) grant created the
-   * moment a previewed write is approved with no already-valid grant in place. */
-  function createAutoGrant(): ToolCapabilityGrant {
+  const toolScopeData: Record<string, string> = {
+    notes: notesToolDefinition.scope.data,
+    web_search: webSearchToolDefinition.scope.data,
+  };
+
+  /** Mirrors `tools::authorize_tool_invocation`'s auto-grant: a short-lived (5 min) grant created
+   * the moment a previewed action is approved with no already-valid grant for that tool. */
+  function createAutoGrant(toolId: string): ToolCapabilityGrant {
+    const definition = toolId === "web_search" ? webSearchToolDefinition : notesToolDefinition;
     const grant: ToolCapabilityGrant = {
       id: `fixture-grant-${grants.length}`,
-      toolId: "notes",
+      toolId,
       tier: "chat_safe",
-      read: true,
-      write: true,
-      network: false,
-      secret: false,
-      data: notesToolDefinition.scope.data,
+      read: definition.scope.read,
+      write: definition.scope.write,
+      network: definition.scope.network,
+      secret: definition.scope.secret,
+      data: toolScopeData[toolId],
       grantedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
       revoked: false,
     };
     grants.push(grant);
-    recordAuditEvent("granted", "notes", `granted: ${grant.data} for 5 min`);
+    recordAuditEvent("granted", toolId, `granted: ${grant.data} for 5 min`);
     return grant;
   }
 
@@ -1292,18 +1317,23 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       attachments.splice(index, 1);
     },
 
-    listTools: async (): Promise<ToolStatus[]> => [{ definition: notesToolDefinition, activeGrant: activeGrant() }],
+    listTools: async (): Promise<ToolStatus[]> => [
+      { definition: notesToolDefinition, activeGrant: activeGrant("notes") },
+      { definition: webSearchToolDefinition, activeGrant: activeGrant("web_search") },
+    ],
     grantToolCapability: async (toolId, ttlMinutes) => {
-      if (toolId !== "notes") throw { code: "not_found", message: "Tool not found." };
+      const definition =
+        toolId === "web_search" ? webSearchToolDefinition : toolId === "notes" ? notesToolDefinition : null;
+      if (!definition) throw { code: "not_found", message: "Tool not found." };
       const grant: ToolCapabilityGrant = {
         id: `fixture-grant-${grants.length}`,
         toolId,
         tier: "chat_safe",
-        read: true,
-        write: true,
-        network: false,
-        secret: false,
-        data: notesToolDefinition.scope.data,
+        read: definition.scope.read,
+        write: definition.scope.write,
+        network: definition.scope.network,
+        secret: definition.scope.secret,
+        data: definition.scope.data,
         grantedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + ttlMinutes * 60_000).toISOString(),
         revoked: false,
@@ -1329,13 +1359,13 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       idempotency: "requires_fresh_approval",
     }),
     createNote: async (conversationId, content, approve) => {
-      if (!activeGrant()) {
+      if (!activeGrant("notes")) {
         if (!approve)
           throw {
             code: "approval_required",
             message: "This action needs approval — preview it and grant access first.",
           };
-        createAutoGrant();
+        createAutoGrant("notes");
       }
       const note: ConversationNote = {
         id: `fixture-note-${notes.length}`,
@@ -1351,13 +1381,13 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     updateNote: async (id, content, approve) => {
       const note = notes.find((item) => item.id === id);
       if (!note) throw { code: "not_found", message: "Note not found." };
-      if (!activeGrant()) {
+      if (!activeGrant("notes")) {
         if (!approve)
           throw {
             code: "approval_required",
             message: "This action needs approval — preview it and grant access first.",
           };
-        createAutoGrant();
+        createAutoGrant("notes");
       }
       note.content = content;
       note.updatedAt = new Date().toISOString();
@@ -1367,16 +1397,66 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     deleteNote: async (id, approve) => {
       const index = notes.findIndex((item) => item.id === id);
       if (index === -1) throw { code: "not_found", message: "Note not found." };
-      if (!activeGrant()) {
+      if (!activeGrant("notes")) {
         if (!approve)
           throw {
             code: "approval_required",
             message: "This action needs approval — preview it and grant access first.",
           };
-        createAutoGrant();
+        createAutoGrant("notes");
       }
       notes.splice(index, 1);
       recordAuditEvent("invoked", "notes", "deleted a note");
+    },
+
+    previewWebSearch: async (query): Promise<SideEffectPreview> => ({
+      toolId: "web_search",
+      summary: `Send this query to Brave Search: "${query}"`,
+      idempotency: "requires_fresh_approval",
+    }),
+    searchWeb: async (query, approve) => {
+      if (!webSearchSecretConfigured) {
+        throw {
+          code: "tool_secret_not_configured",
+          message: "Add a Brave Search API key in Settings → Tools before using web search.",
+        };
+      }
+      if (!activeGrant("web_search")) {
+        if (!approve)
+          throw {
+            code: "approval_required",
+            message: "This action needs approval — preview it and grant access first.",
+          };
+        createAutoGrant("web_search");
+      }
+      recordAuditEvent("invoked", "web_search", `query: ${query.length} chars, 2 results`);
+      return {
+        citations: [
+          {
+            title: "Rust Release Notes",
+            url: "https://example.test/rust-notes",
+            snippet: "Recent changes to the language and standard library.",
+          },
+          {
+            title: "Rust Programming Language",
+            url: "https://example.test/rust-lang",
+            snippet: "The official site for the Rust programming language.",
+          },
+        ],
+      };
+    },
+    upsertToolSecret: async (toolId, secret) => {
+      if (toolId !== "web_search") throw { code: "not_found", message: "Tool not found." };
+      if (!secret.trim()) throw { code: "invalid_input", message: "Credential must be non-empty." };
+      webSearchSecretConfigured = true;
+      return { id: "fixture-tool-secret-web_search", masked: "••••••••", available: true };
+    },
+    getToolSecretMetadata: async (toolId) => {
+      if (toolId !== "web_search" || !webSearchSecretConfigured) return null;
+      return { id: "fixture-tool-secret-web_search", masked: "••••••••", available: true };
+    },
+    deleteToolSecret: async (toolId) => {
+      if (toolId === "web_search") webSearchSecretConfigured = false;
     },
 
     // CMP-001: a minimal send — creates a user message and links any staged attachments to it,
