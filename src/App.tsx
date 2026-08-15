@@ -278,6 +278,8 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onBuiltInModelPathChange={controller.changeBuiltInModelPath}
       crashCaptureEnabled={settings.crashCaptureEnabled}
       onCrashCaptureEnabledChange={controller.changeCrashCaptureEnabled}
+      completionNotificationsEnabled={settings.completionNotificationsEnabled}
+      onCompletionNotificationsEnabledChange={controller.changeCompletionNotificationsEnabled}
       onThemeChange={controller.changeTheme}
       onWorkspaceChange={controller.setWorkspace}
       onProviderSaved={controller.saveProvider}

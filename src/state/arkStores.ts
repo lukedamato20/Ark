@@ -80,6 +80,7 @@ export interface SettingsState {
   builtInStatus: BuiltInRuntimeStatus;
   builtInModelPath: string | null;
   crashCaptureEnabled: boolean;
+  completionNotificationsEnabled: boolean;
   workspaceOpenError: AppErrorShape | null;
   retryingWorkspace: boolean;
 }
@@ -161,6 +162,7 @@ export function createArkStores(initial?: {
       },
       builtInModelPath: null,
       crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
       workspaceOpenError: null,
       retryingWorkspace: false,
     }),

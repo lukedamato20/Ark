@@ -133,7 +133,12 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: status.modelPath, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: status.modelPath,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
 
@@ -210,7 +215,12 @@ export function createSecretStoreFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
   let statusChecks = 0;
@@ -292,7 +302,12 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
 
@@ -497,7 +512,12 @@ export function createLongConversationFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
 
@@ -968,7 +988,12 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
 
@@ -1586,7 +1611,12 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       isPortable: false,
       requiresRestart: false,
     },
-    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+    },
     workspaceOpenError: null,
   };
 

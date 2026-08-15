@@ -65,6 +65,7 @@ export interface ArkController {
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
+  changeCompletionNotificationsEnabled: (enabled: boolean) => Promise<void>;
   retryWorkspace: () => Promise<void>;
   setBuiltInStatus: (status: BuiltInRuntimeStatus) => void;
   setWorkspace: (workspace: WorkspaceInfo) => void;
@@ -322,6 +323,7 @@ export function useArkController(): ArkController {
         builtInStatus: sidecarStatus,
         builtInModelPath: data.deviceSettings.builtInModelPath ?? null,
         crashCaptureEnabled: data.deviceSettings.crashCaptureEnabled,
+        completionNotificationsEnabled: data.deviceSettings.completionNotificationsEnabled,
         workspaceOpenError: data.workspaceOpenError ?? null,
         retryingWorkspace: false,
       });
@@ -591,6 +593,7 @@ export function useArkController(): ArkController {
           theme,
           builtInModelPath: settings.builtInModelPath,
           crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -619,6 +622,7 @@ export function useArkController(): ArkController {
           theme: settings.theme,
           builtInModelPath: path,
           crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -650,6 +654,7 @@ export function useArkController(): ArkController {
           theme: settings.theme,
           builtInModelPath: settings.builtInModelPath,
           crashCaptureEnabled: enabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -664,6 +669,49 @@ export function useArkController(): ArkController {
           stores.settings.getSnapshot().crashCaptureEnabled === enabled
         ) {
           patchStore(stores.settings, { crashCaptureEnabled: settings.crashCaptureEnabled });
+        }
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
+  /** CMP-006: mirrors `changeCrashCaptureEnabled`'s exact optimistic-update/write-queue/rollback
+   * shape, with one addition — enabling requires the OS notification permission first. A denial
+   * (or the user simply not granting it) leaves the setting off and surfaces a message, rather
+   * than persisting `true` and letting every future notification silently no-op. */
+  const changeCompletionNotificationsEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      if (enabled) {
+        const granted = await client.requestNotificationPermission();
+        if (!granted) {
+          setError("Notification permission was not granted. Enable it in your OS settings to use this.");
+          return;
+        }
+      }
+      const settings = stores.settings.getSnapshot();
+      const sequence = ++settingsMutationSequenceRef.current;
+      patchStore(stores.settings, { completionNotificationsEnabled: enabled });
+      const operation = settingsWriteQueueRef.current.then(() =>
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          builtInModelPath: settings.builtInModelPath,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: enabled,
+        }),
+      );
+      settingsWriteQueueRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        await operation;
+      } catch (error) {
+        if (
+          sequence === settingsMutationSequenceRef.current &&
+          stores.settings.getSnapshot().completionNotificationsEnabled === enabled
+        ) {
+          patchStore(stores.settings, { completionNotificationsEnabled: settings.completionNotificationsEnabled });
         }
         setError(getErrorMessage(error));
       }
@@ -883,6 +931,7 @@ export function useArkController(): ArkController {
       changeTheme,
       changeBuiltInModelPath,
       changeCrashCaptureEnabled,
+      changeCompletionNotificationsEnabled,
       retryWorkspace,
       setBuiltInStatus,
       setWorkspace,
@@ -903,6 +952,7 @@ export function useArkController(): ArkController {
       changeConversationProject,
       changeConversationPersona,
       changeCrashCaptureEnabled,
+      changeCompletionNotificationsEnabled,
       changeTheme,
       createConversation,
       deleteActiveConversation,

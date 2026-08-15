@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   ArrowLeft,
+  Bell,
   CheckCircle2,
   Circle,
   Database,
@@ -89,6 +90,9 @@ interface SettingsViewProps {
   /** OPS-001: opt-in, off by default — see `observability.rs`'s module doc. */
   crashCaptureEnabled: boolean;
   onCrashCaptureEnabledChange: (enabled: boolean) => void;
+  /** CMP-006: opt-in, off by default — see `generation.rs`'s `should_notify`. */
+  completionNotificationsEnabled: boolean;
+  onCompletionNotificationsEnabledChange: (enabled: boolean) => void;
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
@@ -120,6 +124,8 @@ export function SettingsView({
   onBuiltInModelPathChange,
   crashCaptureEnabled,
   onCrashCaptureEnabledChange,
+  completionNotificationsEnabled,
+  onCompletionNotificationsEnabledChange,
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
@@ -642,6 +648,10 @@ export function SettingsView({
     case "advanced":
       sectionContent = (
         <>
+          <NotificationsPanel
+            completionNotificationsEnabled={completionNotificationsEnabled}
+            onCompletionNotificationsEnabledChange={onCompletionNotificationsEnabledChange}
+          />
           <DiagnosticsBundlePanel
             onError={onError}
             crashCaptureEnabled={crashCaptureEnabled}
@@ -3146,6 +3156,41 @@ function ToolSecretField({ toolId, onError }: { toolId: string; onError: (messag
         )}
       </div>
     </div>
+  );
+}
+
+/** CMP-006: device-scoped, opt-in — same `DeviceSettings` struct and shape as the crash-capture
+ * toggle just below it, which is why this lives here in Advanced rather than in Appearance
+ * (which today renders only the theme control) or a new top-level tab. */
+function NotificationsPanel({
+  completionNotificationsEnabled,
+  onCompletionNotificationsEnabledChange,
+}: {
+  completionNotificationsEnabled: boolean;
+  onCompletionNotificationsEnabledChange: (enabled: boolean) => void;
+}) {
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Bell className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Notifications</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Shows a native OS notification when a response finishes, fails, or is interrupted while Ark's window isn't
+        focused. The notification never includes the conversation title, your message, or the response — just that
+        something finished. Enabling this will prompt for OS notification permission.
+      </p>
+
+      <label className="mt-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={completionNotificationsEnabled}
+          onChange={(event) => onCompletionNotificationsEnabledChange(event.target.checked)}
+          className="h-4 w-4"
+        />
+        Notify when a response finishes (off by default)
+      </label>
+    </Panel>
   );
 }
 

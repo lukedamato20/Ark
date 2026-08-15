@@ -382,6 +382,9 @@ export interface DeviceSettings {
   /** OPS-001: opt-in, off by default. Never transmitted anywhere automatically — see the
    * diagnostics bundle export flow for the only way crash/log data ever leaves the device. */
   crashCaptureEnabled: boolean;
+  /** CMP-006: opt-in, off by default. When true, a generation that completes, fails, or is
+   * interrupted while the main window is unfocused shows a generic native OS notification. */
+  completionNotificationsEnabled: boolean;
 }
 
 export interface WorkspaceInfo {

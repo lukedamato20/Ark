@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppBootstrap,
@@ -194,6 +195,12 @@ export interface ArkClient {
    * scheme allowlist enforced natively as defense in depth.
    */
   openExternalUrl(url: string): Promise<void>;
+
+  /** CMP-006: checks the OS notification permission and, if not already granted, requests it —
+   * the explicit, deniable prompt this task's own acceptance criteria calls for. Returns whether
+   * permission ended up granted; callers only persist `completionNotificationsEnabled: true` if
+   * this resolves `true`, so a denial is respected rather than silently assumed away. */
+  requestNotificationPermission(): Promise<boolean>;
 
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
   createConversation(title?: string): Promise<Conversation>;
@@ -410,6 +417,11 @@ export function createTauriArkClient(): ArkClient {
       }),
     updateDeviceSettings: (settings) => invoke<DeviceSettings>("update_device_settings", { settings }),
     openExternalUrl: (url) => openUrl(url),
+
+    requestNotificationPermission: async () => {
+      if (await isPermissionGranted()) return true;
+      return (await requestPermission()) === "granted";
+    },
 
     listConversations: (input) =>
       invoke<ConversationPage>("list_conversations", {
@@ -642,6 +654,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     restoreWorkspaceRecoveryKey: notImplemented("restoreWorkspaceRecoveryKey"),
     updateDeviceSettings: async (settings) => settings,
     openExternalUrl: async () => undefined,
+    requestNotificationPermission: async () => true,
 
     listConversations: async () => ({ items: [], nextCursor: null, searchSnippets: {} }),
     createConversation: notImplemented("createConversation"),
