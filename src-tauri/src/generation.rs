@@ -717,7 +717,7 @@ fn queue_provider_stream(
     conversation_id: String,
     assistant_message_id: String,
 ) -> Result<(), AppError> {
-    let bearer_token = crate::commands::built_in_bearer_token(state, &provider);
+    let bearer_token = crate::commands::resolve_bearer_token(state, &provider);
     if let Err(error) =
         ProviderRegistry::create_with_bearer_token(provider.clone(), bearer_token.clone())
     {

@@ -210,6 +210,19 @@ pub(crate) fn delete_workspace_key(reference: &str) -> Result<(), AppError> {
         .map_err(|error| error.to_app_error())
 }
 
+/// FTR-007: reads a provider's stored credential value for internal use only — attaching it to
+/// an outgoing provider request. Never exposed to the frontend or logged, unlike
+/// `get_provider_secret_metadata`, which returns only masked/availability info over IPC.
+pub(crate) fn read_provider_secret(
+    reference: &str,
+) -> Result<zeroize::Zeroizing<String>, AppError> {
+    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    SystemSecretStore
+        .read(reference)
+        .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
+        .map_err(|error| error.to_app_error())
+}
+
 fn validate_secret(value: String) -> Result<SecretValue, AppError> {
     if value.is_empty() || value.len() > MAX_SECRET_BYTES {
         return Err(AppError::invalid_input(format!(
@@ -568,6 +581,15 @@ mod tests {
                     .map_err(|error| error.to_app_error())?
                     .expose(),
                 second
+            );
+            // FTR-007: `read_provider_secret` is the internal-only path `resolve_bearer_token`
+            // uses to attach this credential to outgoing requests for a non-built-in provider —
+            // must return the exact same value the public metadata endpoint only masks.
+            assert_eq!(*read_provider_secret(&created.id)?, second);
+            let provider = crate::commands::lock_db(&state)?.get_provider(DEFAULT_PROVIDER_ID)?;
+            assert_eq!(
+                crate::commands::resolve_bearer_token(&state, &provider),
+                Some(second.clone())
             );
             let public = get_provider_secret_metadata(&state, DEFAULT_PROVIDER_ID.to_string())
                 .await?

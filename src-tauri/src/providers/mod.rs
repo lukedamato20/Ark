@@ -276,11 +276,13 @@ pub struct OllamaProvider {
 pub struct LocalInferenceHostProvider {
     provider: ProviderConfig,
     client: Client,
-    /// SEC-002: bearer token for the managed built-in runtime, held only in memory for the
-    /// life of this runtime instance — never part of `ProviderConfig` (which is also returned
-    /// to the frontend over IPC and must never carry a secret), never logged, never persisted.
-    /// `None` for a user-configured "local inference host" provider, which manages its own
-    /// server and authentication independently of Ark.
+    /// SEC-002/FTR-007: the sidecar-generated token for the managed built-in runtime, or a
+    /// user-configured remote provider's stored credential (read from the OS keychain by
+    /// `commands::resolve_bearer_token`) — either way, held only in memory for the life of this
+    /// adapter instance, never part of `ProviderConfig` (which is also returned to the frontend
+    /// over IPC and must never carry a secret), never logged, never persisted here. `None` for a
+    /// self-hosted "local inference host" with no stored credential, which manages its own
+    /// authentication independently of Ark.
     api_key: Option<String>,
     timeouts: ProviderTimeoutPolicy,
 }
