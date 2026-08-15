@@ -6,10 +6,12 @@ import {
   FileText,
   Loader2,
   MoreVertical,
+  Paperclip,
   Send,
   SlidersHorizontal,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import * as React from "react";
 import { cn } from "../../lib/cn";
@@ -19,6 +21,7 @@ import { getErrorMessage } from "../../lib/arkErrors";
 import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
+  Attachment,
   Conversation,
   Message,
   ModelInfo,
@@ -37,6 +40,14 @@ import { MessageScrollContainer } from "./MessageScrollContainer";
 
 /** COR-009: mirrors the authoritative limit enforced in `export::validate_conversation_export`. */
 const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
+
+/** CMP-001: mirrors `validation::MAX_ATTACHMENT_BYTES` — a fast client-side rejection so a huge
+ * file doesn't get read into memory and uploaded only to bounce off the server-side limit. */
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+/** UX only — the server-side content sniff (NUL-byte rejection) is the real, authoritative
+ * boundary; a generous plain-text-ish extension list here just steers the file picker. */
+const ATTACHMENT_ACCEPT =
+  ".txt,.md,.markdown,.csv,.tsv,.json,.log,.yaml,.yml,.toml,.ini,.xml,.html,.css,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.sh";
 
 interface ActiveImport {
   id: string;
@@ -104,7 +115,11 @@ export function ChatView({
   const [model, setModel] = React.useState("");
   const [editingMessageId, setEditingMessageId] = React.useState<string | null>(null);
   const [activeImport, setActiveImport] = React.useState<ActiveImport | null>(null);
+  const [stagedAttachments, setStagedAttachments] = React.useState<Attachment[]>([]);
+  const [sentAttachmentsByMessageId, setSentAttachmentsByMessageId] = React.useState<Record<string, Attachment[]>>({});
+  const [attaching, setAttaching] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const attachmentInputRef = React.useRef<HTMLInputElement | null>(null);
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const previousConversationIdRef = React.useRef<string | undefined>(undefined);
   const autoRefreshedProviderIdsRef = React.useRef<Set<string>>(new Set());
@@ -117,6 +132,69 @@ export function ChatView({
   React.useEffect(() => {
     if (focusComposerSignal > 0) composerRef.current?.focus();
   }, [focusComposerSignal]);
+
+  // CMP-001: loads every attachment for the conversation on switch — staged ones (`messageId`
+  // still `null`) restore the compose-in-progress state (see `handleAttachFiles`'s doc comment
+  // for why that matters), while already-sent ones are indexed by message id so
+  // `ChatMessageList` can show which messages carried a file.
+  React.useEffect(() => {
+    if (!conversation) {
+      setStagedAttachments([]);
+      setSentAttachmentsByMessageId({});
+      return;
+    }
+    let cancelled = false;
+    void client
+      .listConversationAttachments(conversation.id)
+      .then((attachments) => {
+        if (cancelled) return;
+        setStagedAttachments(attachments.filter((a) => !a.messageId));
+        const byMessageId: Record<string, Attachment[]> = {};
+        for (const attachment of attachments) {
+          if (!attachment.messageId) continue;
+          (byMessageId[attachment.messageId] ??= []).push(attachment);
+        }
+        setSentAttachmentsByMessageId(byMessageId);
+      })
+      .catch((error) => onError(getErrorMessage(error)));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id]);
+
+  async function handleAttachFiles(files: FileList | File[]) {
+    if (!conversation) return;
+    setAttaching(true);
+    try {
+      for (const file of Array.from(files)) {
+        if (file.size > MAX_ATTACHMENT_BYTES) {
+          onError(
+            `"${file.name}" is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB attachment limit.`,
+          );
+          continue;
+        }
+        const content = await file.text();
+        try {
+          const attachment = await client.attachTextFile(conversation.id, file.name, content);
+          setStagedAttachments((current) => [...current, attachment]);
+        } catch (error) {
+          onError(getErrorMessage(error));
+        }
+      }
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  async function handleRemoveStagedAttachment(id: string) {
+    try {
+      await client.deleteAttachment(id);
+      setStagedAttachments((current) => current.filter((a) => a.id !== id));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }
 
   React.useEffect(() => {
     let disposed = false;
@@ -256,6 +334,7 @@ export function ChatView({
     }
 
     const content = draft.trim();
+    const attachmentIds = stagedAttachments.map((a) => a.id);
     setDraft("");
     setIsSending(true);
 
@@ -267,7 +346,15 @@ export function ChatView({
         model,
         temperature: provider?.defaultTemperature,
         maxTokens: provider?.defaultMaxTokens,
+        attachmentIds,
       });
+      if (stagedAttachments.length > 0) {
+        setSentAttachmentsByMessageId((current) => ({
+          ...current,
+          [result.userMessageId]: stagedAttachments.map((a) => ({ ...a, messageId: result.userMessageId })),
+        }));
+      }
+      setStagedAttachments([]);
 
       const now = new Date().toISOString();
       onMessagesChange([
@@ -811,6 +898,7 @@ export function ChatView({
           <ChatMessageList
             messages={messages}
             providers={providers}
+            attachmentsByMessageId={sentAttachmentsByMessageId}
             canBranch={selectedModelAvailable && !activeAssistant}
             canSwitchBranch={!activeAssistant}
             editingMessageId={editingMessageId}
@@ -831,7 +919,41 @@ export function ChatView({
 
       <footer className="border-t border-border p-4">
         <div className="mx-auto max-w-3xl">
-          <div className="rounded-lg border border-border bg-card p-2">
+          <div
+            className="rounded-lg border border-border bg-card p-2"
+            onDragOver={(event) => {
+              if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+            }}
+            onDrop={(event) => {
+              if (event.dataTransfer.files.length === 0) return;
+              event.preventDefault();
+              void handleAttachFiles(event.dataTransfer.files);
+            }}
+          >
+            {stagedAttachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5 px-1">
+                {stagedAttachments.map((attachment) => (
+                  <span
+                    key={attachment.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 py-1 pl-2 pr-1 text-xs"
+                  >
+                    <FileText className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                    <span className="max-w-40 truncate" title={attachment.fileName}>
+                      {attachment.fileName}
+                    </span>
+                    <span className="text-muted-foreground">{(attachment.byteSize / 1024).toFixed(1)} KB</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove attachment ${attachment.fileName}`}
+                      onClick={() => void handleRemoveStagedAttachment(attachment.id)}
+                      className="rounded-sm p-0.5 outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <Textarea
               ref={composerRef}
               value={draft}
@@ -842,6 +964,11 @@ export function ChatView({
                   void handleSend();
                 }
               }}
+              onPaste={(event) => {
+                if (event.clipboardData.files.length === 0) return;
+                event.preventDefault();
+                void handleAttachFiles(event.clipboardData.files);
+              }}
               placeholder={
                 selectedModelAvailable
                   ? "Ask Ark..."
@@ -851,7 +978,29 @@ export function ChatView({
               className="max-h-44 min-h-20 border-0 bg-transparent focus-visible:ring-0"
             />
             <div className="flex items-center justify-between px-1 pt-2">
-              <div className="text-xs text-muted-foreground">Ctrl/Cmd + Enter to send</div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  disabled={!conversation || attaching}
+                  aria-label="Attach a text file"
+                >
+                  {attaching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                </Button>
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  multiple
+                  accept={ATTACHMENT_ACCEPT}
+                  className="hidden"
+                  onChange={(event) => {
+                    if (event.target.files) void handleAttachFiles(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                <div className="text-xs text-muted-foreground">Ctrl/Cmd + Enter to send</div>
+              </div>
               {activeAssistant ? (
                 <Button variant="secondary" onClick={handleCancel}>
                   <Square className="h-4 w-4" />

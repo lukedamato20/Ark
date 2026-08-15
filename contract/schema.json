@@ -51,6 +51,7 @@
       "createdAt"
     ],
     "PersonaDeletionPreview": ["persona", "conversationCount"],
+    "Attachment": ["id", "conversationId", "messageId", "fileName", "byteSize", "sha256", "createdAt"],
     "Message": [
       "id",
       "conversationId",

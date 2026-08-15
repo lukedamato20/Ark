@@ -1,3 +1,4 @@
+use crate::attachments::Attachment;
 use crate::chat::{
     BranchAlternative, Conversation, ConversationListRequest, ConversationPage, Message,
 };
@@ -16,6 +17,7 @@ use chrono::Utc;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
@@ -102,6 +104,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 10,
         name: "0010_personas",
         sql: include_str!("../../migrations/0010_personas.sql"),
+    },
+    MigrationDef {
+        version: 11,
+        name: "0011_attachments",
+        sql: include_str!("../../migrations/0011_attachments.sql"),
     },
 ];
 
@@ -1509,6 +1516,180 @@ impl Database {
         })
     }
 
+    /// CMP-001: stages a new attachment against `conversation_id` — `message_id` starts `NULL`,
+    /// since the message it will be sent with doesn't exist yet (the whole point of "preview/
+    /// remove before send"). Validates the conversation exists first, mirroring
+    /// `set_conversation_project`'s existence-check convention.
+    pub fn create_attachment(
+        &self,
+        conversation_id: &str,
+        file_name: &str,
+        content: &str,
+    ) -> Result<Attachment, AppError> {
+        self.get_conversation(conversation_id)?;
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        let byte_size = content.len() as i64;
+        let sha256 = {
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        self.connection.execute(
+            "INSERT INTO attachments (
+                id, conversation_id, message_id, file_name, byte_size, sha256, content, created_at
+             ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                conversation_id,
+                file_name,
+                byte_size,
+                sha256,
+                content,
+                timestamp
+            ],
+        )?;
+        self.get_attachment(&id)
+    }
+
+    pub fn get_attachment(&self, id: &str) -> Result<Attachment, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, conversation_id, message_id, file_name, byte_size, sha256, created_at
+                 FROM attachments WHERE id = ?1",
+                params![id],
+                map_attachment,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Attachment"))
+    }
+
+    pub fn list_conversation_attachments(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<Attachment>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, conversation_id, message_id, file_name, byte_size, sha256, created_at
+             FROM attachments WHERE conversation_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = statement.query_map(params![conversation_id], map_attachment)?;
+        collect_rows(rows)
+    }
+
+    pub fn get_attachment_content(&self, id: &str) -> Result<String, AppError> {
+        self.connection
+            .query_row(
+                "SELECT content FROM attachments WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Attachment"))
+    }
+
+    /// CMP-001: only a staged (`message_id IS NULL`) attachment can be deleted — the "remove
+    /// before send" acceptance criterion. One already linked to a sent message is not offered
+    /// for deletion, matching the append-only-history posture the rest of this schema already
+    /// has for messages themselves.
+    pub fn delete_attachment(&self, id: &str) -> Result<(), AppError> {
+        let attachment = self.get_attachment(id)?;
+        if attachment.message_id.is_some() {
+            return Err(AppError::invalid_input(
+                "This attachment is already part of a sent message and cannot be removed.",
+            ));
+        }
+        self.connection
+            .execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// CMP-001: reads one staged attachment's full content and validates it is actually staged
+    /// (`message_id IS NULL`) and belongs to `conversation_id` — used only by
+    /// `link_attachments_to_message` below, never exposed as its own command, since a caller
+    /// linking attachments to a message it's about to create needs the content to build the
+    /// outgoing provider request, not just the summary.
+    fn get_staged_attachment(
+        &self,
+        conversation_id: &str,
+        id: &str,
+    ) -> Result<(Attachment, String), AppError> {
+        let (attachment, content) = self
+            .connection
+            .query_row(
+                "SELECT id, conversation_id, message_id, file_name, byte_size, sha256, created_at, content
+                 FROM attachments WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        Attachment {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            message_id: row.get(2)?,
+                            file_name: row.get(3)?,
+                            byte_size: row.get(4)?,
+                            sha256: row.get(5)?,
+                            created_at: row.get(6)?,
+                        },
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Attachment"))?;
+        if attachment.conversation_id != conversation_id {
+            return Err(AppError::invalid_input(
+                "Attachment does not belong to this conversation.",
+            ));
+        }
+        if attachment.message_id.is_some() {
+            return Err(AppError::invalid_input(
+                "Attachment is already linked to a sent message.",
+            ));
+        }
+        Ok((attachment, content))
+    }
+
+    /// CMP-001: links every staged attachment in `attachment_ids` to `message_id`, returning each
+    /// one's summary and content so the caller (`generation.rs`, inside the same transaction that
+    /// creates the message) can build the outgoing provider request's disclosed attachment
+    /// blocks without a second round of queries. Rejects the whole call — no partial linking — if
+    /// any id doesn't resolve to a staged attachment on this conversation.
+    /// Validates every id in a first, read-only pass *before* writing any of them — the caller
+    /// (`generation.rs`, already inside its own `db.transaction`) can't have this method start a
+    /// second, nested `BEGIN` to get atomicity the usual way (`Database::transaction` doesn't
+    /// support nesting), so "no partial linking" is achieved by never writing until every id is
+    /// already known-good instead. A first draft skipped this and updated each row as it went,
+    /// which left an earlier valid id linked in the database after a later invalid one aborted
+    /// the call — caught by `link_attachments_to_message_rejects_the_whole_call_if_any_id_is_invalid`
+    /// failing, not by inspection.
+    pub fn link_attachments_to_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        attachment_ids: &[String],
+    ) -> Result<Vec<(Attachment, String)>, AppError> {
+        let validated = attachment_ids
+            .iter()
+            .map(|attachment_id| self.get_staged_attachment(conversation_id, attachment_id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut linked = Vec::with_capacity(attachment_ids.len());
+        for (attachment_id, (attachment, content)) in attachment_ids.iter().zip(validated) {
+            self.connection.execute(
+                "UPDATE attachments SET message_id = ?1 WHERE id = ?2",
+                params![message_id, attachment_id],
+            )?;
+            linked.push((
+                Attachment {
+                    message_id: Some(message_id.to_string()),
+                    ..attachment
+                },
+                content,
+            ));
+        }
+        Ok(linked)
+    }
+
     pub fn get_active_messages(&self, conversation_id: &str) -> Result<Vec<Message>, AppError> {
         let conversation = self.get_conversation(conversation_id)?;
         let Some(current_message_id) = conversation.current_message_id else {
@@ -2503,6 +2684,18 @@ fn map_persona_version_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pers
         default_temperature: row.get(3)?,
         default_max_tokens: row.get(4)?,
         created_at: row.get(5)?,
+    })
+}
+
+fn map_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
+    Ok(Attachment {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        message_id: row.get(2)?,
+        file_name: row.get(3)?,
+        byte_size: row.get(4)?,
+        sha256: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -3691,6 +3884,69 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    fn seed_migration_0010_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..10] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1),
+                        (9, '0009_message_branch_names', ?1),
+                        (10, '0010_personas', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 10 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-10 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-10 conversation, from before attachments existed");
+        conversation_id
+    }
+
+    /// CMP-001 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 11, the current latest — a pre-existing conversation row from a migration-10
+    /// workspace must survive migration 11's new `attachments` table, and the table (including
+    /// its `FOREIGN KEY ... ON DELETE CASCADE` onto the pre-existing conversation) must actually
+    /// be usable afterward.
+    #[test]
+    fn upgrading_a_migration_0010_workspace_adds_the_attachments_table() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let conversation_id = seed_migration_0010_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-10 workspace succeeds");
+        let conversation = db
+            .get_conversation(&conversation_id)
+            .expect("pre-existing conversation readable after upgrade");
+        assert_eq!(conversation.title, "Release-10 conversation");
+
+        let attachment = db
+            .create_attachment(&conversation_id, "post-upgrade.txt", "content")
+            .expect("attachments table is usable immediately after migration 11");
+        assert_eq!(attachment.conversation_id, conversation_id);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -4228,6 +4484,245 @@ mod tests {
             .list_persona_versions(&persona.id)
             .expect("listing versions of a deleted persona returns empty, not an error");
         assert!(versions.is_empty());
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn create_attachment_stages_it_unlinked_with_a_computed_hash_and_size() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Attach here".to_string()))
+            .expect("conversation created");
+
+        let attachment = db
+            .create_attachment(&conversation.id, "notes.txt", "line one\nline two")
+            .expect("attachment created");
+        assert_eq!(attachment.conversation_id, conversation.id);
+        assert_eq!(
+            attachment.message_id, None,
+            "staged attachments start unlinked"
+        );
+        assert_eq!(attachment.file_name, "notes.txt");
+        assert_eq!(attachment.byte_size, "line one\nline two".len() as i64);
+        assert_eq!(attachment.sha256.len(), 64, "sha256 hex digest is 64 chars");
+
+        let missing = db
+            .create_attachment("does-not-exist", "x.txt", "content")
+            .expect_err("attaching to a nonexistent conversation is rejected");
+        assert_eq!(missing.code, "not_found");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_conversation_attachments_returns_only_this_conversations_rows_in_creation_order() {
+        let (db, path) = test_db();
+        let conversation_a = db
+            .create_conversation(Some("A".to_string()))
+            .expect("conversation created");
+        let conversation_b = db
+            .create_conversation(Some("B".to_string()))
+            .expect("conversation created");
+        db.create_attachment(&conversation_a.id, "first.txt", "1")
+            .expect("attached");
+        db.create_attachment(&conversation_a.id, "second.txt", "2")
+            .expect("attached");
+        db.create_attachment(&conversation_b.id, "other.txt", "3")
+            .expect("attached");
+
+        let listed = db
+            .list_conversation_attachments(&conversation_a.id)
+            .expect("listed");
+        let names: Vec<&str> = listed.iter().map(|a| a.file_name.as_str()).collect();
+        assert_eq!(names, vec!["first.txt", "second.txt"]);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn get_attachment_content_returns_the_full_stored_text() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Content check".to_string()))
+            .expect("conversation created");
+        let attachment = db
+            .create_attachment(&conversation.id, "notes.txt", "the full body")
+            .expect("attached");
+
+        let content = db
+            .get_attachment_content(&attachment.id)
+            .expect("content read back");
+        assert_eq!(content, "the full body");
+
+        let missing = db
+            .get_attachment_content("does-not-exist")
+            .expect_err("missing attachment is not_found");
+        assert_eq!(missing.code, "not_found");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_attachment_only_succeeds_while_still_staged() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Delete check".to_string()))
+            .expect("conversation created");
+        let staged = db
+            .create_attachment(&conversation.id, "staged.txt", "content")
+            .expect("attached");
+        let to_link = db
+            .create_attachment(&conversation.id, "linked.txt", "content")
+            .expect("attached");
+
+        db.delete_attachment(&staged.id)
+            .expect("a staged attachment can be deleted");
+        let missing = db.get_attachment(&staged.id).expect_err("gone");
+        assert_eq!(missing.code, "not_found");
+
+        let user_message = db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "hi",
+                "complete",
+                None,
+                None,
+            )
+            .expect("message appended");
+        db.link_attachments_to_message(
+            &conversation.id,
+            &user_message.id,
+            std::slice::from_ref(&to_link.id),
+        )
+        .expect("linked");
+
+        let error = db
+            .delete_attachment(&to_link.id)
+            .expect_err("a linked attachment cannot be deleted");
+        assert_eq!(error.code, "invalid_input");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn link_attachments_to_message_rejects_the_whole_call_if_any_id_is_invalid() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Link check".to_string()))
+            .expect("conversation created");
+        let other_conversation = db
+            .create_conversation(Some("Other".to_string()))
+            .expect("conversation created");
+        let valid = db
+            .create_attachment(&conversation.id, "valid.txt", "content")
+            .expect("attached");
+        let wrong_conversation = db
+            .create_attachment(&other_conversation.id, "wrong.txt", "content")
+            .expect("attached");
+        let user_message = db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "hi",
+                "complete",
+                None,
+                None,
+            )
+            .expect("message appended");
+
+        let error = db
+            .link_attachments_to_message(
+                &conversation.id,
+                &user_message.id,
+                &[valid.id.clone(), wrong_conversation.id.clone()],
+            )
+            .expect_err("linking an attachment from another conversation is rejected");
+        assert_eq!(error.code, "invalid_input");
+
+        // Nothing partially applied: `valid` must still be unlinked despite being processed
+        // first in the batch.
+        let refetched = db.get_attachment(&valid.id).expect("still exists");
+        assert_eq!(refetched.message_id, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn link_attachments_to_message_returns_content_alongside_the_linked_summary() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Link content".to_string()))
+            .expect("conversation created");
+        let attachment = db
+            .create_attachment(&conversation.id, "notes.txt", "the body text")
+            .expect("attached");
+        let user_message = db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "hi",
+                "complete",
+                None,
+                None,
+            )
+            .expect("message appended");
+
+        let linked = db
+            .link_attachments_to_message(
+                &conversation.id,
+                &user_message.id,
+                std::slice::from_ref(&attachment.id),
+            )
+            .expect("linked");
+        assert_eq!(linked.len(), 1);
+        let (summary, content) = &linked[0];
+        assert_eq!(
+            summary.message_id.as_deref(),
+            Some(user_message.id.as_str())
+        );
+        assert_eq!(content, "the body text");
+
+        let refetched = db.get_attachment(&attachment.id).expect("refetched");
+        assert_eq!(
+            refetched.message_id.as_deref(),
+            Some(user_message.id.as_str())
+        );
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_a_conversation_cascades_to_its_attachments() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Doomed conversation".to_string()))
+            .expect("conversation created");
+        let attachment = db
+            .create_attachment(&conversation.id, "notes.txt", "content")
+            .expect("attached");
+
+        db.delete_conversation(&conversation.id)
+            .expect("conversation deleted");
+
+        let missing = db
+            .get_attachment(&attachment.id)
+            .expect_err("attachment is gone via FOREIGN KEY ... ON DELETE CASCADE");
+        assert_eq!(missing.code, "not_found");
 
         drop(db);
         let _ = fs::remove_file(path);

@@ -7,6 +7,7 @@
 //! never compiled into a release build.
 #![cfg(test)]
 
+use crate::attachments::Attachment;
 use crate::chat::{
     BranchAlternative, Conversation, ConversationPage, Message, SendChatResult, StreamEvent,
 };
@@ -273,6 +274,22 @@ fn persona_deletion_preview_matches_contract() {
         &PersonaDeletionPreview {
             persona: sample_persona(),
             conversation_count: 2,
+        },
+    );
+}
+
+#[test]
+fn attachment_matches_contract() {
+    assert_matches_contract(
+        "Attachment",
+        &Attachment {
+            id: "attachment-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            message_id: Some("message-1".to_string()),
+            file_name: "notes.txt".to_string(),
+            byte_size: 42,
+            sha256: "a".repeat(64),
+            created_at: "2026-08-13T00:00:00Z".to_string(),
         },
     );
 }

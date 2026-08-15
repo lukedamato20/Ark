@@ -134,6 +134,57 @@ pub fn validate_persona_instructions(value: &str) -> Result<String, AppError> {
     Ok(trimmed.to_string())
 }
 
+/// CMP-001: a generous bound, not a tuned limit — text attachments are meant to be genuinely
+/// read as context, not truncated mid-thought, but an unbounded value would let one attachment
+/// exhaust memory or blow the token budget of every subsequent request in the conversation.
+pub const MAX_ATTACHMENT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_ATTACHMENT_FILE_NAME_CHARS: usize = 255;
+
+/// CMP-001: validates a text attachment before it's stored. `content` arrives as whatever text
+/// the frontend read from the picked/dropped/pasted file (`File.text()` or the clipboard's
+/// plain-text data) — this is the actual "content sniffing does not trust extension alone" check
+/// (acceptance criterion 1): a `.txt`-named file whose bytes don't actually decode as plausible
+/// text is rejected here regardless of what its name claims, via the NUL-byte heuristic below
+/// (a strong, cheap signal that the browser's UTF-8 decode produced garbage from binary input —
+/// genuine text content essentially never contains one).
+pub fn validate_attachment(file_name: &str, content: &str) -> Result<(String, String), AppError> {
+    let trimmed_name = file_name.trim();
+    if trimmed_name.is_empty() {
+        return Err(AppError::invalid_input(
+            "Attachment file name cannot be empty.",
+        ));
+    }
+    if trimmed_name.chars().count() > MAX_ATTACHMENT_FILE_NAME_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Attachment file name must be at most {MAX_ATTACHMENT_FILE_NAME_CHARS} characters."
+        )));
+    }
+    if trimmed_name.chars().any(char::is_control) {
+        return Err(AppError::invalid_input(
+            "Attachment file name must not contain control characters.",
+        ));
+    }
+
+    if content.is_empty() {
+        return Err(AppError::invalid_input(
+            "Attachment content cannot be empty.",
+        ));
+    }
+    if content.len() > MAX_ATTACHMENT_BYTES {
+        return Err(AppError::invalid_input(format!(
+            "Attachment content must be at most {} MB.",
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        )));
+    }
+    if content.contains('\0') {
+        return Err(AppError::invalid_input(
+            "This file does not look like text — Ark only accepts plain-text attachments in this build.",
+        ));
+    }
+
+    Ok((trimmed_name.to_string(), content.to_string()))
+}
+
 /// FTR-005: a branch label is a short, glanceable name shown next to a "Response N" ordinal in
 /// the alternatives switcher — not free-form prose, so the bound is much tighter than
 /// `MAX_SYSTEM_PROMPT_CHARS`.
@@ -582,6 +633,58 @@ mod tests {
     fn system_prompt_rejects_over_the_character_limit() {
         let value = "a".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
         let error = validate_system_prompt(Some(value)).unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn attachment_accepts_a_normal_text_file_and_trims_the_name() {
+        let (name, content) = validate_attachment("  notes.txt  ", "hello world").unwrap();
+        assert_eq!(name, "notes.txt");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn attachment_rejects_a_blank_or_control_bearing_file_name() {
+        assert_eq!(
+            validate_attachment("   ", "content").unwrap_err().code,
+            "invalid_input"
+        );
+        assert_eq!(
+            validate_attachment("notes\u{0007}.txt", "content")
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn attachment_rejects_empty_content() {
+        assert_eq!(
+            validate_attachment("notes.txt", "").unwrap_err().code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn attachment_rejects_content_over_the_byte_limit() {
+        let oversized = "a".repeat(MAX_ATTACHMENT_BYTES + 1);
+        assert_eq!(
+            validate_attachment("notes.txt", &oversized)
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn attachment_accepts_content_at_exactly_the_byte_limit() {
+        let exact = "a".repeat(MAX_ATTACHMENT_BYTES);
+        assert!(validate_attachment("notes.txt", &exact).is_ok());
+    }
+
+    #[test]
+    fn attachment_rejects_content_containing_a_nul_byte_as_not_really_text() {
+        let error = validate_attachment("notes.txt", "hello\0world").unwrap_err();
         assert_eq!(error.code, "invalid_input");
     }
 }

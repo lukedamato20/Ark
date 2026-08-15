@@ -110,6 +110,12 @@ pub struct SendChatRequest {
     pub model: String,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,
+    /// CMP-001: ids of staged attachments (`Attachment.message_id` still `None`) to link to the
+    /// new user message and disclose to the provider. `None`/empty means no attachments — the
+    /// vast majority of sends, so this stays optional rather than requiring every existing
+    /// caller to pass an empty array.
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

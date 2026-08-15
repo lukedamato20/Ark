@@ -84,6 +84,20 @@ export interface PersonaDeletionPreview {
   conversationCount: number;
 }
 
+/** CMP-001: a text file attached to an outgoing message. Never carries its content — that's
+ * fetched on demand via `getAttachmentContent` — so loading a conversation's attachment list
+ * doesn't re-send potentially-large text bodies for every row. `messageId: null` means staged
+ * (uploaded, not yet sent) — the "preview/remove before send" state. */
+export interface Attachment {
+  id: string;
+  conversationId: string;
+  messageId?: string | null;
+  fileName: string;
+  byteSize: number;
+  sha256: string;
+  createdAt: string;
+}
+
 export interface ConversationPage {
   items: Conversation[];
   nextCursor?: string | null;

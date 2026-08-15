@@ -112,6 +112,24 @@ fn resolve_conversation_persona(db: &Database, conversation: &Conversation) -> O
     db.get_persona(persona_id).ok()
 }
 
+/// CMP-001: formats each newly-attached file as an explicitly delimited, named block appended to
+/// the outgoing provider message — the literal "route disclosure names each attachment"
+/// acceptance criterion: what the provider actually receives never leaves a file's presence or
+/// name ambiguous. Deliberately appended only to the *provider request* built here, never merged
+/// into the user's own stored `Message.content` — the conversation's displayed/exported history
+/// stays exactly what the user typed, the same separation `resolve_system_prompt`'s injected
+/// system message already establishes for project/persona instructions.
+fn build_attachment_disclosure(attachments: &[(crate::attachments::Attachment, String)]) -> String {
+    let mut disclosure = String::new();
+    for (attachment, content) in attachments {
+        disclosure.push_str(&format!(
+            "\n\n--- Attached file: {} ({} bytes) ---\n{}\n--- End of {} ---",
+            attachment.file_name, attachment.byte_size, content, attachment.file_name
+        ));
+    }
+    disclosure
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerationProvenance {
@@ -257,6 +275,19 @@ pub fn send_chat_message(
             )?;
             db.maybe_title_conversation(&request.conversation_id, content)?;
 
+            // CMP-001: linked inside this same transaction — a bad attachment id rolls back the
+            // user message too, so a rejected send never leaves a dangling half-sent turn.
+            let linked_attachments = if request.attachment_ids.is_empty() {
+                Vec::new()
+            } else {
+                db.link_attachments_to_message(
+                    &request.conversation_id,
+                    &user_message.id,
+                    &request.attachment_ids,
+                )?
+            };
+            let attachment_disclosure = build_attachment_disclosure(&linked_attachments);
+
             let assistant_message = db.append_message(
                 &request.conversation_id,
                 Some(&user_message.id),
@@ -299,7 +330,7 @@ pub fn send_chat_message(
             }));
             provider_messages.push(ChatMessage {
                 role: "user".to_string(),
-                content: content.to_string(),
+                content: format!("{content}{attachment_disclosure}"),
             });
 
             let (effective_temperature, temperature_source) = resolve_setting(
@@ -1309,6 +1340,7 @@ mod tests {
             model: "test-model".to_string(),
             temperature: None,
             max_tokens: None,
+            attachment_ids: Vec::new(),
         }
     }
 
@@ -1331,6 +1363,7 @@ mod tests {
                 model: "test-model".to_string(),
                 temperature: None,
                 max_tokens: None,
+                attachment_ids: Vec::new(),
             },
         )
         .expect("durable generation is queued");
@@ -1702,6 +1735,7 @@ mod tests {
                 model: "test-model".to_string(),
                 temperature: None,
                 max_tokens: None,
+                attachment_ids: Vec::new(),
             },
         )
         .expect("generation queued");
@@ -1880,6 +1914,80 @@ mod tests {
         assert_eq!(parsed["maxTokens"].as_i64(), Some(64));
         assert_eq!(parsed["maxTokensSource"], "conversation");
         assert_eq!(parsed["systemPromptSource"], "conversation");
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn send_chat_message_links_a_staged_attachment_without_altering_stored_message_content() {
+        let (state, path) = test_state();
+        let (conversation_id, attachment_id) = {
+            let db = state.db.lock().expect("database lock");
+            let conversation = db
+                .create_conversation(Some("Attachment send".to_string()))
+                .expect("conversation created");
+            let attachment = db
+                .create_attachment(&conversation.id, "notes.txt", "the attached body")
+                .expect("attachment staged");
+            (conversation.id, attachment.id)
+        };
+
+        let mut request = basic_send_request(conversation_id.clone(), "please review this");
+        request.attachment_ids = vec![attachment_id.clone()];
+        let result = send_chat_message(&state, request).expect("generation queued");
+
+        let db = state.db.lock().expect("database lock");
+        let user_message = db
+            .get_message(&result.user_message_id)
+            .expect("user message readable");
+        assert_eq!(
+            user_message.content, "please review this",
+            "the stored message must stay exactly what the user typed — attachment content is \
+             only appended to the outgoing provider request, never merged into stored history"
+        );
+
+        let attachment = db
+            .get_attachment(&attachment_id)
+            .expect("attachment readable");
+        assert_eq!(
+            attachment.message_id.as_deref(),
+            Some(result.user_message_id.as_str()),
+            "sending must link the staged attachment to the new user message"
+        );
+
+        drop(db);
+        drop(state);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn send_chat_message_rejects_the_whole_send_when_an_attachment_id_is_invalid() {
+        let (state, path) = test_state();
+        let conversation = state
+            .db
+            .lock()
+            .expect("database lock")
+            .create_conversation(Some("Bad attachment".to_string()))
+            .expect("conversation created");
+        let conversation_id = conversation.id.clone();
+
+        let mut request = basic_send_request(conversation.id, "hello");
+        request.attachment_ids = vec!["does-not-exist".to_string()];
+        let error = send_chat_message(&state, request)
+            .expect_err("an invalid attachment id must reject the entire send");
+        assert_eq!(error.code, "not_found");
+
+        let db = state.db.lock().expect("database lock");
+        let refetched = db
+            .get_conversation(&conversation_id)
+            .expect("conversation still exists");
+        assert_eq!(
+            refetched.current_message_id, None,
+            "COR-004: a rejected send must not leave a dangling half-sent turn — the whole \
+             transaction, including the user message insert, must have rolled back"
+        );
 
         drop(db);
         drop(state);

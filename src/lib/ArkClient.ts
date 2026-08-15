@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppBootstrap,
+  Attachment,
   BackupResult,
   BranchAlternative,
   BuiltInRuntimeStatus,
@@ -44,6 +45,8 @@ export interface SendChatMessageInput {
   model: string;
   temperature?: number | null;
   maxTokens?: number | null;
+  /** CMP-001: ids of staged attachments to link to this message and disclose to the provider. */
+  attachmentIds?: string[];
 }
 
 export interface EditUserMessageInput {
@@ -246,6 +249,16 @@ export interface ArkClient {
   previewPersonaDeletion(id: string): Promise<PersonaDeletionPreview>;
   deletePersona(id: string): Promise<void>;
 
+  /** CMP-001: stages a text attachment against a conversation, before the message it will be
+   * sent with even exists — the "preview/remove before send" flow. Content-sniffed and
+   * size-bounded server-side; the client-side accept-extension list is a UX nicety only. */
+  attachTextFile(conversationId: string, fileName: string, content: string): Promise<Attachment>;
+  listConversationAttachments(conversationId: string): Promise<Attachment[]>;
+  getAttachmentContent(id: string): Promise<string>;
+  /** Only succeeds while the attachment is still staged (`messageId` still `null`) — one already
+   * part of a sent message is not offered for deletion. */
+  deleteAttachment(id: string): Promise<void>;
+
   runDiagnostics(providerId: string, model?: string | null, includeRuntimeLogs?: boolean): Promise<DiagnosticsResult>;
 
   exportConversationMarkdown(conversationId: string): Promise<string>;
@@ -379,6 +392,7 @@ export function createTauriArkClient(): ArkClient {
           model: input.model,
           temperature: input.temperature ?? undefined,
           maxTokens: input.maxTokens ?? undefined,
+          attachmentIds: input.attachmentIds ?? [],
         },
       }),
     editUserMessage: (input) =>
@@ -448,6 +462,13 @@ export function createTauriArkClient(): ArkClient {
     setPersonaArchived: (id, archived) => invoke<Persona>("set_persona_archived", { id, archived }),
     previewPersonaDeletion: (id) => invoke<PersonaDeletionPreview>("preview_persona_deletion", { id }),
     deletePersona: (id) => invoke<void>("delete_persona", { id }),
+
+    attachTextFile: (conversationId, fileName, content) =>
+      invoke<Attachment>("attach_text_file", { conversationId, fileName, content }),
+    listConversationAttachments: (conversationId) =>
+      invoke<Attachment[]>("list_conversation_attachments", { conversationId }),
+    getAttachmentContent: (id) => invoke<string>("get_attachment_content", { id }),
+    deleteAttachment: (id) => invoke<void>("delete_attachment", { id }),
 
     runDiagnostics: (providerId, model, includeRuntimeLogs = false) =>
       invoke<DiagnosticsResult>("run_diagnostics", {
@@ -584,6 +605,11 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     setPersonaArchived: notImplemented("setPersonaArchived"),
     previewPersonaDeletion: notImplemented("previewPersonaDeletion"),
     deletePersona: async () => undefined,
+
+    attachTextFile: notImplemented("attachTextFile"),
+    listConversationAttachments: async () => [],
+    getAttachmentContent: notImplemented("getAttachmentContent"),
+    deleteAttachment: async () => undefined,
 
     runDiagnostics: notImplemented("runDiagnostics"),
 

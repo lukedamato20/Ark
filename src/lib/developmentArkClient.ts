@@ -1,5 +1,6 @@
 import type {
   AppBootstrap,
+  Attachment,
   BuiltInRuntimeStatus,
   CompanionApiStatus,
   Conversation,
@@ -833,6 +834,13 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
   };
   conversations[0].personaId = "fixture-persona-reviewer";
 
+  // CMP-001: in-memory attachment state, independent of the messages array (this fixture never
+  // seeds any pre-existing messages, matching how it's only ever used for the Settings-view
+  // panels this session built — attachments here exist purely to exercise the compose-time
+  // attach/paste/drop flow and, via the minimal `sendChatMessage` below, the "shows under the
+  // sent message" display path).
+  const attachments: Attachment[] = [];
+
   const companionApiState: CompanionApiStatus = {
     enabled: false,
     running: false,
@@ -1160,6 +1168,62 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       return {
         token: `fixture-token-${Math.random().toString(36).slice(2)}`,
         status: { ...companionApiState },
+      };
+    },
+
+    // CMP-001: mirrors the real backend's staged-then-linked lifecycle — `attachTextFile` always
+    // starts a new attachment unlinked (`messageId: null`); `sendChatMessage` below is what links
+    // it, matching `Database::link_attachments_to_message`'s real behavior.
+    attachTextFile: async (conversationId, fileName, content) => {
+      const conversation = conversations.find((item) => item.id === conversationId);
+      if (!conversation) throw new Error(`fixture: conversation ${conversationId} not found`);
+      const created: Attachment = {
+        id: `fixture-attachment-${attachments.length}`,
+        conversationId,
+        messageId: null,
+        fileName,
+        byteSize: content.length,
+        sha256: `fixture-sha256-${attachments.length}`,
+        createdAt: new Date().toISOString(),
+      };
+      attachments.push(created);
+      return created;
+    },
+    listConversationAttachments: async (conversationId) =>
+      attachments.filter((item) => item.conversationId === conversationId).map((item) => ({ ...item })),
+    getAttachmentContent: async (id) => {
+      if (!attachments.some((item) => item.id === id)) throw new Error(`fixture: attachment ${id} not found`);
+      return "fixture attachment content";
+    },
+    deleteAttachment: async (id) => {
+      const index = attachments.findIndex((item) => item.id === id);
+      if (index === -1) throw new Error(`fixture: attachment ${id} not found`);
+      if (attachments[index].messageId) {
+        throw new Error("fixture: cannot delete an attachment already linked to a sent message");
+      }
+      attachments.splice(index, 1);
+    },
+
+    // CMP-001: a minimal send — creates a user message and links any staged attachments to it,
+    // enough to live-verify "attach, send, see it under the sent message" end to end. No real
+    // generation is simulated (`startPendingStream`/stream event subscriptions fall through to
+    // `createFakeArkClient`'s no-op defaults), so the assistant bubble stays in its placeholder
+    // "Thinking" state — expected here, not a bug, since this fixture exists to exercise
+    // attachments, not streaming.
+    sendChatMessage: async (input) => {
+      const conversation = conversations.find((item) => item.id === input.conversationId);
+      if (!conversation) throw new Error(`fixture: conversation ${input.conversationId} not found`);
+      const userMessageId = `fixture-sent-message-${Date.now()}-user`;
+      const assistantMessageId = `fixture-sent-message-${Date.now()}-assistant`;
+      for (const attachment of attachments) {
+        if (input.attachmentIds?.includes(attachment.id)) {
+          attachment.messageId = userMessageId;
+        }
+      }
+      return {
+        conversationId: input.conversationId,
+        userMessageId,
+        assistantMessageId,
       };
     },
   });

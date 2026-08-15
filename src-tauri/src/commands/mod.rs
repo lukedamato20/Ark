@@ -370,6 +370,49 @@ pub fn delete_persona(state: State<'_, AppState>, id: String) -> Result<(), AppE
     lock_db(&state)?.delete_persona(id)
 }
 
+/// CMP-001: stages a new text attachment against `conversation_id` — the message it will
+/// eventually be sent with doesn't exist yet, matching the "preview/remove before send"
+/// acceptance criterion. `validate_attachment` is the content-sniffing/size boundary: a
+/// `.txt`-named file whose bytes don't actually decode as plausible text is rejected here
+/// regardless of what its name claims.
+#[tauri::command]
+pub fn attach_text_file(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    file_name: String,
+    content: String,
+) -> Result<crate::attachments::Attachment, AppError> {
+    let conversation_id =
+        crate::validation::validate_entity_id(&conversation_id, "Conversation ID")?.to_string();
+    let (file_name, content) = crate::validation::validate_attachment(&file_name, &content)?;
+    lock_db(&state)?.create_attachment(&conversation_id, &file_name, &content)
+}
+
+#[tauri::command]
+pub fn list_conversation_attachments(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<crate::attachments::Attachment>, AppError> {
+    let conversation_id =
+        crate::validation::validate_entity_id(&conversation_id, "Conversation ID")?;
+    lock_read_db(&state)?.list_conversation_attachments(conversation_id)
+}
+
+#[tauri::command]
+pub fn get_attachment_content(state: State<'_, AppState>, id: String) -> Result<String, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Attachment ID")?;
+    lock_read_db(&state)?.get_attachment_content(id)
+}
+
+/// CMP-001: only ever succeeds while the attachment is still staged (`messageId` still `null`) —
+/// see `Database::delete_attachment`'s own doc comment for why one already linked to a sent
+/// message is not offered for deletion.
+#[tauri::command]
+pub fn delete_attachment(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Attachment ID")?;
+    lock_db(&state)?.delete_attachment(id)
+}
+
 #[tauri::command]
 pub fn get_conversation_messages(
     state: State<'_, AppState>,

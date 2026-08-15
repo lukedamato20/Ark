@@ -1,4 +1,4 @@
-import { AlertTriangle, Edit3, GitBranch, Info, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Edit3, FileText, GitBranch, Info, Loader2, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
@@ -7,7 +7,7 @@ import { computeAnnouncementDelta } from "../../lib/streamAnnouncement";
 import { messageWithGenerationOverlay } from "../../state/arkStores";
 import { useStoreSelector } from "../../state/externalStore";
 import { useArkStores } from "../../state/useArkStores";
-import type { BranchAlternative, Message, ProviderConfig } from "../../types/ark";
+import type { Attachment, BranchAlternative, Message, ProviderConfig } from "../../types/ark";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -15,6 +15,10 @@ import { MarkdownMessage } from "./MarkdownMessage";
 interface ChatMessageListProps {
   messages: Message[];
   providers: ProviderConfig[];
+  /** CMP-001: message id -> the attachments sent with it. Only user messages ever have entries;
+   * looked up once per bubble rather than passed as a per-message list, since most conversations
+   * have few or no attachments at all. */
+  attachmentsByMessageId: Record<string, Attachment[]>;
   canBranch: boolean;
   canSwitchBranch: boolean;
   editingMessageId: string | null;
@@ -42,6 +46,7 @@ interface ChatMessageListProps {
 export function ChatMessageList({
   messages,
   providers,
+  attachmentsByMessageId,
   canBranch,
   canSwitchBranch,
   editingMessageId,
@@ -65,6 +70,7 @@ export function ChatMessageList({
           message={message}
           provider={providers.find((item) => item.id === message.providerId)}
           providers={providers}
+          attachments={attachmentsByMessageId[message.id]}
           canBranch={canBranch}
           canSwitchBranch={canSwitchBranch}
           isEditing={editingMessageId === message.id}
@@ -89,6 +95,7 @@ const MessageBubble = React.memo(function MessageBubble({
   message,
   provider,
   providers,
+  attachments,
   canBranch,
   canSwitchBranch,
   isEditing,
@@ -103,9 +110,10 @@ const MessageBubble = React.memo(function MessageBubble({
   onKeepPartial,
   onDiscardInterrupted,
   onError,
-}: Omit<ChatMessageListProps, "messages" | "editingMessageId"> & {
+}: Omit<ChatMessageListProps, "messages" | "editingMessageId" | "attachmentsByMessageId"> & {
   message: Message;
   provider: ProviderConfig | undefined;
+  attachments: Attachment[] | undefined;
   isEditing: boolean;
 }) {
   const stores = useArkStores();
@@ -552,6 +560,22 @@ const MessageBubble = React.memo(function MessageBubble({
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Thinking
+          </div>
+        )}
+        {isUser && attachments && attachments.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {attachments.map((attachment) => (
+              <span
+                key={attachment.id}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs"
+              >
+                <FileText className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                <span className="max-w-40 truncate" title={attachment.fileName}>
+                  {attachment.fileName}
+                </span>
+                <span className="text-muted-foreground">{(attachment.byteSize / 1024).toFixed(1)} KB</span>
+              </span>
+            ))}
           </div>
         )}
         {renderedMessage.errorMessage && (
