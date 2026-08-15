@@ -24,6 +24,11 @@ interface ChatMessageListProps {
   onRegenerate: (message: Message) => void;
   onLoadAlternatives: (message: Message) => Promise<BranchAlternative[]>;
   onSwitchBranch: (messageId: string) => Promise<void>;
+  /** FTR-005: full content, unlike the 140-character preview `onLoadAlternatives` returns —
+   * used by the branch comparison view. */
+  onLoadMessage: (messageId: string) => Promise<Message>;
+  /** FTR-005: `name: null` clears the label back to the default ordinal presentation. */
+  onRenameBranch: (messageId: string, name: string | null) => Promise<void>;
   onKeepPartial: (message: Message) => Promise<void>;
   onDiscardInterrupted: (message: Message) => Promise<void>;
   onError: (message: string) => void;
@@ -46,6 +51,8 @@ export function ChatMessageList({
   onRegenerate,
   onLoadAlternatives,
   onSwitchBranch,
+  onLoadMessage,
+  onRenameBranch,
   onKeepPartial,
   onDiscardInterrupted,
   onError,
@@ -57,6 +64,7 @@ export function ChatMessageList({
           key={message.id}
           message={message}
           provider={providers.find((item) => item.id === message.providerId)}
+          providers={providers}
           canBranch={canBranch}
           canSwitchBranch={canSwitchBranch}
           isEditing={editingMessageId === message.id}
@@ -66,6 +74,8 @@ export function ChatMessageList({
           onRegenerate={onRegenerate}
           onLoadAlternatives={onLoadAlternatives}
           onSwitchBranch={onSwitchBranch}
+          onLoadMessage={onLoadMessage}
+          onRenameBranch={onRenameBranch}
           onKeepPartial={onKeepPartial}
           onDiscardInterrupted={onDiscardInterrupted}
           onError={onError}
@@ -78,6 +88,7 @@ export function ChatMessageList({
 const MessageBubble = React.memo(function MessageBubble({
   message,
   provider,
+  providers,
   canBranch,
   canSwitchBranch,
   isEditing,
@@ -87,10 +98,12 @@ const MessageBubble = React.memo(function MessageBubble({
   onRegenerate,
   onLoadAlternatives,
   onSwitchBranch,
+  onLoadMessage,
+  onRenameBranch,
   onKeepPartial,
   onDiscardInterrupted,
   onError,
-}: Omit<ChatMessageListProps, "messages" | "providers" | "editingMessageId"> & {
+}: Omit<ChatMessageListProps, "messages" | "editingMessageId"> & {
   message: Message;
   provider: ProviderConfig | undefined;
   isEditing: boolean;
@@ -136,6 +149,16 @@ const MessageBubble = React.memo(function MessageBubble({
   const [isLoadingAlternatives, setIsLoadingAlternatives] = React.useState(false);
   const [switchingBranchId, setSwitchingBranchId] = React.useState<string | null>(null);
   const [recoveryAction, setRecoveryAction] = React.useState<"retry" | "keep" | "discard" | null>(null);
+  // FTR-005: branch (message revision) naming — edited inline per alternative row.
+  const [renamingId, setRenamingId] = React.useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = React.useState("");
+  const [renameSaving, setRenameSaving] = React.useState(false);
+  // FTR-005: comparison view — pick exactly two alternatives to see side-by-side with full
+  // content and provenance, rather than switching back and forth to re-read each one.
+  const [compareMode, setCompareMode] = React.useState(false);
+  const [compareSelection, setCompareSelection] = React.useState<string[]>([]);
+  const [comparisonMessages, setComparisonMessages] = React.useState<Record<string, Message> | null>(null);
+  const [isLoadingComparison, setIsLoadingComparison] = React.useState(false);
   // UX-011: "useful persisted metadata is hidden" — collapsed by default per this task's own
   // suggested-implementation-notes ("a compact disclosure row with an expandable detail view"),
   // since always-visible per-message metadata was flagged as a clutter risk.
@@ -181,6 +204,10 @@ const MessageBubble = React.memo(function MessageBubble({
     if (isUser) return;
     if (alternatives) {
       setAlternatives(null);
+      setCompareMode(false);
+      setCompareSelection([]);
+      setComparisonMessages(null);
+      setRenamingId(null);
       return;
     }
     setIsLoadingAlternatives(true);
@@ -203,6 +230,52 @@ const MessageBubble = React.memo(function MessageBubble({
       onError(getErrorMessage(error));
     } finally {
       setSwitchingBranchId(null);
+    }
+  }
+
+  function handleStartRename(alternative: BranchAlternative) {
+    setRenamingId(alternative.messageId);
+    setRenameDraft(alternative.branchName ?? "");
+  }
+
+  async function handleSaveRename(messageId: string) {
+    setRenameSaving(true);
+    try {
+      await onRenameBranch(messageId, renameDraft.trim() || null);
+      setAlternatives(
+        (current) =>
+          current?.map((alternative) =>
+            alternative.messageId === messageId
+              ? { ...alternative, branchName: renameDraft.trim() || null }
+              : alternative,
+          ) ?? null,
+      );
+      setRenamingId(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setRenameSaving(false);
+    }
+  }
+
+  function handleToggleCompareSelection(messageId: string) {
+    setCompareSelection((current) => {
+      if (current.includes(messageId)) return current.filter((id) => id !== messageId);
+      if (current.length >= 2) return [current[1], messageId];
+      return [...current, messageId];
+    });
+  }
+
+  async function handleViewComparison() {
+    if (compareSelection.length !== 2) return;
+    setIsLoadingComparison(true);
+    try {
+      const [first, second] = await Promise.all(compareSelection.map((id) => onLoadMessage(id)));
+      setComparisonMessages({ [first.id]: first, [second.id]: second });
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setIsLoadingComparison(false);
     }
   }
 
@@ -308,47 +381,153 @@ const MessageBubble = React.memo(function MessageBubble({
             {alternatives.length <= 1 ? (
               <div className="text-xs text-muted-foreground">No alternate responses saved yet.</div>
             ) : (
-              <div className="space-y-1">
-                {alternatives.map((alternative, index) => (
-                  <button
-                    key={alternative.messageId}
-                    type="button"
-                    disabled={alternative.isActive || !canSwitchBranch || Boolean(switchingBranchId)}
-                    onClick={() => void handleSelectAlternative(alternative.messageId)}
-                    className={cn(
-                      "flex w-full items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors duration-fast",
-                      "focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default",
-                      alternative.isActive
-                        ? "bg-primary/10 text-foreground"
-                        : "hover:bg-accent hover:text-accent-foreground",
-                    )}
+              <>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {compareMode ? "Select two to compare" : "Branches"}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-5 px-1.5 text-[10px]"
+                    onClick={() => {
+                      setCompareMode((value) => !value);
+                      setCompareSelection([]);
+                      setComparisonMessages(null);
+                      setRenamingId(null);
+                    }}
                   >
-                    <span className="min-w-0">
-                      <span className="block font-medium">Response {index + 1}</span>
-                      <span className="mt-0.5 block truncate text-muted-foreground">{alternative.contentPreview}</span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-1.5">
-                      {switchingBranchId === alternative.messageId && <Loader2 className="h-3 w-3 animate-spin" />}
-                      {alternative.hasDescendants && !alternative.isActive && (
-                        <span className="text-[10px] text-muted-foreground">+ history</span>
-                      )}
-                      <Badge
-                        tone={
-                          alternative.isActive
-                            ? "success"
-                            : alternative.status === "failed"
-                              ? "danger"
-                              : alternative.status === "streaming"
-                                ? "warning"
-                                : "muted"
-                        }
+                    {compareMode ? "Cancel compare" : "Compare"}
+                  </Button>
+                </div>
+                <div className="space-y-1">
+                  {alternatives.map((alternative, index) => {
+                    const isRenaming = renamingId === alternative.messageId;
+                    const label = alternative.branchName || `Response ${index + 1}`;
+                    return (
+                      <div
+                        key={alternative.messageId}
+                        className={cn(
+                          "flex w-full items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs transition-colors duration-fast",
+                          alternative.isActive && !compareMode
+                            ? "bg-primary/10 text-foreground"
+                            : "hover:bg-accent hover:text-accent-foreground",
+                        )}
                       >
-                        {alternative.isActive ? "active" : alternative.status}
-                      </Badge>
-                    </span>
-                  </button>
-                ))}
-              </div>
+                        {compareMode && (
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                            checked={compareSelection.includes(alternative.messageId)}
+                            onChange={() => handleToggleCompareSelection(alternative.messageId)}
+                            aria-label={`Select ${label} for comparison`}
+                          />
+                        )}
+                        <button
+                          type="button"
+                          disabled={
+                            !compareMode && (alternative.isActive || !canSwitchBranch || Boolean(switchingBranchId))
+                          }
+                          onClick={() =>
+                            compareMode
+                              ? handleToggleCompareSelection(alternative.messageId)
+                              : void handleSelectAlternative(alternative.messageId)
+                          }
+                          className="min-w-0 flex-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default"
+                        >
+                          {isRenaming ? (
+                            <input
+                              autoFocus
+                              value={renameDraft}
+                              onChange={(event) => setRenameDraft(event.target.value)}
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") void handleSaveRename(alternative.messageId);
+                                if (event.key === "Escape") setRenamingId(null);
+                              }}
+                              maxLength={80}
+                              placeholder={`Response ${index + 1}`}
+                              className="w-full rounded border border-input bg-background px-1.5 py-0.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            />
+                          ) : (
+                            <span className="block font-medium">{label}</span>
+                          )}
+                          <span className="mt-0.5 block truncate text-muted-foreground">
+                            {alternative.contentPreview}
+                          </span>
+                        </button>
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          {switchingBranchId === alternative.messageId && <Loader2 className="h-3 w-3 animate-spin" />}
+                          {alternative.hasDescendants && !alternative.isActive && (
+                            <span className="text-[10px] text-muted-foreground">+ history</span>
+                          )}
+                          {!compareMode &&
+                            (isRenaming ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-5 px-1 text-[10px]"
+                                disabled={renameSaving}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleSaveRename(alternative.messageId);
+                                }}
+                              >
+                                {renameSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-5 px-1 text-[10px] opacity-60 hover:opacity-100"
+                                aria-label={`Rename ${label}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleStartRename(alternative);
+                                }}
+                              >
+                                <Edit3 className="h-3 w-3" />
+                              </Button>
+                            ))}
+                          <Badge
+                            tone={
+                              alternative.isActive
+                                ? "success"
+                                : alternative.status === "failed"
+                                  ? "danger"
+                                  : alternative.status === "streaming"
+                                    ? "warning"
+                                    : "muted"
+                            }
+                          >
+                            {alternative.isActive ? "active" : alternative.status}
+                          </Badge>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {compareMode && (
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      size="sm"
+                      disabled={compareSelection.length !== 2 || isLoadingComparison}
+                      onClick={() => void handleViewComparison()}
+                    >
+                      {isLoadingComparison ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      View comparison
+                    </Button>
+                  </div>
+                )}
+                {comparisonMessages && (
+                  <BranchComparison
+                    messages={compareSelection.map((id) => comparisonMessages[id]).filter(Boolean)}
+                    alternatives={alternatives}
+                    providers={providers}
+                    onClose={() => setComparisonMessages(null)}
+                  />
+                )}
+              </>
             )}
           </div>
         )}
@@ -439,6 +618,57 @@ function MetadataRow({ label, value, detail }: { label: string; value: string; d
       <span className="text-right" title={detail}>
         {value}
       </span>
+    </div>
+  );
+}
+
+/**
+ * FTR-005: renders two selected branch alternatives side by side (stacked on narrow viewports
+ * via CSS grid's auto-fit) with full content and lightweight provenance — the same
+ * provider/model fields `MetadataRow` already shows for a single message, not a new parsed
+ * view of `metadata_json`.
+ */
+function BranchComparison({
+  messages,
+  alternatives,
+  providers,
+  onClose,
+}: {
+  messages: Message[];
+  alternatives: BranchAlternative[];
+  providers: ProviderConfig[];
+  onClose: () => void;
+}) {
+  if (messages.length !== 2) return null;
+  return (
+    <div className="mt-3 rounded-md border border-border/70 bg-muted/20 p-2.5">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Comparison</span>
+        <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {messages.map((compared) => {
+          const alternative = alternatives.find((item) => item.messageId === compared.id);
+          const comparedProvider = providers.find((item) => item.id === compared.providerId);
+          return (
+            <div key={compared.id} className="min-w-0 rounded-md border border-border/70 bg-background p-2.5 text-xs">
+              <div className="mb-1.5 font-medium">
+                {alternative?.branchName || (alternative?.isActive ? "Active response" : "Alternative response")}
+              </div>
+              <div className="mb-2 grid gap-0.5 text-[11px] text-muted-foreground">
+                {comparedProvider && <MetadataRow label="Provider" value={comparedProvider.name} />}
+                {compared.modelId && <MetadataRow label="Model" value={compared.modelId} />}
+                {compared.tokenCount != null && <MetadataRow label="Tokens" value={String(compared.tokenCount)} />}
+              </div>
+              <div className="max-h-80 overflow-y-auto break-words">
+                <MarkdownMessage content={compared.content} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

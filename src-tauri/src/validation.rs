@@ -115,6 +115,30 @@ pub fn validate_system_prompt(value: Option<String>) -> Result<Option<String>, A
     Ok(Some(trimmed.to_string()))
 }
 
+/// FTR-005: a branch label is a short, glanceable name shown next to a "Response N" ordinal in
+/// the alternatives switcher — not free-form prose, so the bound is much tighter than
+/// `MAX_SYSTEM_PROMPT_CHARS`.
+pub const MAX_BRANCH_NAME_CHARS: usize = 80;
+
+/// Validates a branch (message revision) label. `None` or blank/whitespace-only both mean "no
+/// label, fall back to the default ordinal presentation" — trimmed and normalized to `None`
+/// rather than persisting an empty string, matching `validate_system_prompt`'s convention.
+pub fn validate_branch_name(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_BRANCH_NAME_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Branch name must be at most {MAX_BRANCH_NAME_CHARS} characters."
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Validates a workspace root path before it is persisted/probed. A NUL byte is rejected
 /// because it silently truncates the effective path in several OS filesystem APIs (a path
 /// with a NUL is not a valid Rust `&str`-derived filesystem path assumption on any supported

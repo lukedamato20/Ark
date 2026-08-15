@@ -424,6 +424,50 @@ export function createLongConversationFixtureClient(): ArkClient {
     };
   });
 
+  // FTR-005: a second revision of the first assistant response, so the branch switcher,
+  // renaming, and comparison view all have something real to exercise live — every other
+  // fixture's getAssistantAlternatives/switchActiveBranch/getMessage/setBranchName are
+  // unimplemented.
+  const alternateMessage: Message = {
+    id: "fixture-message-1-alt",
+    conversationId: conversation.id,
+    parentMessageId: "fixture-message-0",
+    revisionOfMessageId: "fixture-message-1",
+    pathIndex: 2,
+    role: "assistant",
+    content: "Response 1 (alternate). A more concise phrasing of the same explanation, without the code sample.",
+    status: "complete",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    providerId: provider.id,
+    modelId: model.name,
+    branchName: null,
+  };
+  const allMessages = [...messages, alternateMessage];
+  const activeOverrides: Record<string, string> = {};
+  const branchNames: Record<string, string | null> = {};
+
+  function computeActivePath(): Message[] {
+    const byParent = new Map<string | null, Message[]>();
+    for (const item of allMessages) {
+      const key = item.parentMessageId ?? null;
+      const bucket = byParent.get(key) ?? [];
+      bucket.push(item);
+      byParent.set(key, bucket);
+    }
+    const path: Message[] = [];
+    let currentParent: string | null = null;
+    while (true) {
+      const children: Message[] = byParent.get(currentParent) ?? [];
+      if (children.length === 0) break;
+      const overrideId = currentParent ? activeOverrides[currentParent] : undefined;
+      const next: Message = children.find((child) => child.id === overrideId) ?? children[0];
+      path.push({ ...next, branchName: branchNames[next.id] ?? next.branchName ?? null });
+      currentParent = next.id;
+    }
+    return path;
+  }
+
   const bootstrap: AppBootstrap = {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
     providers: [provider],
@@ -444,7 +488,42 @@ export function createLongConversationFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => messages,
+    getConversationMessages: async () => computeActivePath(),
+    getMessage: async (id) => {
+      const found = allMessages.find((item) => item.id === id);
+      if (!found) throw new Error(`fixture: message ${id} not found`);
+      return { ...found, branchName: branchNames[id] ?? found.branchName ?? null };
+    },
+    getAssistantAlternatives: async (_conversationId, messageId) => {
+      const target = allMessages.find((item) => item.id === messageId);
+      if (!target?.parentMessageId) return [];
+      const activeIds = new Set(computeActivePath().map((item) => item.id));
+      return allMessages
+        .filter((item) => item.parentMessageId === target.parentMessageId && item.role === "assistant")
+        .map((sibling) => ({
+          messageId: sibling.id,
+          revisionOfMessageId: sibling.revisionOfMessageId ?? null,
+          createdAt: sibling.createdAt,
+          status: sibling.status,
+          contentPreview: sibling.content.slice(0, 140),
+          isActive: activeIds.has(sibling.id),
+          hasDescendants: allMessages.some((item) => item.parentMessageId === sibling.id),
+          branchName: branchNames[sibling.id] ?? sibling.branchName ?? null,
+        }));
+    },
+    switchActiveBranch: async (_conversationId, messageId) => {
+      const target = allMessages.find((item) => item.id === messageId);
+      if (!target?.parentMessageId) throw new Error("fixture: cannot switch to a root message");
+      activeOverrides[target.parentMessageId] = messageId;
+      return computeActivePath();
+    },
+    setBranchName: async (messageId, name) => {
+      const target = allMessages.find((item) => item.id === messageId);
+      if (!target) throw new Error(`fixture: message ${messageId} not found`);
+      if (target.role !== "assistant") throw new Error("fixture: only assistant messages can be named");
+      branchNames[messageId] = name;
+      return { ...target, branchName: name };
+    },
     refreshModels: async () => ({
       health: {
         providerId: provider.id,

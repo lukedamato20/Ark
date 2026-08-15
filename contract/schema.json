@@ -45,7 +45,8 @@
       "modelId",
       "tokenCount",
       "errorMessage",
-      "metadataJson"
+      "metadataJson",
+      "branchName"
     ],
     "BranchAlternative": [
       "messageId",
@@ -54,7 +55,8 @@
       "status",
       "contentPreview",
       "isActive",
-      "hasDescendants"
+      "hasDescendants",
+      "branchName"
     ],
     "ProviderConfig": [
       "id",

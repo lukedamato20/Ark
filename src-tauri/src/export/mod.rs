@@ -264,6 +264,7 @@ mod tests {
             token_count: None,
             error_message: None,
             metadata_json: None,
+            branch_name: None,
         }
     }
 

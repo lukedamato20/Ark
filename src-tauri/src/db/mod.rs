@@ -92,6 +92,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         name: "0008_projects",
         sql: include_str!("../../migrations/0008_projects.sql"),
     },
+    MigrationDef {
+        version: 9,
+        name: "0009_message_branch_names",
+        sql: include_str!("../../migrations/0009_message_branch_names.sql"),
+    },
 ];
 
 /// FTR-001: the highest schema version this build knows how to open/migrate — used by the
@@ -113,25 +118,25 @@ const MAX_BRANCH_DEPTH: i64 = 20_000;
 const MESSAGE_PATH_QUERY: &str = "WITH RECURSIVE message_path(
         id, conversation_id, parent_message_id, revision_of_message_id, path_index, role,
         content, status, created_at, updated_at, provider_id, model_id, token_count,
-        error_message, metadata_json, depth
+        error_message, metadata_json, branch_name, depth
      ) AS (
         SELECT id, conversation_id, parent_message_id, revision_of_message_id, path_index,
             role, content, status, created_at, updated_at, provider_id, model_id,
-            token_count, error_message, metadata_json, 0
+            token_count, error_message, metadata_json, branch_name, 0
         FROM messages WHERE id = ?1
         UNION ALL
         SELECT parent.id, parent.conversation_id, parent.parent_message_id,
             parent.revision_of_message_id, parent.path_index, parent.role, parent.content,
             parent.status, parent.created_at, parent.updated_at, parent.provider_id,
             parent.model_id, parent.token_count, parent.error_message,
-            parent.metadata_json, child.depth + 1
+            parent.metadata_json, parent.branch_name, child.depth + 1
         FROM messages parent
         JOIN message_path child ON parent.id = child.parent_message_id
         WHERE child.depth < ?2
      )
      SELECT id, conversation_id, parent_message_id, revision_of_message_id, path_index,
         role, content, status, created_at, updated_at, provider_id, model_id, token_count,
-        error_message, metadata_json
+        error_message, metadata_json, branch_name
      FROM message_path
      ORDER BY depth DESC";
 const BRANCH_LEAF_QUERY: &str = "WITH RECURSIVE descendants(id, created_at, depth) AS (
@@ -1292,7 +1297,7 @@ impl Database {
         let mut statement = self.connection.prepare(
             "SELECT id, conversation_id, parent_message_id, revision_of_message_id, path_index, role,
                 content, status, created_at, updated_at, provider_id, model_id, token_count,
-                error_message, metadata_json
+                error_message, metadata_json, branch_name
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY path_index ASC, created_at ASC",
@@ -1325,7 +1330,7 @@ impl Database {
             .collect::<Vec<_>>();
 
         let mut statement = self.connection.prepare(
-            "SELECT id, revision_of_message_id, created_at, status, content,
+            "SELECT id, revision_of_message_id, created_at, status, content, branch_name,
                     EXISTS(SELECT 1 FROM messages c WHERE c.parent_message_id = messages.id) AS has_descendants
              FROM messages
              WHERE conversation_id = ?1 AND parent_message_id = ?2 AND role = 'assistant'
@@ -1342,7 +1347,8 @@ impl Database {
                 created_at: row.get(2)?,
                 status: row.get(3)?,
                 content_preview: message_preview(&content),
-                has_descendants: row.get(5)?,
+                branch_name: row.get(5)?,
+                has_descendants: row.get(6)?,
             })
         })?;
 
@@ -1403,7 +1409,7 @@ impl Database {
             .query_row(
                 "SELECT id, conversation_id, parent_message_id, revision_of_message_id, path_index, role,
                     content, status, created_at, updated_at, provider_id, model_id, token_count,
-                    error_message, metadata_json
+                    error_message, metadata_json, branch_name
                  FROM messages
                  WHERE id = ?1",
                 params![id],
@@ -1470,8 +1476,8 @@ impl Database {
         self.connection.execute(
             "UPDATE messages
              SET created_at = ?1, updated_at = ?2, provider_id = ?3, model_id = ?4,
-                 token_count = ?5, error_message = ?6, metadata_json = ?7
-             WHERE id = ?8",
+                 token_count = ?5, error_message = ?6, metadata_json = ?7, branch_name = ?8
+             WHERE id = ?9",
             params![
                 source.created_at,
                 source.updated_at,
@@ -1480,6 +1486,7 @@ impl Database {
                 source.token_count,
                 source.error_message,
                 metadata_json,
+                source.branch_name,
                 imported_id,
             ],
         )?;
@@ -1653,6 +1660,29 @@ impl Database {
             params![metadata_json, now(), message_id],
         )?;
         Ok(())
+    }
+
+    /// FTR-005: labels a specific message revision — a "branch" in this schema's append-only
+    /// design, since there is no separate branch entity, only alternative message revisions. A
+    /// message must exist and be an assistant message to be named (only assistant responses have
+    /// meaningful alternatives — see `get_assistant_alternatives`). `name: None` clears the label
+    /// back to the default ordinal "Response N" presentation.
+    pub fn set_message_branch_name(
+        &self,
+        message_id: &str,
+        name: Option<&str>,
+    ) -> Result<Message, AppError> {
+        let message = self.get_message(message_id)?;
+        if message.role != "assistant" {
+            return Err(AppError::invalid_input(
+                "Only assistant messages can be named.",
+            ));
+        }
+        self.connection.execute(
+            "UPDATE messages SET branch_name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, now(), message_id],
+        )?;
+        self.get_message(message_id)
     }
 
     pub fn set_conversation_current_message(
@@ -2194,6 +2224,7 @@ fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         token_count: row.get(12)?,
         error_message: row.get(13)?,
         metadata_json: row.get(14)?,
+        branch_name: row.get(15)?,
     })
 }
 
@@ -3256,6 +3287,79 @@ mod tests {
         let _ = find_backup_sibling(&path).map(fs::remove_file);
     }
 
+    fn seed_migration_0008_database(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..8] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+        }
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (1, '0001_mvp', ?1),
+                        (2, '0002_message_status_interrupted', ?1),
+                        (3, '0003_remove_duplicated_conversation_streaming_flag', ?1),
+                        (4, '0004_scalable_history_search', ?1),
+                        (5, '0005_provider_routing_policy', ?1),
+                        (6, '0006_remove_provider_streaming_toggle', ?1),
+                        (7, '0007_conversation_pinning', ?1),
+                        (8, '0008_projects', ?1)",
+                params![now()],
+            )
+            .expect("record migrations 1 through 8 as applied");
+
+        let conversation_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at, archived)
+                 VALUES (?1, 'Release-8 conversation', ?2, ?2, 0)",
+                params![&conversation_id, now()],
+            )
+            .expect("seed a migration-8 conversation");
+        let message_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, path_index, role, content, status, created_at, updated_at
+                 ) VALUES (?1, ?2, 1, 'assistant', 'Pre-migration-9 answer', 'complete', ?3, ?3)",
+                params![&message_id, &conversation_id, now()],
+            )
+            .expect("seed a migration-8 message, from before branch_name existed");
+        message_id
+    }
+
+    /// FTR-005 acceptance: extends the "every supported release" fixture-upgrade requirement to
+    /// migration 9, the current latest — a pre-existing message row from a migration-8 workspace
+    /// must survive migration 9's new `branch_name` column, defaulting to unnamed (`NULL`), and
+    /// the column must actually be settable afterward.
+    #[test]
+    fn upgrading_a_migration_0008_workspace_adds_the_branch_name_column() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let message_id = seed_migration_0008_database(&path);
+
+        let db = Database::open(&path).expect("upgrading a migration-8 workspace succeeds");
+        let message = db
+            .get_message(&message_id)
+            .expect("pre-existing message readable after upgrade");
+        assert_eq!(message.content, "Pre-migration-9 answer");
+        assert_eq!(
+            message.branch_name, None,
+            "migration 9 must leave pre-existing rows unnamed by default"
+        );
+
+        let named = db
+            .set_message_branch_name(&message_id, Some("Post-upgrade name"))
+            .expect("branch_name column is usable immediately after migration 9");
+        assert_eq!(named.branch_name.as_deref(), Some("Post-upgrade name"));
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
     /// Finds the `.pre-migration-*.bak` sibling file `backup_before_migrations` creates next to
     /// `path`, if any.
     fn find_backup_sibling(path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -4192,6 +4296,72 @@ mod tests {
             active.last().map(|message| message.id.as_str()),
             Some(first_assistant.id.as_str())
         );
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_message_branch_name_labels_clears_and_is_visible_in_alternatives() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Naming".to_string()))
+            .expect("conversation created");
+        let user = db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "Explain local AI.",
+                "complete",
+                Some(DEFAULT_PROVIDER_ID),
+                Some("llama3.2:latest"),
+            )
+            .expect("user message");
+        let assistant = db
+            .append_message(
+                &conversation.id,
+                Some(&user.id),
+                None,
+                "assistant",
+                "First answer",
+                "complete",
+                Some(DEFAULT_PROVIDER_ID),
+                Some("llama3.2:latest"),
+            )
+            .expect("assistant message");
+
+        // FTR-005: only assistant messages (the only ones with meaningful alternatives) can be
+        // named.
+        let rejected = db
+            .set_message_branch_name(&user.id, Some("Concise"))
+            .expect_err("user messages cannot be named");
+        assert_eq!(rejected.code, "invalid_input");
+
+        let named = db
+            .set_message_branch_name(&assistant.id, Some("Concise"))
+            .expect("assistant message named");
+        assert_eq!(named.branch_name.as_deref(), Some("Concise"));
+
+        let refetched = db.get_message(&assistant.id).expect("refetched");
+        assert_eq!(refetched.branch_name.as_deref(), Some("Concise"));
+
+        let alternatives = db
+            .get_assistant_alternatives(&conversation.id, &assistant.id)
+            .expect("alternatives include the name");
+        assert_eq!(
+            alternatives
+                .iter()
+                .find(|alternative| alternative.message_id == assistant.id)
+                .and_then(|alternative| alternative.branch_name.as_deref()),
+            Some("Concise")
+        );
+
+        let cleared = db
+            .set_message_branch_name(&assistant.id, None)
+            .expect("name cleared");
+        assert_eq!(cleared.branch_name, None);
 
         drop(db);
         let _ = fs::remove_file(path);

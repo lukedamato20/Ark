@@ -119,6 +119,7 @@ fn sample_message() -> Message {
         token_count: None,
         error_message: None,
         metadata_json: None,
+        branch_name: None,
     }
 }
 
@@ -239,6 +240,7 @@ fn branch_alternative_matches_contract() {
             content_preview: "Hello".to_string(),
             is_active: true,
             has_descendants: false,
+            branch_name: None,
         },
     );
 }

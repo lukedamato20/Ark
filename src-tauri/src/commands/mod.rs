@@ -278,6 +278,15 @@ pub fn get_conversation_messages(
     lock_read_db(&state)?.get_active_messages(conversation_id)
 }
 
+/// FTR-005: fetches a single message's full content — `get_assistant_alternatives` only returns
+/// a 140-character preview per sibling (`Database::message_preview`), which is enough for the
+/// switcher list but not for the side-by-side comparison view, which needs the complete response.
+#[tauri::command]
+pub fn get_message(state: State<'_, AppState>, id: String) -> Result<Message, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Message ID")?;
+    lock_read_db(&state)?.get_message(id)
+}
+
 #[tauri::command]
 pub fn get_assistant_alternatives(
     state: State<'_, AppState>,
@@ -298,6 +307,17 @@ pub fn switch_active_branch(
         crate::validation::validate_entity_id(&request.conversation_id, "Conversation ID")?;
     let message_id = crate::validation::validate_entity_id(&request.message_id, "Message ID")?;
     lock_db(&state)?.switch_active_branch(conversation_id, message_id)
+}
+
+#[tauri::command]
+pub fn set_branch_name(
+    state: State<'_, AppState>,
+    message_id: String,
+    name: Option<String>,
+) -> Result<Message, AppError> {
+    let message_id = crate::validation::validate_entity_id(&message_id, "Message ID")?.to_string();
+    let name = crate::validation::validate_branch_name(name)?;
+    lock_db(&state)?.set_message_branch_name(&message_id, name.as_deref())
 }
 
 /// COR-001 recovery action: accept an interrupted assistant message's partial content as final.

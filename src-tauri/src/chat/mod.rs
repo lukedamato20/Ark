@@ -26,6 +26,9 @@ pub struct Message {
     pub token_count: Option<i64>,
     pub error_message: Option<String>,
     pub metadata_json: Option<String>,
+    /// FTR-005: `None` means unnamed — see migration `0009_message_branch_names.sql`'s doc
+    /// comment for why this lives on the message itself rather than a separate branch entity.
+    pub branch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +41,8 @@ pub struct BranchAlternative {
     pub content_preview: String,
     pub is_active: bool,
     pub has_descendants: bool,
+    /// FTR-005: `None` means unnamed — the frontend falls back to an ordinal "Response N" label.
+    pub branch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

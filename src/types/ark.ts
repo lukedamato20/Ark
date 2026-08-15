@@ -70,6 +70,8 @@ export interface Message {
   tokenCount?: number | null;
   errorMessage?: string | null;
   metadataJson?: string | null;
+  /** FTR-005: `null` means unnamed — the frontend falls back to an ordinal "Response N" label. */
+  branchName?: string | null;
 }
 
 export interface BranchAlternative {
@@ -80,6 +82,7 @@ export interface BranchAlternative {
   contentPreview: string;
   isActive: boolean;
   hasDescendants: boolean;
+  branchName?: string | null;
 }
 
 export type DestinationClass = "loopback" | "private_lan" | "public";

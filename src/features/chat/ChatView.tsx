@@ -489,6 +489,15 @@ export function ChatView({
     [conversation?.id, hasActiveAssistant, onMessagesChange, client],
   );
 
+  const handleLoadMessage = React.useCallback((messageId: string) => client.getMessage(messageId), [client]);
+
+  const handleRenameBranch = React.useCallback(
+    async (messageId: string, name: string | null) => {
+      await client.setBranchName(messageId, name);
+    },
+    [client],
+  );
+
   const handleKeepPartial = React.useCallback(
     async (message: Message) => {
       if (!conversation) {
@@ -803,6 +812,8 @@ export function ChatView({
             onRegenerate={handleRegenerateMessage}
             onLoadAlternatives={handleLoadAlternatives}
             onSwitchBranch={handleSwitchBranch}
+            onLoadMessage={handleLoadMessage}
+            onRenameBranch={handleRenameBranch}
             onKeepPartial={handleKeepPartial}
             onDiscardInterrupted={handleDiscardInterrupted}
             onError={onError}

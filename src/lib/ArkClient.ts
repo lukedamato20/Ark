@@ -162,8 +162,14 @@ export interface ArkClient {
   setConversationProject(id: string, projectId: string | null): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
   getConversationMessages(conversationId: string): Promise<Message[]>;
+  /** FTR-005: full content, unlike `getAssistantAlternatives`' 140-character preview — used by
+   * the branch comparison view. */
+  getMessage(id: string): Promise<Message>;
   getAssistantAlternatives(conversationId: string, messageId: string): Promise<BranchAlternative[]>;
   switchActiveBranch(conversationId: string, messageId: string): Promise<Message[]>;
+  /** FTR-005: `name: null` clears the label back to the default ordinal presentation. Only
+   * assistant messages can be named. */
+  setBranchName(messageId: string, name: string | null): Promise<Message>;
   keepPartialMessage(messageId: string): Promise<Message>;
   discardInterruptedMessage(conversationId: string, messageId: string): Promise<Message[]>;
 
@@ -292,10 +298,12 @@ export function createTauriArkClient(): ArkClient {
     setConversationProject: (id, projectId) => invoke<Conversation>("set_conversation_project", { id, projectId }),
     deleteConversation: (id) => invoke<void>("delete_conversation", { id }),
     getConversationMessages: (conversationId) => invoke<Message[]>("get_conversation_messages", { conversationId }),
+    getMessage: (id) => invoke<Message>("get_message", { id }),
     getAssistantAlternatives: (conversationId, messageId) =>
       invoke<BranchAlternative[]>("get_assistant_alternatives", { request: { conversationId, messageId } }),
     switchActiveBranch: (conversationId, messageId) =>
       invoke<Message[]>("switch_active_branch", { request: { conversationId, messageId } }),
+    setBranchName: (messageId, name) => invoke<Message>("set_branch_name", { messageId, name }),
     keepPartialMessage: (messageId) => invoke<Message>("keep_partial_message", { messageId }),
     discardInterruptedMessage: (conversationId, messageId) =>
       invoke<Message[]>("discard_interrupted_message", { request: { conversationId, messageId } }),
@@ -451,8 +459,10 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     setConversationProject: notImplemented("setConversationProject"),
     deleteConversation: async () => undefined,
     getConversationMessages: async () => [],
+    getMessage: notImplemented("getMessage"),
     getAssistantAlternatives: async () => [],
     switchActiveBranch: notImplemented("switchActiveBranch"),
+    setBranchName: notImplemented("setBranchName"),
     keepPartialMessage: notImplemented("keepPartialMessage"),
     discardInterruptedMessage: notImplemented("discardInterruptedMessage"),
 
