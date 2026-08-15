@@ -278,7 +278,7 @@ pub struct LocalInferenceHostProvider {
     client: Client,
     /// SEC-002/FTR-007: the sidecar-generated token for the managed built-in runtime, or a
     /// user-configured remote provider's stored credential (read from the OS keychain by
-    /// `commands::resolve_bearer_token`) — either way, held only in memory for the life of this
+    /// `secret_store::resolve_bearer_token`) — either way, held only in memory for the life of this
     /// adapter instance, never part of `ProviderConfig` (which is also returned to the frontend
     /// over IPC and must never carry a secret), never logged, never persisted here. `None` for a
     /// self-hosted "local inference host" with no stored credential, which manages its own

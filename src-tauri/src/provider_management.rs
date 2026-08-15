@@ -114,7 +114,7 @@ pub async fn refresh_models(
         db.get_provider(&provider_id)?
     };
 
-    let bearer_token = crate::commands::resolve_bearer_token(state, &provider);
+    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider);
     let runtime = ProviderRegistry::create_with_bearer_token(provider.clone(), bearer_token)?;
     let health = runtime.health().await;
 

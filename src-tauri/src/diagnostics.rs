@@ -91,7 +91,7 @@ pub async fn run_diagnostics(
         let db = crate::commands::lock_db(state)?;
         db.get_provider(&provider_id)?
     };
-    let bearer_token = crate::commands::resolve_bearer_token(state, &provider);
+    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider);
     let runtime = ProviderRegistry::create_with_bearer_token(provider.clone(), bearer_token)?;
     let provider_health = runtime.health().await;
 

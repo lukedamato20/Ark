@@ -213,6 +213,10 @@ pub(crate) fn delete_workspace_key(reference: &str) -> Result<(), AppError> {
 /// FTR-007: reads a provider's stored credential value for internal use only — attaching it to
 /// an outgoing provider request. Never exposed to the frontend or logged, unlike
 /// `get_provider_secret_metadata`, which returns only masked/availability info over IPC.
+/// Deliberately kept out of `commands/mod.rs` (the Tauri command surface) — see
+/// `scripts/check-secret-boundaries.mjs`'s guard that `commands/mod.rs` must never reference this
+/// function's name, so a raw secret can never be one accidental `#[tauri::command]` away from
+/// reaching the frontend.
 pub(crate) fn read_provider_secret(
     reference: &str,
 ) -> Result<zeroize::Zeroizing<String>, AppError> {
@@ -221,6 +225,37 @@ pub(crate) fn read_provider_secret(
         .read(reference)
         .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
         .map_err(|error| error.to_app_error())
+}
+
+/// SEC-002/FTR-007: the bearer token to attach to this provider's outgoing requests. For the
+/// built-in provider type, that's the sidecar-generated token in front of the managed
+/// llama-server (never persisted, never returned to the frontend). For any other provider with a
+/// stored credential (`api_key_ref` set — e.g. a remote OpenAI-compatible endpoint configured
+/// with an API key), it's that credential, read from the OS keychain via `read_provider_secret`
+/// above. A user-configured "local inference host" with no stored credential manages its own
+/// authentication independently of Ark and gets no header, same as before this covered the cloud
+/// case.
+///
+/// Reads the OS keychain synchronously rather than via `tokio::spawn_blocking` — every caller
+/// (`generation.rs`, `provider_management.rs`, `diagnostics.rs`) is a plain (non-`async`)
+/// `#[tauri::command]` handler or is itself called from one, which Tauri already runs off the
+/// async reactor thread — the same reasoning that already applied to this function's
+/// sidecar-mutex read before it also covered the keychain case.
+pub(crate) fn resolve_bearer_token(
+    state: &crate::AppState,
+    provider: &crate::providers::ProviderConfig,
+) -> Option<String> {
+    if provider.provider_type == crate::config::BUILT_IN_PROVIDER_TYPE {
+        return state
+            .sidecar
+            .lock()
+            .ok()
+            .and_then(|sidecar| sidecar.api_key());
+    }
+    let reference = provider.api_key_ref.as_deref()?;
+    read_provider_secret(reference)
+        .ok()
+        .map(|value| value.to_string())
 }
 
 fn validate_secret(value: String) -> Result<SecretValue, AppError> {
@@ -588,7 +623,7 @@ mod tests {
             assert_eq!(*read_provider_secret(&created.id)?, second);
             let provider = crate::commands::lock_db(&state)?.get_provider(DEFAULT_PROVIDER_ID)?;
             assert_eq!(
-                crate::commands::resolve_bearer_token(&state, &provider),
+                resolve_bearer_token(&state, &provider),
                 Some(second.clone())
             );
             let public = get_provider_secret_metadata(&state, DEFAULT_PROVIDER_ID.to_string())

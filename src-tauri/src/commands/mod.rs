@@ -736,31 +736,6 @@ pub(crate) fn lock_sidecar(
     })
 }
 
-/// SEC-002/FTR-007: the bearer token to attach to this provider's outgoing requests. For the
-/// built-in provider type, that's the sidecar-generated token in front of the managed
-/// llama-server (never persisted, never returned to the frontend). For any other provider with a
-/// stored credential (`api_key_ref` set — e.g. a remote OpenAI-compatible endpoint configured
-/// with an API key), it's that credential, read from the OS keychain. A user-configured "local
-/// inference host" with no stored credential manages its own authentication independently of
-/// Ark and gets no header, same as before this covered the cloud case.
-///
-/// Reads the OS keychain synchronously rather than via `tokio::spawn_blocking` — every caller is
-/// a plain (non-`async`) `#[tauri::command]` handler, which Tauri already runs off the async
-/// reactor thread, the same reasoning that already applied to this function's sidecar-mutex read.
-pub(crate) fn resolve_bearer_token(state: &AppState, provider: &ProviderConfig) -> Option<String> {
-    if provider.provider_type == crate::config::BUILT_IN_PROVIDER_TYPE {
-        return state
-            .sidecar
-            .lock()
-            .ok()
-            .and_then(|sidecar| sidecar.api_key());
-    }
-    let reference = provider.api_key_ref.as_deref()?;
-    crate::secret_store::read_provider_secret(reference)
-        .ok()
-        .map(|value| value.to_string())
-}
-
 // ── Built-in runtime (bundled llama-server) ──────────────────────────────────
 
 #[tauri::command]
