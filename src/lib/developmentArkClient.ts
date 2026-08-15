@@ -1586,6 +1586,10 @@ export function createOllamaModelsFixtureClient(): ArkClient {
     deleteOllamaModel: async (_providerId, modelName) => {
       installedModels = installedModels.filter((model) => model.name !== modelName);
     },
+    // UX-011: deliberately tight — small enough that pulling any curated suggested model (all
+    // several GB+) trips the "may not have enough space" warning, exercising that path without a
+    // dedicated fixture.
+    checkDiskSpace: async () => ({ totalBytes: 512_000_000_000, availableBytes: 2_000_000_000 }),
   });
 }
 

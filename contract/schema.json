@@ -183,6 +183,7 @@
     "SendChatResult": ["conversationId", "userMessageId", "assistantMessageId"],
     "StreamEvent": ["conversationId", "messageId", "delta", "content", "status", "error", "revision", "schemaVersion"],
     "RefreshModelsResult": ["health", "models", "provider"],
+    "DiskSpaceInfo": ["totalBytes", "availableBytes"],
     "DiagnosticsResult": [
       "os",
       "cpu",

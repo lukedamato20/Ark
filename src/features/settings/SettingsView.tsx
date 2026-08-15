@@ -25,6 +25,7 @@ import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapa
 import { getErrorMessage } from "../../lib/arkErrors";
 import { downloadText, safeFilename } from "../../lib/download";
 import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
+import { SUGGESTED_OLLAMA_MODELS, type SuggestedOllamaModel } from "../../lib/ollamaSuggestedModels";
 import { detectIsMacPlatform, formatShortcutKeys } from "../../lib/platform";
 import { useBreakpoint } from "../../lib/useBreakpoint";
 import { validateNumberInput } from "../../lib/numberField";
@@ -1978,6 +1979,17 @@ function OllamaModelsPanel({
   const [pullProgress, setPullProgress] = React.useState<OllamaPullProgress | null>(null);
   const [deletingModel, setDeletingModel] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
+  const [showSuggestions, setShowSuggestions] = React.useState(false);
+  const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  const [checkingSpace, setCheckingSpace] = React.useState(false);
+  // UX-011: a pull the disk-space check flagged as likely too large — held here so the UI can
+  // show a warning with an explicit "Continue anyway" rather than silently blocking or silently
+  // proceeding. Cleared on cancel, on confirm, or once the pull actually starts.
+  const [diskWarning, setDiskWarning] = React.useState<{
+    modelName: string;
+    requiredGb: number;
+    availableGb: number;
+  } | null>(null);
 
   React.useEffect(() => {
     if (!pulling) return;
@@ -2004,12 +2016,10 @@ function OllamaModelsPanel({
   const reachable = health?.isReachable ?? true;
   const stale = health ? isProviderHealthStale(health.checkedAt) : false;
 
-  async function handlePull() {
-    const name = pullName.trim();
-    if (!name) return;
-
+  async function doPull(name: string) {
     setPulling(true);
     setPullProgress(null);
+    setDiskWarning(null);
     try {
       await client.pullOllamaModel(provider.id, name);
       await onRefreshProviderModels(provider.id);
@@ -2028,6 +2038,45 @@ function OllamaModelsPanel({
     }
   }
 
+  // UX-011: only curated tags carry a known approximate size, so the check is skipped (pull
+  // proceeds directly) for any free-text tag not in `SUGGESTED_OLLAMA_MODELS` — this is a
+  // best-effort hint against a known size, not a general disk-space gate. A failed or
+  // zero-valued check (the workspace's drive couldn't be resolved) never blocks the pull either;
+  // see `checkDiskSpace`'s own doc comment for why this figure is an approximation.
+  async function handlePullClick() {
+    const name = pullName.trim();
+    if (!name) return;
+    setShowSuggestions(false);
+
+    const curated = SUGGESTED_OLLAMA_MODELS.find((model) => model.name === name);
+    if (curated) {
+      setCheckingSpace(true);
+      try {
+        const space = await client.checkDiskSpace();
+        const requiredBytes = curated.approxSizeGb * 1024 ** 3;
+        if (space.availableBytes > 0 && space.availableBytes < requiredBytes) {
+          setDiskWarning({
+            modelName: name,
+            requiredGb: curated.approxSizeGb,
+            availableGb: space.availableBytes / 1024 ** 3,
+          });
+          return;
+        }
+      } catch {
+        // Best-effort — proceed as if no warning applies.
+      } finally {
+        setCheckingSpace(false);
+      }
+    }
+
+    await doPull(name);
+  }
+
+  function selectSuggestion(model: SuggestedOllamaModel) {
+    setPullName(model.name);
+    setShowSuggestions(false);
+  }
+
   async function handleCancelPull() {
     setCancelling(true);
     try {
@@ -2040,8 +2089,12 @@ function OllamaModelsPanel({
 
   async function handleDelete(model: ModelInfo) {
     const sizeLabel = modelSizeLabel(model);
+    const isDefaultModel = provider.defaultModelId === model.name;
     const confirmed = window.confirm(
-      `Delete model "${model.name}" from Ollama${sizeLabel ? ` (${sizeLabel} on disk)` : ""}? This cannot be undone.`,
+      `Delete model "${model.name}" from Ollama${sizeLabel ? ` (${sizeLabel} on disk)` : ""}? This cannot be undone.` +
+        (isDefaultModel
+          ? `\n\nThis is this provider's default model — conversations without their own override will lose it.`
+          : ""),
     );
     if (!confirmed) return;
 
@@ -2094,6 +2147,16 @@ function OllamaModelsPanel({
 
   const availableModels = models.filter((m) => m.isAvailable);
 
+  const suggestionQuery = pullName.trim().toLowerCase();
+  const filteredSuggestions = (
+    suggestionQuery.length === 0
+      ? SUGGESTED_OLLAMA_MODELS
+      : SUGGESTED_OLLAMA_MODELS.filter(
+          (model) =>
+            model.name.toLowerCase().includes(suggestionQuery) || model.label.toLowerCase().includes(suggestionQuery),
+        )
+  ).slice(0, 6);
+
   return (
     <div className="mt-4 border-t border-border pt-4">
       <div className="mb-3 flex items-center gap-2">
@@ -2109,7 +2172,8 @@ function OllamaModelsPanel({
           <span>
             Ollama is unreachable — showing the last-known model list
             {health?.checkedAt ? ` (checked ${formatRelativeTime(health.checkedAt)})` : ""}. Pull and delete are
-            disabled until it reconnects.
+            disabled until it reconnects. If Ollama isn't running, start it (
+            <code className="rounded bg-muted px-1 py-0.5">ollama serve</code>, or launch the Ollama app) and reconnect.
           </span>
           <Button size="sm" variant="secondary" onClick={() => void handleReconnect()} disabled={refreshing}>
             {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -2162,30 +2226,111 @@ function OllamaModelsPanel({
       )}
 
       <div className="grid gap-2">
+        {diskWarning && (
+          <div className="grid gap-2 rounded-md border border-warning/50 bg-warning/10 p-3 text-xs" role="alert">
+            <span>
+              "{diskWarning.modelName}" is about {diskWarning.requiredGb}GB, but the workspace drive only has about{" "}
+              {diskWarning.availableGb.toFixed(1)}GB free. The pull may fail partway through if space runs out.
+            </span>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => void doPull(diskWarning.modelName)}>
+                Continue anyway
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => setDiskWarning(null)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2">
-          <input
-            type="text"
-            value={pullName}
-            onChange={(e) => setPullName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !pulling && pullName.trim() && reachable) {
-                e.preventDefault();
-                void handlePull();
-              }
-            }}
-            placeholder="llama3.2:3b"
-            disabled={pulling || !reachable}
-            className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-            aria-label="Model name to pull"
-          />
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={pullName}
+              onChange={(e) => {
+                setPullName(e.target.value);
+                setShowSuggestions(true);
+                setHighlightedIndex(0);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => {
+                // Deferred so a click on a suggestion below registers before the list unmounts.
+                setTimeout(() => setShowSuggestions(false), 150);
+              }}
+              onKeyDown={(e) => {
+                const suggestions = filteredSuggestions;
+                if (showSuggestions && suggestions.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setHighlightedIndex((i) => Math.min(i + 1, suggestions.length - 1));
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setHighlightedIndex((i) => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    setShowSuggestions(false);
+                    return;
+                  }
+                  if (e.key === "Enter" && suggestions[highlightedIndex]) {
+                    e.preventDefault();
+                    selectSuggestion(suggestions[highlightedIndex]);
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !pulling && pullName.trim() && reachable) {
+                  e.preventDefault();
+                  void handlePullClick();
+                }
+              }}
+              placeholder="Search suggested models, or type any tag (e.g. llama3.2:3b)"
+              disabled={pulling || !reachable}
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              aria-label="Model name to pull"
+              role="combobox"
+              aria-expanded={showSuggestions && filteredSuggestions.length > 0}
+              aria-controls="ollama-suggested-models-listbox"
+              aria-autocomplete="list"
+            />
+            {showSuggestions && filteredSuggestions.length > 0 && (
+              <ul
+                id="ollama-suggested-models-listbox"
+                role="listbox"
+                aria-label="Suggested Ollama models"
+                className="absolute z-10 mt-1 max-h-64 w-full overflow-auto rounded-md border border-border bg-popover shadow-md"
+              >
+                {filteredSuggestions.map((model, index) => (
+                  <li key={model.name} role="option" aria-selected={index === highlightedIndex}>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => selectSuggestion(model)}
+                      className={cn(
+                        "flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left text-xs hover:bg-accent",
+                        index === highlightedIndex && "bg-accent",
+                      )}
+                    >
+                      <span className="text-sm font-medium text-foreground">{model.label}</span>
+                      <span className="text-muted-foreground">
+                        {model.name} · ~{model.approxSizeGb}GB — {model.description}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           {pulling ? (
             <Button variant="secondary" onClick={() => void handleCancelPull()} disabled={cancelling}>
               {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Cancel
             </Button>
           ) : (
-            <Button onClick={handlePull} disabled={!pullName.trim() || !reachable}>
-              <Download className="h-4 w-4" />
+            <Button onClick={() => void handlePullClick()} disabled={!pullName.trim() || !reachable || checkingSpace}>
+              {checkingSpace ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               Pull
             </Button>
           )}

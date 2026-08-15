@@ -18,6 +18,7 @@ use crate::providers::{
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use sysinfo::Disks;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +243,40 @@ pub async fn delete_ollama_model(
     db.mark_model_unavailable(&request.provider_id, &request.model_name)?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpaceInfo {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// UX-011: best-effort disk-space signal for the model picker's "will this fit" hint before an
+/// Ollama pull starts. Checks the workspace's own volume (the same `Disks` lookup
+/// `diagnostics::run_diagnostics` already uses), since Ark cannot query Ollama's actual
+/// model-storage path cross-platform — a documented approximation, not the pull target's real
+/// free space. Never blocks a pull on its own; callers surface it as a warning with a way past.
+pub fn check_disk_space(state: &AppState) -> Result<DiskSpaceInfo, AppError> {
+    let workspace_root = {
+        let workspace_info = state
+            .workspace
+            .lock()
+            .map_err(|_| AppError::new("state_error", "Could not access workspace state."))?
+            .clone();
+        std::path::PathBuf::from(workspace_info.root_path)
+    };
+    let disks = Disks::new_with_refreshed_list();
+    let workspace_disk = disks
+        .iter()
+        .filter(|disk| workspace_root.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len());
+    Ok(DiskSpaceInfo {
+        total_bytes: workspace_disk.map(|disk| disk.total_space()).unwrap_or(0),
+        available_bytes: workspace_disk
+            .map(|disk| disk.available_space())
+            .unwrap_or(0),
+    })
 }
 
 pub async fn get_built_in_runtime_status(
@@ -611,6 +646,21 @@ mod tests {
         assert!(!crate::commands::lock_sidecar(&state)
             .expect("sidecar lock")
             .reconcile_process());
+
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// UX-011: `test_app_state`'s workspace root is a real temp-directory path, so this exercises
+    /// the actual `Disks` lookup rather than mocking it — platform-portable by asserting only the
+    /// invariant every real filesystem satisfies (available never exceeds total), not exact byte
+    /// counts, which vary by machine and CI runner.
+    #[test]
+    fn check_disk_space_reports_consistent_non_negative_values_for_a_real_workspace_path() {
+        let (state, path) = test_app_state();
+
+        let info = check_disk_space(&state).expect("disk space check succeeds");
+        assert!(info.available_bytes <= info.total_bytes);
 
         drop(state);
         let _ = std::fs::remove_file(path);

@@ -14,6 +14,7 @@ import type {
   DeviceSettings,
   DiagnosticsBundle,
   DiagnosticsResult,
+  DiskSpaceInfo,
   CompanionApiStatus,
   CompanionApiTokenReveal,
   ImportConversationPreview,
@@ -232,6 +233,10 @@ export interface ArkClient {
    * none is running. Ollama has no documented pull-cancel endpoint; this stops Ark from reading
    * the response stream, which closes the connection and lets Ollama detect the abort itself. */
   cancelOllamaPull(providerId: string): Promise<void>;
+  /** UX-011: best-effort free-space signal for the workspace's own drive — see
+   * `DiskSpaceInfo`'s doc comment for why this is an approximation, not the pull target's real
+   * free space. */
+  checkDiskSpace(): Promise<DiskSpaceInfo>;
 
   listProjects(): Promise<Project[]>;
   createProject(name: string): Promise<Project>;
@@ -488,6 +493,7 @@ export function createTauriArkClient(): ArkClient {
     deleteOllamaModel: (providerId, modelName) =>
       invoke<void>("delete_ollama_model", { request: { providerId, modelName } }),
     cancelOllamaPull: (providerId) => invoke<void>("cancel_ollama_pull", { providerId }),
+    checkDiskSpace: () => invoke<DiskSpaceInfo>("check_disk_space"),
 
     listProjects: () => invoke<Project[]>("list_projects"),
     createProject: (name) => invoke<Project>("create_project", { name }),
@@ -648,6 +654,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     pullOllamaModel: async () => undefined,
     deleteOllamaModel: async () => undefined,
     cancelOllamaPull: async () => undefined,
+    checkDiskSpace: async () => ({ totalBytes: 0, availableBytes: 0 }),
 
     listProjects: async () => [],
     createProject: notImplemented("createProject"),

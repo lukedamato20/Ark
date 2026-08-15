@@ -431,6 +431,11 @@ export interface RefreshModelsResult {
   provider: ProviderConfig;
 }
 
+export interface DiskSpaceInfo {
+  totalBytes: number;
+  availableBytes: number;
+}
+
 export interface DiagnosticsResult {
   os: string;
   cpu: string;

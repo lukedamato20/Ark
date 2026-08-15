@@ -24,7 +24,7 @@ use crate::import_export::{
 };
 use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview};
-use crate::provider_management::{BuiltInRuntimeStatus, RefreshModelsResult};
+use crate::provider_management::{BuiltInRuntimeStatus, DiskSpaceInfo, RefreshModelsResult};
 use crate::providers::{
     ModelInfo, OllamaPullProgress, ProviderCapabilities, ProviderConfig, ProviderHealth,
 };
@@ -653,6 +653,17 @@ fn refresh_models_result_matches_contract() {
             health: sample_provider_health(),
             models: vec![sample_model_info()],
             provider: sample_provider_config(),
+        },
+    );
+}
+
+#[test]
+fn disk_space_info_matches_contract() {
+    assert_matches_contract(
+        "DiskSpaceInfo",
+        &DiskSpaceInfo {
+            total_bytes: 512_000_000_000,
+            available_bytes: 128_000_000_000,
         },
     );
 }
