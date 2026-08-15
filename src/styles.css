@@ -7,6 +7,12 @@
   --foreground: 220 24% 12%;
   --card: 0 0% 100%;
   --card-foreground: 220 24% 12%;
+  /* UX-xxx: dropdown/menu/popover surfaces (ChatView's hand-rolled listbox/menu/dialog
+     popovers) — a distinct token from --card so a floating overlay can diverge from a static
+     panel's surface later without a rename, but intentionally the same values as --card today
+     since both are meant to read as "the same opaque elevated surface" in this design. */
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 24% 12%;
   --primary: 210 18% 18%;
   --primary-foreground: 0 0% 98%;
   --secondary: 210 18% 92%;
@@ -17,6 +23,15 @@
   --accent-foreground: 214 24% 15%;
   --destructive: 0 72% 45%;
   --destructive-foreground: 0 0% 98%;
+  /* UX: a semantic warning token, matching the amber hue already used directly (bare
+     `amber-500`/`amber-600` Tailwind classes) by SetupBanner/ChatMessageList's existing warning
+     banners — tuned for `text-warning`'s actual direct usage (SettingsView's encryption/token
+     warnings) rather than the border/background-at-low-opacity uses, which are far more
+     contrast-forgiving. `--warning-foreground` is unused today (no solid-fill `bg-warning` +
+     `text-warning-foreground` pairing exists yet) but defined now for the same DEFAULT/foreground
+     symmetry every other token here has. */
+  --warning: 32 95% 44%;
+  --warning-foreground: 26 20% 12%;
   --border: 210 18% 86%;
   --input: 210 18% 84%;
   --ring: 202 72% 42%;
@@ -28,6 +43,8 @@
   --foreground: 210 22% 92%;
   --card: 220 18% 10%;
   --card-foreground: 210 22% 92%;
+  --popover: 220 18% 10%;
+  --popover-foreground: 210 22% 92%;
   --primary: 200 84% 70%;
   --primary-foreground: 220 30% 8%;
   --secondary: 220 16% 16%;
@@ -44,6 +61,8 @@
      was not re-verified against) is defined in `ui/button.tsx` but has no live caller. */
   --destructive: 0 70% 62%;
   --destructive-foreground: 0 0% 98%;
+  --warning: 43 96% 68%;
+  --warning-foreground: 26 20% 12%;
   --border: 220 16% 18%;
   --input: 220 16% 20%;
   --ring: 200 84% 62%;

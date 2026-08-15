@@ -1600,7 +1600,7 @@ function ConversationNotesButton({
         <div
           role="dialog"
           aria-label="Conversation notes"
-          className="absolute right-0 top-11 z-20 grid w-80 gap-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
+          className="absolute right-0 top-11 z-50 grid w-80 gap-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
         >
           <div className="text-sm font-semibold">Notes</div>
 

@@ -41,6 +41,9 @@ jobs:
       - name: Module boundaries and circular dependencies
         run: pnpm architecture:check
 
+      - name: Design token regression check
+        run: pnpm design-tokens:check
+
       - name: Release capability/support matrix
         run: pnpm support:check
 

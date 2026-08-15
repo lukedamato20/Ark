@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "architecture:check": "node scripts/check-module-boundaries.mjs",
+    "design-tokens:check": "node scripts/check-design-tokens.mjs",
     "support:check": "node scripts/check-support-matrix.mjs",
     "baseline:check": "node scripts/reference-dataset.mjs --check",
     "baseline:fixtures": "node scripts/reference-dataset.mjs",
