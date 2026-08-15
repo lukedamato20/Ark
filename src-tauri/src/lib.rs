@@ -30,17 +30,17 @@ mod workspace;
 mod workspace_bootstrap;
 
 use commands::{
-    cancel_import, cancel_stream, create_conversation, create_project, create_workspace_backup,
-    delete_conversation, delete_ollama_model, delete_project, delete_provider_secret,
-    disable_workspace_encryption, discard_interrupted_message, edit_user_message,
-    enable_workspace_encryption, export_conversation_json, export_conversation_markdown,
-    export_diagnostics_bundle, get_app_bootstrap, get_assistant_alternatives,
-    get_built_in_runtime_status, get_conversation_messages, get_message,
-    get_provider_secret_metadata, get_secret_store_status, get_workspace_protection_status,
-    import_conversation_json, keep_partial_message, list_conversations, list_projects,
-    preview_conversation_import, preview_project_deletion, preview_workspace_restore,
-    pull_ollama_model, refresh_models, regenerate_assistant_message, rename_conversation,
-    reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
+    cancel_import, cancel_ollama_pull, cancel_stream, create_conversation, create_project,
+    create_workspace_backup, delete_conversation, delete_ollama_model, delete_project,
+    delete_provider_secret, disable_workspace_encryption, discard_interrupted_message,
+    edit_user_message, enable_workspace_encryption, export_conversation_json,
+    export_conversation_markdown, export_diagnostics_bundle, get_app_bootstrap,
+    get_assistant_alternatives, get_built_in_runtime_status, get_conversation_messages,
+    get_message, get_provider_secret_metadata, get_secret_store_status,
+    get_workspace_protection_status, import_conversation_json, keep_partial_message,
+    list_conversations, list_projects, preview_conversation_import, preview_project_deletion,
+    preview_workspace_restore, pull_ollama_model, refresh_models, regenerate_assistant_message,
+    rename_conversation, reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
     retry_workspace_open, rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle,
     send_chat_message, set_branch_name, set_conversation_archived, set_conversation_pinned,
     set_conversation_project, set_project_archived, set_workspace, start_built_in_runtime,
@@ -80,6 +80,9 @@ pub struct AppState {
     pub(crate) active_streams: Mutex<HashMap<String, Arc<generation::StreamCancellation>>>,
     pub(crate) pending_streams: Mutex<HashMap<String, generation::PendingStream>>,
     pub(crate) active_imports: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// FTR-006: keyed by provider ID, matching the UI's single-pull-per-provider reality — see
+    /// `provider_management::pull_ollama_model`'s own doc comment.
+    pub(crate) active_ollama_pulls: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// SEC-006: gates all database commands while a copy/verify/swap protection migration owns
     /// both connections. Compare-and-swap prevents concurrent protection operations.
     pub(crate) storage_maintenance: AtomicBool,
@@ -221,6 +224,7 @@ pub fn run() {
                 active_streams: Mutex::new(HashMap::new()),
                 pending_streams: Mutex::new(HashMap::new()),
                 active_imports: Mutex::new(HashMap::new()),
+                active_ollama_pulls: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: Arc::new(Mutex::new(diagnostics_log)),
@@ -286,7 +290,8 @@ pub fn run() {
             stop_built_in_runtime,
             get_built_in_runtime_status,
             pull_ollama_model,
-            delete_ollama_model
+            delete_ollama_model,
+            cancel_ollama_pull
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

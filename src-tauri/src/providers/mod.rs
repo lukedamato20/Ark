@@ -318,10 +318,14 @@ pub trait Provider: Send + Sync {
         on_delta: &mut (dyn for<'a> FnMut(&'a str) -> Result<(), AppError> + Send),
     ) -> Result<ProviderChatUsage, AppError>;
 
+    /// FTR-006: `should_cancel` is polled between streamed progress events — see
+    /// `OllamaProvider::pull_model` for how a `true` result there stops reading the response
+    /// stream and closes the connection, which Ollama's server treats as an abort signal.
     async fn pull_model(
         &self,
         _model_name: &str,
         _on_progress: &mut (dyn FnMut(OllamaPullProgress) + Send),
+        _should_cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), AppError> {
         Err(AppError::invalid_input(
             "This provider does not support pulling models.",
@@ -393,8 +397,10 @@ impl Provider for OllamaProvider {
         &self,
         model_name: &str,
         on_progress: &mut (dyn FnMut(OllamaPullProgress) + Send),
+        should_cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), AppError> {
-        self.pull_model(model_name, on_progress).await
+        self.pull_model(model_name, on_progress, should_cancel)
+            .await
     }
 
     async fn delete_model(&self, model_name: &str) -> Result<(), AppError> {
@@ -982,6 +988,7 @@ impl OllamaProvider {
         &self,
         model_name: &str,
         on_progress: &mut (dyn FnMut(OllamaPullProgress) + Send),
+        should_cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), AppError> {
         let base_url = self
             .provider
@@ -1005,7 +1012,23 @@ impl OllamaProvider {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
-        while let Some(chunk) = stream.next().await {
+        // FTR-006: cancellation is polled on an interval via `tokio::time::timeout` around each
+        // read, not just once a chunk actually arrives — a naive "check between chunks" loop
+        // would stay blocked on `stream.next()` for the entire duration of a slow/stalled
+        // download, which is exactly the case a user most wants to cancel. Ollama has no
+        // documented pull-cancel endpoint, so the only way to abort server-side work is to stop
+        // reading and drop the response, closing the connection.
+        const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+        loop {
+            if should_cancel() {
+                return Err(AppError::new("pull_cancelled", "Model pull was cancelled."));
+            }
+            let chunk = match tokio::time::timeout(CANCELLATION_POLL_INTERVAL, stream.next()).await
+            {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
             let bytes = chunk?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -2063,6 +2086,55 @@ mod tests {
         assert!(
             !evil_was_contacted.load(Ordering::SeqCst),
             "the redirect target must never be contacted when redirects are disabled"
+        );
+    }
+
+    /// FTR-006: proves cancellation actually interrupts a *stalled* download, not just one
+    /// already sitting on a fully-buffered chunk — the case that matters, since a naive
+    /// "check between already-received chunks" loop would still block for the entire delay
+    /// below. The mock server holds the connection open for 5 seconds after the first progress
+    /// event before ever sending the final "success" chunk; a working cancellation path must
+    /// return well before that delay elapses.
+    #[tokio::test]
+    async fn pull_model_stops_reading_and_reports_cancellation_when_requested() {
+        let port = start_mock_stream_server(
+            "HTTP/1.1 200 OK",
+            vec![
+                MockChunk::new(
+                    b"{\"status\":\"downloading\",\"total\":100,\"completed\":10}\n".to_vec(),
+                ),
+                MockChunk::delayed(
+                    Duration::from_secs(5),
+                    b"{\"status\":\"success\"}\n".to_vec(),
+                ),
+            ],
+        )
+        .await;
+
+        let provider = ollama_provider_for_port(port);
+        let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_for_progress = cancel_requested.clone();
+        let started_at = std::time::Instant::now();
+
+        let result = provider
+            .pull_model(
+                "fixture-model",
+                &mut |_progress| {
+                    // Request cancellation as soon as the first progress event is observed —
+                    // mirrors a user clicking "Cancel" mid-download.
+                    flag_for_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+                &|| cancel_requested.load(std::sync::atomic::Ordering::SeqCst),
+            )
+            .await;
+
+        let elapsed = started_at.elapsed();
+        let error =
+            result.expect_err("cancellation must surface as an error, not a silent success");
+        assert_eq!(error.code, "pull_cancelled");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "cancellation should be detected well before the 5-second stalled chunk, took {elapsed:?}"
         );
     }
 }

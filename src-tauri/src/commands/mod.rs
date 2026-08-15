@@ -699,6 +699,12 @@ pub async fn delete_ollama_model(
     crate::provider_management::delete_ollama_model(&state, request).await
 }
 
+#[tauri::command]
+pub fn cancel_ollama_pull(state: State<'_, AppState>, provider_id: String) -> Result<(), AppError> {
+    let provider_id = crate::validation::validate_entity_id(&provider_id, "Provider ID")?;
+    crate::provider_management::cancel_ollama_pull(&state, provider_id)
+}
+
 // ARC-001: these two take `&AppState` — the plain data port — rather than Tauri's `State<T>`
 // wrapper, specifically so every application-service function that depends on them (in
 // `generation`, `diagnostics`, `provider_management`, `workspace_bootstrap`) can be constructed

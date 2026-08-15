@@ -1231,6 +1231,7 @@ mod tests {
                 active_streams: Mutex::new(HashMap::new()),
                 pending_streams: Mutex::new(HashMap::new()),
                 active_imports: Mutex::new(HashMap::new()),
+                active_ollama_pulls: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: Arc::new(

@@ -23,6 +23,7 @@ import * as React from "react";
 import { providerIsVisible, releaseCapabilities } from "../../config/releaseCapabilities";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { validateNumberInput } from "../../lib/numberField";
+import { formatRelativeTime, isProviderHealthStale } from "../../lib/relativeTime";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
   AppErrorShape,
@@ -331,6 +332,7 @@ export function SettingsView({
                   key={provider.id}
                   provider={provider}
                   models={providerModels}
+                  health={health}
                   onProviderSaved={onProviderSaved}
                   onRefreshProviderModels={onRefreshProviderModels}
                   onError={onError}
@@ -959,6 +961,7 @@ function ProjectEditor({
 function ProviderForm({
   provider,
   models,
+  health,
   onProviderSaved,
   onRefreshProviderModels,
   onError,
@@ -967,6 +970,7 @@ function ProviderForm({
 }: {
   provider: ProviderConfig;
   models: ModelInfo[];
+  health: ProviderHealth | null;
   onProviderSaved: (provider: ProviderConfig) => void;
   onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
@@ -1326,6 +1330,7 @@ function ProviderForm({
         <OllamaModelsPanel
           provider={provider}
           models={models}
+          health={health}
           onRefreshProviderModels={onRefreshProviderModels}
           onError={onError}
         />
@@ -1334,22 +1339,34 @@ function ProviderForm({
   );
 }
 
+/** FTR-006: the subset of Ollama's `/api/tags` `details` object Ark surfaces — everything else
+ * in that object (raw format strings, families arrays) stays unparsed rather than guessed at. */
+interface OllamaModelDetails {
+  family?: string;
+  parameter_size?: string;
+  quantization_level?: string;
+}
+
 function OllamaModelsPanel({
   provider,
   models,
+  health,
   onRefreshProviderModels,
   onError,
 }: {
   provider: ProviderConfig;
   models: ModelInfo[];
+  health: ProviderHealth | null;
   onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const client = useArkClient();
   const [pullName, setPullName] = React.useState("");
   const [pulling, setPulling] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
   const [pullProgress, setPullProgress] = React.useState<OllamaPullProgress | null>(null);
   const [deletingModel, setDeletingModel] = React.useState<string | null>(null);
+  const [refreshing, setRefreshing] = React.useState(false);
 
   React.useEffect(() => {
     if (!pulling) return;
@@ -1370,6 +1387,12 @@ function OllamaModelsPanel({
     };
   }, [pulling, provider.id, client]);
 
+  // FTR-006: pull/delete require a reachable Ollama instance — attempting either against a
+  // stale/unreachable one would just fail after a timeout, so both are disabled up front with a
+  // reconnect action instead, matching the "Ollama unreachable" acceptance criterion.
+  const reachable = health?.isReachable ?? true;
+  const stale = health ? isProviderHealthStale(health.checkedAt) : false;
+
   async function handlePull() {
     const name = pullName.trim();
     if (!name) return;
@@ -1381,25 +1404,75 @@ function OllamaModelsPanel({
       await onRefreshProviderModels(provider.id);
       setPullName("");
     } catch (error) {
-      onError(getErrorMessage(error));
+      const code = error && typeof error === "object" && "code" in error ? (error as AppErrorShape).code : undefined;
+      // A deliberate cancel isn't a failure — nothing to show the user beyond the pull simply
+      // stopping, which the cleared progress UI below already communicates.
+      if (code !== "pull_cancelled") {
+        onError(getErrorMessage(error));
+      }
     } finally {
       setPulling(false);
+      setCancelling(false);
       setPullProgress(null);
     }
   }
 
-  async function handleDelete(modelName: string) {
-    const confirmed = window.confirm(`Delete model "${modelName}" from Ollama? This cannot be undone.`);
+  async function handleCancelPull() {
+    setCancelling(true);
+    try {
+      await client.cancelOllamaPull(provider.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+      setCancelling(false);
+    }
+  }
+
+  async function handleDelete(model: ModelInfo) {
+    const sizeLabel = modelSizeLabel(model);
+    const confirmed = window.confirm(
+      `Delete model "${model.name}" from Ollama${sizeLabel ? ` (${sizeLabel} on disk)` : ""}? This cannot be undone.`,
+    );
     if (!confirmed) return;
 
-    setDeletingModel(modelName);
+    setDeletingModel(model.name);
     try {
-      await client.deleteOllamaModel(provider.id, modelName);
+      await client.deleteOllamaModel(provider.id, model.name);
       await onRefreshProviderModels(provider.id);
     } catch (error) {
       onError(getErrorMessage(error));
     } finally {
       setDeletingModel(null);
+    }
+  }
+
+  async function handleReconnect() {
+    setRefreshing(true);
+    try {
+      await onRefreshProviderModels(provider.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  function modelDetails(model: ModelInfo): OllamaModelDetails | null {
+    if (!model.metadataJson) return null;
+    try {
+      const parsed = JSON.parse(model.metadataJson) as { details?: OllamaModelDetails };
+      return parsed.details ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function modelSizeLabel(model: ModelInfo): string | null {
+    if (!model.metadataJson) return null;
+    try {
+      const parsed = JSON.parse(model.metadataJson) as { size?: number };
+      return parsed.size ? formatBytes(parsed.size) : null;
+    } catch {
+      return null;
     }
   }
 
@@ -1420,30 +1493,48 @@ function OllamaModelsPanel({
         </span>
       </div>
 
+      {!reachable && (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+          <span>
+            Ollama is unreachable — showing the last-known model list
+            {health?.checkedAt ? ` (checked ${formatRelativeTime(health.checkedAt)})` : ""}. Pull and delete are
+            disabled until it reconnects.
+          </span>
+          <Button size="sm" variant="secondary" onClick={() => void handleReconnect()} disabled={refreshing}>
+            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Reconnect
+          </Button>
+        </div>
+      )}
+      {reachable && stale && health && (
+        <div className="mb-3 text-xs text-amber-600 dark:text-amber-400">
+          Model list last confirmed {formatRelativeTime(health.checkedAt)} (stale).
+        </div>
+      )}
+
       {availableModels.length === 0 ? (
         <p className="text-sm text-muted-foreground">No models installed. Pull one below to get started.</p>
       ) : (
         <div className="mb-4 divide-y divide-border rounded-md border border-border">
           {availableModels.map((model) => {
-            const meta = model.metadataJson
-              ? (() => {
-                  try {
-                    return JSON.parse(model.metadataJson!);
-                  } catch {
-                    return null;
-                  }
-                })()
-              : null;
-            const sizeBytes: number | null = meta?.size ?? null;
-            const sizeLabel = sizeBytes ? formatBytes(sizeBytes) : null;
+            const details = modelDetails(model);
+            const sizeLabel = modelSizeLabel(model);
+            const detailParts = [details?.parameter_size, details?.quantization_level, details?.family].filter(
+              (part): part is string => Boolean(part),
+            );
             return (
               <div key={model.id} className="flex items-center gap-3 px-3 py-2.5">
-                <span className="min-w-0 flex-1 text-sm font-medium">{model.displayName ?? model.name}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">{model.displayName ?? model.name}</span>
+                  {detailParts.length > 0 && (
+                    <span className="block text-xs text-muted-foreground">{detailParts.join(" · ")}</span>
+                  )}
+                </span>
                 {sizeLabel && <span className="text-xs text-muted-foreground">{sizeLabel}</span>}
                 <button
                   type="button"
-                  onClick={() => void handleDelete(model.name)}
-                  disabled={deletingModel === model.name}
+                  onClick={() => void handleDelete(model)}
+                  disabled={deletingModel === model.name || !reachable}
                   aria-label={`Delete ${model.name}`}
                   className="rounded p-1 text-muted-foreground hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
                 >
@@ -1466,20 +1557,27 @@ function OllamaModelsPanel({
             value={pullName}
             onChange={(e) => setPullName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !pulling && pullName.trim()) {
+              if (e.key === "Enter" && !pulling && pullName.trim() && reachable) {
                 e.preventDefault();
                 void handlePull();
               }
             }}
             placeholder="llama3.2:3b"
-            disabled={pulling}
+            disabled={pulling || !reachable}
             className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
             aria-label="Model name to pull"
           />
-          <Button onClick={handlePull} disabled={pulling || !pullName.trim()}>
-            {pulling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            {pulling ? "Pulling…" : "Pull"}
-          </Button>
+          {pulling ? (
+            <Button variant="secondary" onClick={() => void handleCancelPull()} disabled={cancelling}>
+              {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Cancel
+            </Button>
+          ) : (
+            <Button onClick={handlePull} disabled={!pullName.trim() || !reachable}>
+              <Download className="h-4 w-4" />
+              Pull
+            </Button>
+          )}
         </div>
 
         {pulling && pullProgress && (

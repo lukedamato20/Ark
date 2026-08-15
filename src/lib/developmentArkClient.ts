@@ -4,6 +4,7 @@ import type {
   Conversation,
   Message,
   ModelInfo,
+  OllamaPullProgress,
   Project,
   ProviderConfig,
   WorkspaceProtectionStatus,
@@ -927,6 +928,190 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       for (const conversation of conversations) {
         if (conversation.projectId === id) conversation.projectId = null;
       }
+    },
+  });
+}
+
+/**
+ * FTR-006 browser fixture: a reachable Ollama provider with two installed models carrying
+ * realistic `/api/tags` `details` metadata (family/parameter size/quantization) — every other
+ * fixture's pull/delete/cancel are unimplemented, so this is the only way to exercise the
+ * Ollama model-management panel (metadata display, pull progress, cancellation, delete-with-
+ * disk-footprint confirmation) live.
+ */
+export function createOllamaModelsFixtureClient(): ArkClient {
+  const timestamp = "2026-08-15T06:00:00Z";
+  const conversation: Conversation = {
+    id: "fixture-ollama-conversation",
+    title: "Ollama model management review",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    providerId: "ollama",
+    modelId: "llama3.2:8b",
+    archived: false,
+  };
+  const provider: ProviderConfig = {
+    id: "ollama",
+    name: "Ollama",
+    providerType: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    defaultModelId: "llama3.2:8b",
+    defaultTemperature: 0.7,
+    defaultMaxTokens: 2048,
+    isLocal: true,
+    allowInsecureRemote: false,
+    destinationClass: "loopback",
+    capabilities: {
+      streaming: true,
+      modelListing: true,
+      modelPull: true,
+      modelDelete: true,
+      modelUnload: false,
+      requiresAuth: false,
+      reportsContextWindow: false,
+      vision: false,
+      embeddings: false,
+      tools: false,
+    },
+    isEnabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const models: ModelInfo[] = [
+    {
+      id: "ollama:llama3.2:8b",
+      providerId: provider.id,
+      name: "llama3.2:8b",
+      displayName: "llama3.2:8b",
+      contextWindow: null,
+      supportsStreaming: true,
+      supportsTools: false,
+      supportsVision: false,
+      supportsEmbeddings: false,
+      isAvailable: true,
+      lastSeenAt: timestamp,
+      metadataJson: JSON.stringify({
+        size: 4_700_000_000,
+        details: { family: "llama", parameter_size: "8B", quantization_level: "Q4_0" },
+      }),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    {
+      id: "ollama:mistral:7b",
+      providerId: provider.id,
+      name: "mistral:7b",
+      displayName: "mistral:7b",
+      contextWindow: null,
+      supportsStreaming: true,
+      supportsTools: false,
+      supportsVision: false,
+      supportsEmbeddings: false,
+      isAvailable: true,
+      lastSeenAt: timestamp,
+      metadataJson: JSON.stringify({
+        size: 4_100_000_000,
+        details: { family: "mistral", parameter_size: "7B", quantization_level: "Q4_K_M" },
+      }),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ];
+  let installedModels = [...models];
+
+  const bootstrap: AppBootstrap = {
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
+    providers: [provider],
+    models: installedModels,
+    projects: [],
+    workspacePath: "C:\\Ark",
+    workspace: {
+      rootPath: "C:\\Ark",
+      databasePath: "C:\\Ark\\ark.sqlite3",
+      defaultRootPath: "C:\\Ark",
+      configPath: "C:\\Ark\\workspace.json",
+      isPortable: false,
+      requiresRestart: false,
+    },
+    deviceSettings: { theme: "dark", builtInModelPath: null, crashCaptureEnabled: false },
+    workspaceOpenError: null,
+  };
+
+  let pullProgressHandler: ((event: OllamaPullProgress) => void) | null = null;
+  let pullCancelled = false;
+
+  return createFakeArkClient({
+    getAppBootstrap: async () => bootstrap,
+    getConversationMessages: async () => [],
+    refreshModels: async () => ({
+      health: {
+        providerId: provider.id,
+        isReachable: true,
+        status: "running",
+        message: "Ollama is reachable.",
+        checkedAt: new Date().toISOString(),
+      },
+      models: installedModels,
+      provider,
+    }),
+    onOllamaPullProgress: async (handler) => {
+      pullProgressHandler = handler;
+      return () => {
+        pullProgressHandler = null;
+      };
+    },
+    pullOllamaModel: async (providerId, modelName) => {
+      pullCancelled = false;
+      const steps = [
+        { status: "pulling manifest", total: undefined, completed: undefined },
+        { status: "downloading", total: 1000, completed: 250 },
+        { status: "downloading", total: 1000, completed: 650 },
+        { status: "downloading", total: 1000, completed: 1000 },
+        { status: "success", total: 1000, completed: 1000 },
+      ];
+      for (const step of steps) {
+        if (pullCancelled) {
+          throw { code: "pull_cancelled", message: "Model pull was cancelled." };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        pullProgressHandler?.({
+          providerId,
+          modelName,
+          status: step.status,
+          total: step.total ?? null,
+          completed: step.completed ?? null,
+          digest: null,
+          error: null,
+        });
+      }
+      installedModels = [
+        ...installedModels,
+        {
+          id: `ollama:${modelName}`,
+          providerId,
+          name: modelName,
+          displayName: modelName,
+          contextWindow: null,
+          supportsStreaming: true,
+          supportsTools: false,
+          supportsVision: false,
+          supportsEmbeddings: false,
+          isAvailable: true,
+          lastSeenAt: new Date().toISOString(),
+          metadataJson: JSON.stringify({
+            size: 3_800_000_000,
+            details: { family: "unknown", parameter_size: "?", quantization_level: "Q4_0" },
+          }),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ];
+    },
+    cancelOllamaPull: async () => {
+      pullCancelled = true;
+    },
+    deleteOllamaModel: async (_providerId, modelName) => {
+      installedModels = installedModels.filter((model) => model.name !== modelName);
     },
   });
 }

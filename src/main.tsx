@@ -19,9 +19,11 @@ const arkClient =
           ? developmentClients!.createLongConversationFixtureClient()
           : fixture === "conversation-organization"
             ? developmentClients!.createConversationOrganizationFixtureClient()
-            : fixture === "bootstrap-failure"
-              ? developmentClients!.createBootstrapFailureFixtureClient()
-              : createTauriArkClient();
+            : fixture === "ollama-models"
+              ? developmentClients!.createOllamaModelsFixtureClient()
+              : fixture === "bootstrap-failure"
+                ? developmentClients!.createBootstrapFailureFixtureClient()
+                : createTauriArkClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

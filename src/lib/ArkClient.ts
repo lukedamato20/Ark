@@ -187,6 +187,10 @@ export interface ArkClient {
   deleteProviderSecret(providerId: string): Promise<void>;
   pullOllamaModel(providerId: string, modelName: string): Promise<void>;
   deleteOllamaModel(providerId: string, modelName: string): Promise<void>;
+  /** FTR-006: signals cancellation to an in-flight pull for this provider, if any — a no-op if
+   * none is running. Ollama has no documented pull-cancel endpoint; this stops Ark from reading
+   * the response stream, which closes the connection and lets Ollama detect the abort itself. */
+  cancelOllamaPull(providerId: string): Promise<void>;
 
   listProjects(): Promise<Project[]>;
   createProject(name: string): Promise<Project>;
@@ -369,6 +373,7 @@ export function createTauriArkClient(): ArkClient {
       invoke<void>("pull_ollama_model", { request: { providerId, modelName } }),
     deleteOllamaModel: (providerId, modelName) =>
       invoke<void>("delete_ollama_model", { request: { providerId, modelName } }),
+    cancelOllamaPull: (providerId) => invoke<void>("cancel_ollama_pull", { providerId }),
 
     listProjects: () => invoke<Project[]>("list_projects"),
     createProject: (name) => invoke<Project>("create_project", { name }),
@@ -484,6 +489,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     deleteProviderSecret: async () => undefined,
     pullOllamaModel: async () => undefined,
     deleteOllamaModel: async () => undefined,
+    cancelOllamaPull: async () => undefined,
 
     listProjects: async () => [],
     createProject: notImplemented("createProject"),

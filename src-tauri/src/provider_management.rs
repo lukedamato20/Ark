@@ -141,6 +141,11 @@ pub async fn refresh_models(
     })
 }
 
+/// FTR-006: only one pull per provider can be tracked for cancellation at a time, matching the
+/// UI's own reality (a single pull-by-name input per provider) — a second pull request for the
+/// same provider while one is already in flight replaces the tracked cancellation flag for it,
+/// which is harmless since Ollama itself would already reject/queue a concurrent pull of a
+/// different model on its own.
 pub async fn pull_ollama_model(
     app: &AppHandle,
     state: &AppState,
@@ -157,14 +162,34 @@ pub async fn pull_ollama_model(
 
     let runtime = ProviderRegistry::create(provider)?;
 
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut active_pulls = state
+            .active_ollama_pulls
+            .lock()
+            .map_err(|_| AppError::new("state_error", "Could not access active pulls."))?;
+        active_pulls.insert(request.provider_id.clone(), cancellation.clone());
+    }
+
     // ARC-003: no destructuring by concrete provider type — a provider that doesn't support
     // pulling models (i.e. everything except Ollama today) fails here with the trait's clear
     // "not supported" error instead of this function needing to know which provider types do.
-    runtime
-        .pull_model(&request.model_name, &mut |progress: OllamaPullProgress| {
-            app.emit("ollama:pull-progress", &progress).ok();
-        })
-        .await?;
+    let pull_result = runtime
+        .pull_model(
+            &request.model_name,
+            &mut |progress: OllamaPullProgress| {
+                app.emit("ollama:pull-progress", &progress).ok();
+            },
+            &|| cancellation.load(std::sync::atomic::Ordering::Acquire),
+        )
+        .await;
+
+    state
+        .active_ollama_pulls
+        .lock()
+        .map_err(|_| AppError::new("state_error", "Could not access active pulls."))?
+        .remove(&request.provider_id);
+    pull_result?;
 
     // Re-fetch the provider config and refresh the model list after a successful pull.
     // Lock scopes are explicit here to avoid holding MutexGuard across await points.
@@ -179,6 +204,21 @@ pub async fn pull_ollama_model(
         db.upsert_models(&request.provider_id, &models)?;
     }
 
+    Ok(())
+}
+
+/// FTR-006: signals cancellation to an in-flight `pull_ollama_model` call for this provider, if
+/// any — a no-op if none is running (the pull may have already finished, or never started under
+/// this provider ID), matching `cancel_import`'s established convention.
+pub fn cancel_ollama_pull(state: &AppState, provider_id: &str) -> Result<(), AppError> {
+    if let Some(cancellation) = state
+        .active_ollama_pulls
+        .lock()
+        .map_err(|_| AppError::new("state_error", "Could not access active pulls."))?
+        .get(provider_id)
+    {
+        cancellation.store(true, std::sync::atomic::Ordering::Release);
+    }
     Ok(())
 }
 
@@ -498,6 +538,7 @@ mod tests {
                 active_streams: Mutex::new(HashMap::new()),
                 pending_streams: Mutex::new(HashMap::new()),
                 active_imports: Mutex::new(HashMap::new()),
+                active_ollama_pulls: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: std::sync::Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: std::sync::Arc::new(Mutex::new(
