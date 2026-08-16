@@ -1,0 +1,59 @@
+name: Performance baseline
+
+# PERF-001: re-runs the tests that already enforce this project's named performance budgets
+# (docs/quality-baseline.md) against the real code paths that assert them, on a schedule
+# independent of push/PR activity — a scheduled failure is the regression signal, not a
+# separately maintained statistical benchmark suite. `workflow_dispatch` allows an on-demand run.
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf-baseline:
+    name: Budget-asserting test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Each test below asserts a real threshold from docs/quality-baseline.md /
+      # implementation-plan.md's PERF-001 acceptance criteria (100ms indexed queries, the
+      # checkpoint-reconstruction/rate design, the <=100ms cancellation-ack budget) or the
+      # perf_metrics formatter this task added. `tee` keeps the run's full output as a plain-text
+      # artifact without inventing a separate benchmark-report format.
+      - name: Run budget-asserting tests
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            cargo test --manifest-path src-tauri/Cargo.toml --lib \
+              db::tests::large_history_queries_use_indexes_and_meet_the_100ms_target -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --lib \
+              db::tests::recursive_branch_queries_are_bounded_indexed_and_meet_the_100ms_target -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --lib \
+              db::tests::append_to_message_content_reconstructs_a_large_response_from_batched_checkpoints -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --lib \
+              generation::tests::durable_cancellation_is_idempotent_preserves_partial_output_and_meets_ack_budget -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --lib export::tests -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --lib perf_metrics::tests -- --nocapture
+          } | tee perf-baseline-output.log
+
+      - name: Upload baseline output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline-output
+          path: perf-baseline-output.log
+          retention-days: 30
