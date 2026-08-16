@@ -7,7 +7,24 @@ import { highlightCode } from "../../lib/highlightCode";
 import { useArkClient } from "../../lib/useArkClient";
 import { Button } from "../../ui/button";
 
-export function MarkdownMessage({ content }: { content: string }) {
+/** PERF-005: memoized so a parent rerender that doesn't actually change `content`/`isStreaming`
+ * (e.g. an unrelated store update reaching the owning `MessageBubble`) never forces `ReactMarkdown`
+ * to reparse — the expensive step this component exists to gate. */
+export const MarkdownMessage = React.memo(function MarkdownMessage({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  /** PERF-005: while true, code blocks render as plain preformatted text instead of running
+   * `highlightCode` — an actively streaming message's fences are still forming, so the highlighted
+   * result would likely be thrown away on the very next delta anyway. Every code block in a
+   * streaming message is treated this way (not just the last/open one): distinguishing an
+   * already-closed fence from a still-growing one earlier in the same message would need raw-
+   * source position tracking `ReactMarkdown`'s parsed AST doesn't expose, so this trades a
+   * modest, temporary loss of highlighting on earlier fences for a simple, robust rule. A full
+   * highlighted pass always runs once the message reaches a terminal status. */
+  isStreaming?: boolean;
+}) {
   return (
     <ReactMarkdown
       className="markdown text-sm"
@@ -25,7 +42,7 @@ export function MarkdownMessage({ content }: { content: string }) {
             );
           }
 
-          return <CodeBlock code={code} language={match[1]} />;
+          return <CodeBlock code={code} language={match[1]} isStreaming={Boolean(isStreaming)} />;
         },
         a({ href, children, ...props }) {
           return (
@@ -39,7 +56,7 @@ export function MarkdownMessage({ content }: { content: string }) {
       {content}
     </ReactMarkdown>
   );
-}
+});
 
 /**
  * SEC-008: every Markdown link renders through this component rather than react-markdown's
@@ -75,14 +92,17 @@ function MarkdownLink({ href, children, ...props }: React.AnchorHTMLAttributes<H
   );
 }
 
-function CodeBlock({ code, language }: { code: string; language: string }) {
+function CodeBlock({ code, language, isStreaming }: { code: string; language: string; isStreaming: boolean }) {
   // UX-011: previously `copy()` had no error handling at all — a rejected `writeText` (denied
   // permission, an unfocused document, no Clipboard API) left the button showing "Copy" forever
   // with an uncaught promise rejection and zero indication to the user that anything went wrong.
   // Confirmed live: this genuinely happens (`NotAllowedError: Document is not focused`) rather
   // than being a theoretical case.
   const [copyState, setCopyState] = React.useState<"idle" | "copied" | "failed">("idle");
-  const html = React.useMemo(() => highlightCode(code, language), [code, language]);
+  // PERF-005: `null` while streaming means "render plain" — skips `highlightCode` entirely
+  // rather than computing and discarding a highlighted result that a growing fence would
+  // invalidate on the very next delta. Recomputed once, for real, the moment streaming ends.
+  const html = React.useMemo(() => (isStreaming ? null : highlightCode(code, language)), [code, language, isStreaming]);
 
   async function copy() {
     try {
@@ -109,7 +129,7 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
         </Button>
       </div>
       <pre className="m-0 overflow-auto border-0 bg-transparent p-4">
-        <code dangerouslySetInnerHTML={{ __html: html }} />
+        {html === null ? <code>{code}</code> : <code dangerouslySetInnerHTML={{ __html: html }} />}
       </pre>
       {/* UX-011: the Copy/Copied swap above is visual only — a screen-reader user watching
        * focus, not the icon, previously got no confirmation the copy happened, succeeded, or

@@ -39,6 +39,11 @@ interface ChatMessageListProps {
   onError: (message: string) => void;
 }
 
+/** PERF-005: caps how often a streaming message's Markdown reparses — see the `throttledContent`
+ * effect below. Fast enough to feel effectively instant (well under typical human perception
+ * thresholds) while bounding reparse frequency far below a fast provider's raw delta rate. */
+const MARKDOWN_STREAM_THROTTLE_MS = 120;
+
 /**
  * ARC-008: the transcript list owns message rendering only. The list itself receives stable
  * durable messages; each memoized bubble subscribes to its own generation overlay, so a token
@@ -154,6 +159,29 @@ const MessageBubble = React.memo(function MessageBubble({
       flush(); // announce any remaining tail once streaming stops, rather than losing it
     };
   }, [isStreaming]);
+
+  // PERF-005: decouples how often `MarkdownMessage` reparses from how often deltas arrive.
+  // COR-011 diagnosed a real cost here — the accumulated string grows on every delta, so an
+  // unthrottled `MarkdownMessage` fully re-parses the entire message (via `ReactMarkdown`) on
+  // every single one. Reusing `displayContentRef` from the announcement throttle above, this
+  // syncs immediately whenever streaming starts (no blank/stale flash) and thereafter at most
+  // once per interval — capping reparse frequency regardless of how fast the provider emits
+  // deltas — with a final flush on cleanup so settled content is never left stale.
+  const [throttledContent, setThrottledContent] = React.useState(displayContent);
+  React.useEffect(() => {
+    const flush = () => setThrottledContent(displayContentRef.current);
+    if (!isStreaming) {
+      flush();
+      return;
+    }
+    flush();
+    const timer = window.setInterval(flush, MARKDOWN_STREAM_THROTTLE_MS);
+    return () => {
+      window.clearInterval(timer);
+      flush();
+    };
+  }, [isStreaming]);
+
   const [alternatives, setAlternatives] = React.useState<BranchAlternative[] | null>(null);
   const [isLoadingAlternatives, setIsLoadingAlternatives] = React.useState(false);
   const [switchingBranchId, setSwitchingBranchId] = React.useState<string | null>(null);
@@ -599,7 +627,7 @@ const MessageBubble = React.memo(function MessageBubble({
           isUser ? (
             <div className="whitespace-pre-wrap text-sm leading-6">{displayContent}</div>
           ) : (
-            <MarkdownMessage content={displayContent} />
+            <MarkdownMessage content={throttledContent} isStreaming={isStreaming} />
           )
         ) : (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">

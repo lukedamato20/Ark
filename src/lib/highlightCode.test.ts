@@ -49,3 +49,29 @@ test("highlightCode falls back to plain escaping for an unknown/unregistered lan
   assert.equal(html, escapeHtml("<script>alert(1)</script>"));
   assert.ok(!html.includes("<script"));
 });
+
+// PERF-005: a real regression budget, not a security assertion. `CodeBlock` in
+// `MarkdownMessage.tsx` calls this on every code block a message contains once it stops
+// streaming (and, while streaming, is now skipped entirely — see that component's own
+// `isStreaming` handling) — an accidental algorithmic regression here (e.g. quadratic
+// tokenizing behavior) would degrade every long code-bearing response. 2,000 lines is larger
+// than any code block a real chat response is likely to contain; the budget is generous
+// specifically to avoid CI hardware-variance flakiness while still catching a real regression
+// (a correct implementation finishes this in low tens of milliseconds locally).
+test("highlightCode stays within a bounded time budget for a large code block", () => {
+  const lines: string[] = [];
+  for (let index = 0; index < 2000; index += 1) {
+    lines.push(`function handler_${index}(value: number): number {`);
+    lines.push(`  const doubled = value * 2; // line ${index}`);
+    lines.push(`  return doubled + ${index};`);
+    lines.push(`}`);
+  }
+  const code = lines.join("\n");
+
+  const started = performance.now();
+  const html = highlightCode(code, "typescript");
+  const elapsedMs = performance.now() - started;
+
+  assert.ok(html.length > 0);
+  assert.ok(elapsedMs < 2000, `highlightCode took ${elapsedMs.toFixed(1)}ms for a 2,000-line block, expected <2000ms`);
+});

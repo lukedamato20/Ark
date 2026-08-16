@@ -33,11 +33,22 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
       # Each test below asserts a real threshold from docs/quality-baseline.md /
       # implementation-plan.md's PERF-001 acceptance criteria (100ms indexed queries, the
-      # checkpoint-reconstruction/rate design, the <=100ms cancellation-ack budget) or the
-      # perf_metrics formatter this task added. `tee` keeps the run's full output as a plain-text
-      # artifact without inventing a separate benchmark-report format.
+      # checkpoint-reconstruction/rate design, the <=100ms cancellation-ack budget), the
+      # perf_metrics formatter, or (PERF-005) highlightCode's large-code-block render budget.
+      # `tee` keeps the run's full output as a plain-text artifact without inventing a separate
+      # benchmark-report format.
       - name: Run budget-asserting tests
         shell: bash
         run: |
@@ -53,6 +64,7 @@ jobs:
               generation::tests::durable_cancellation_is_idempotent_preserves_partial_output_and_meets_ack_budget -- --nocapture
             cargo test --manifest-path src-tauri/Cargo.toml --lib export::tests -- --nocapture
             cargo test --manifest-path src-tauri/Cargo.toml --lib perf_metrics::tests -- --nocapture
+            node --experimental-strip-types --test src/lib/highlightCode.test.ts
           } | tee perf-baseline-output.log
 
       - name: Upload baseline output
