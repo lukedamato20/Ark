@@ -171,6 +171,21 @@ const MESSAGE_PATH_QUERY: &str = "WITH RECURSIVE message_path(
         error_message, metadata_json, branch_name
      FROM message_path
      ORDER BY depth DESC";
+/// PERF-003: a trimmed variant of `MESSAGE_PATH_QUERY` selecting only `id`/`parent_message_id`
+/// (no `content` or other columns) — used by `get_active_message_ids` for membership checks
+/// (e.g. "is this branch alternative on the active path") that never needed full message
+/// content in the first place.
+const ACTIVE_MESSAGE_IDS_QUERY: &str =
+    "WITH RECURSIVE message_path(id, parent_message_id, depth) AS (
+        SELECT id, parent_message_id, 0
+        FROM messages WHERE id = ?1
+        UNION ALL
+        SELECT parent.id, parent.parent_message_id, child.depth + 1
+        FROM messages parent
+        JOIN message_path child ON parent.id = child.parent_message_id
+        WHERE child.depth < ?2
+     )
+     SELECT id FROM message_path";
 const BRANCH_LEAF_QUERY: &str = "WITH RECURSIVE descendants(id, created_at, depth) AS (
         SELECT id, created_at, 0 FROM messages WHERE id = ?1
         UNION ALL
@@ -1956,13 +1971,71 @@ impl Database {
     }
 
     pub fn get_message_path(&self, leaf_message_id: &str) -> Result<Vec<Message>, AppError> {
-        let mut statement = self.connection.prepare(MESSAGE_PATH_QUERY)?;
-        let rows = statement.query_map(params![leaf_message_id, MAX_BRANCH_DEPTH], map_message)?;
-        let messages = ensure_complete_message_path(collect_rows(rows)?)?;
+        let messages = ensure_complete_message_path(
+            self.query_message_path(leaf_message_id, MAX_BRANCH_DEPTH)?,
+        )?;
         if messages.is_empty() {
             return Err(AppError::not_found("Message"));
         }
         Ok(messages)
+    }
+
+    fn query_message_path(
+        &self,
+        leaf_message_id: &str,
+        depth_limit: i64,
+    ) -> Result<Vec<Message>, AppError> {
+        let mut statement = self.connection.prepare(MESSAGE_PATH_QUERY)?;
+        let rows = statement.query_map(params![leaf_message_id, depth_limit], map_message)?;
+        collect_rows(rows)
+    }
+
+    /// PERF-003: a bounded page of the active path ending at the conversation's current leaf,
+    /// returning at most `depth_limit` messages (still hard-capped at `MAX_BRANCH_DEPTH`)
+    /// instead of the full history `get_active_messages` always loads. Returns the page plus
+    /// whether older messages remain — `true` whenever the oldest message returned still has a
+    /// parent, meaning the walk stopped at `depth_limit`, not at a real conversation root.
+    /// Every caller that needs the *complete* path (generation context, export/backup, the
+    /// companion API) must keep using `get_active_messages`/`get_message_path` — this is only
+    /// for the UI's bounded initial load and "load older messages" continuation.
+    pub fn get_active_messages_page(
+        &self,
+        conversation_id: &str,
+        depth_limit: i64,
+    ) -> Result<(Vec<Message>, bool), AppError> {
+        let conversation = self.get_conversation(conversation_id)?;
+        let Some(current_message_id) = conversation.current_message_id else {
+            return Ok((Vec::new(), false));
+        };
+        let bounded_limit = depth_limit.clamp(1, MAX_BRANCH_DEPTH);
+        // `MESSAGE_PATH_QUERY`'s `WHERE child.depth < ?2` includes the leaf itself at depth 0,
+        // so a raw depth threshold of N yields N+1 rows (depths 0..=N) — subtracting 1 here
+        // keeps `depth_limit`'s public meaning exactly "at most this many messages."
+        let messages =
+            self.query_message_path(&current_message_id, bounded_limit.saturating_sub(1))?;
+        if messages.is_empty() {
+            return Err(AppError::not_found("Message"));
+        }
+        let has_more_older = messages[0].parent_message_id.is_some();
+        Ok((messages, has_more_older))
+    }
+
+    /// PERF-003: the active path's message IDs only — no content, no other columns. Exists
+    /// because `get_assistant_alternatives` previously called `get_active_messages` (the full
+    /// path, with every message's full content) purely to build this membership set.
+    pub fn get_active_message_ids(
+        &self,
+        conversation_id: &str,
+    ) -> Result<std::collections::HashSet<String>, AppError> {
+        let conversation = self.get_conversation(conversation_id)?;
+        let Some(current_message_id) = conversation.current_message_id else {
+            return Ok(std::collections::HashSet::new());
+        };
+        let mut statement = self.connection.prepare(ACTIVE_MESSAGE_IDS_QUERY)?;
+        let rows = statement.query_map(params![current_message_id, MAX_BRANCH_DEPTH], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(collect_rows(rows)?.into_iter().collect())
     }
 
     pub fn get_all_conversation_messages(
@@ -1998,11 +2071,9 @@ impl Database {
             .parent_message_id
             .as_deref()
             .ok_or_else(|| AppError::invalid_input("Assistant message has no parent message."))?;
-        let active_ids = self
-            .get_active_messages(conversation_id)?
-            .into_iter()
-            .map(|message| message.id)
-            .collect::<Vec<_>>();
+        // PERF-003: only message IDs are needed here, not full content — see
+        // `get_active_message_ids`'s own doc comment.
+        let active_ids = self.get_active_message_ids(conversation_id)?;
 
         let mut statement = self.connection.prepare(
             "SELECT id, revision_of_message_id, created_at, status, content, branch_name,
@@ -2016,7 +2087,7 @@ impl Database {
             let message_id: String = row.get(0)?;
             let content: String = row.get(4)?;
             Ok(BranchAlternative {
-                is_active: active_ids.iter().any(|id| id == &message_id),
+                is_active: active_ids.contains(&message_id),
                 message_id,
                 revision_of_message_id: row.get(1)?,
                 created_at: row.get(2)?,
@@ -5591,6 +5662,140 @@ mod tests {
                 "recursive query plan must use {required_plan_fragment}; actual plan:\n{details}"
             );
         }
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn get_active_messages_page_bounds_depth_and_reports_whether_older_messages_remain() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Long branch".to_string()))
+            .expect("conversation created");
+        db.transaction(|| {
+            for index in 0..250 {
+                let id = format!("page-message-{index:04}");
+                let parent_id = (index > 0).then(|| format!("page-message-{:04}", index - 1));
+                db.connection.execute(
+                    "INSERT INTO messages (
+                        id, conversation_id, parent_message_id, path_index, role, content,
+                        status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, 'user', ?5, 'complete', ?6, ?6)",
+                    params![
+                        &id,
+                        &conversation.id,
+                        parent_id,
+                        i64::from(index),
+                        format!("Message {index}"),
+                        format!("2026-08-14T00:00:00.{index:03}Z")
+                    ],
+                )?;
+            }
+            db.connection.execute(
+                "UPDATE conversations SET current_message_id = 'page-message-0249' WHERE id = ?1",
+                params![&conversation.id],
+            )?;
+            Ok(())
+        })
+        .expect("branch fixture inserts atomically");
+
+        // A small page stops well short of the root and reports more messages remain.
+        let (page, has_more) = db
+            .get_active_messages_page(&conversation.id, 50)
+            .expect("bounded page loads");
+        assert_eq!(page.len(), 50);
+        assert!(
+            has_more,
+            "a 50-message page of a 250-message path must report more remain"
+        );
+        assert_eq!(
+            page.first().map(|message| message.id.as_str()),
+            Some("page-message-0200"),
+            "the page must contain the 50 most recent messages, oldest first"
+        );
+        assert_eq!(
+            page.last().map(|message| message.id.as_str()),
+            Some("page-message-0249")
+        );
+
+        // A page limit exceeding the actual path length reaches the true root and reports no
+        // more remain — the same "did we hit the real root" signal a real "load older" flow
+        // relies on to stop showing the affordance.
+        let (full_page, has_more) = db
+            .get_active_messages_page(&conversation.id, 300)
+            .expect("full-length page loads");
+        assert_eq!(full_page.len(), 250);
+        assert!(
+            !has_more,
+            "a page reaching the real root must report no more remain"
+        );
+
+        // A depth limit below 1 is clamped rather than producing an empty/invalid query.
+        let (clamped_page, _) = db
+            .get_active_messages_page(&conversation.id, 0)
+            .expect("clamped page loads");
+        assert_eq!(clamped_page.len(), 1);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn get_active_message_ids_matches_the_full_active_path_on_a_branched_conversation() {
+        let (db, path) = test_db();
+        let conversation = db
+            .create_conversation(Some("Branched".to_string()))
+            .expect("conversation created");
+
+        db.transaction(|| {
+            db.connection.execute(
+                "INSERT INTO messages (
+                    id, conversation_id, parent_message_id, path_index, role, content,
+                    status, created_at, updated_at
+                 ) VALUES ('root', ?1, NULL, 0, 'user', 'root', 'complete', ?2, ?2)",
+                params![&conversation.id, "2026-08-14T00:00:00.000Z"],
+            )?;
+            db.connection.execute(
+                "INSERT INTO messages (
+                    id, conversation_id, parent_message_id, path_index, role, content,
+                    status, created_at, updated_at
+                 ) VALUES ('active-child', ?1, 'root', 1, 'assistant', 'active branch', 'complete', ?2, ?2)",
+                params![&conversation.id, "2026-08-14T00:00:01.000Z"],
+            )?;
+            // A sibling revision that is never made active — must never appear in the id set.
+            db.connection.execute(
+                "INSERT INTO messages (
+                    id, conversation_id, parent_message_id, path_index, role, content,
+                    status, created_at, updated_at
+                 ) VALUES ('inactive-child', ?1, 'root', 1, 'assistant', 'inactive branch', 'complete', ?2, ?2)",
+                params![&conversation.id, "2026-08-14T00:00:02.000Z"],
+            )?;
+            db.connection.execute(
+                "UPDATE conversations SET current_message_id = 'active-child' WHERE id = ?1",
+                params![&conversation.id],
+            )?;
+            Ok(())
+        })
+        .expect("branched fixture inserts atomically");
+
+        let expected: std::collections::HashSet<String> = db
+            .get_active_messages(&conversation.id)
+            .expect("full active path loads")
+            .into_iter()
+            .map(|message| message.id)
+            .collect();
+        let actual = db
+            .get_active_message_ids(&conversation.id)
+            .expect("active id set loads");
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.len(),
+            2,
+            "root plus the one active child, not the inactive sibling"
+        );
+        assert!(!actual.contains("inactive-child"));
 
         drop(db);
         let _ = fs::remove_file(path);

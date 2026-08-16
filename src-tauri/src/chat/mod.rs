@@ -108,6 +108,19 @@ pub struct ConversationPage {
     pub search_snippets: HashMap<String, String>,
 }
 
+/// PERF-003: the bounded response `get_conversation_messages` returns — see
+/// `Database::get_active_messages_page`'s own doc comment for what "bounded" means and why it
+/// exists alongside (not instead of) the unbounded `get_active_messages` every other caller
+/// still uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessagePage {
+    pub messages: Vec<Message>,
+    /// `true` when the oldest message in `messages` still has a parent that wasn't loaded —
+    /// the frontend's signal to show a "Load earlier messages" affordance.
+    pub has_more_older: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendChatRequest {

@@ -9,7 +9,8 @@
 
 use crate::attachments::Attachment;
 use crate::chat::{
-    BranchAlternative, Conversation, ConversationPage, Message, SendChatResult, StreamEvent,
+    BranchAlternative, Conversation, ConversationMessagePage, ConversationPage, Message,
+    SendChatResult, StreamEvent,
 };
 use crate::commands::ImportProgressEvent;
 use crate::companion_api::{CompanionApiStatus, CompanionApiTokenReveal};
@@ -225,6 +226,17 @@ fn conversation_page_matches_contract() {
 #[test]
 fn message_matches_contract() {
     assert_matches_contract("Message", &sample_message());
+}
+
+#[test]
+fn conversation_message_page_matches_contract() {
+    assert_matches_contract(
+        "ConversationMessagePage",
+        &ConversationMessagePage {
+            messages: vec![sample_message()],
+            has_more_older: true,
+        },
+    );
 }
 
 #[test]

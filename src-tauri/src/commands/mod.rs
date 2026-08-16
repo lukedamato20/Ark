@@ -1,6 +1,6 @@
 use crate::chat::{
-    BranchAlternative, ConversationListRequest, ConversationPage, Message, SendChatRequest,
-    SendChatResult,
+    BranchAlternative, ConversationListRequest, ConversationMessagePage, ConversationPage, Message,
+    SendChatRequest, SendChatResult,
 };
 use crate::db::Database;
 use crate::errors::AppError;
@@ -697,16 +697,26 @@ pub async fn delete_tool_secret(
     crate::secret_store::delete_tool_secret(&state, tool_id).await
 }
 
+/// PERF-003: `depth_limit` bounds how far back the active path is walked (see
+/// `Database::get_active_messages_page`) — the frontend always passes an explicit page size
+/// (an initial load, or a larger one after "Load earlier messages"), rather than this command
+/// defaulting to the unbounded `get_active_messages` every other Rust caller still uses.
 #[tauri::command]
 pub fn get_conversation_messages(
     state: State<'_, AppState>,
     conversation_id: String,
-) -> Result<Vec<Message>, AppError> {
+    depth_limit: i64,
+) -> Result<ConversationMessagePage, AppError> {
     // ARC-004: read-hot, called every time the user switches conversations — see
     // `list_conversations` above for why this goes through the read replica.
     let conversation_id =
         crate::validation::validate_entity_id(&conversation_id, "Conversation ID")?;
-    lock_read_db(&state)?.get_active_messages(conversation_id)
+    let (messages, has_more_older) =
+        lock_read_db(&state)?.get_active_messages_page(conversation_id, depth_limit)?;
+    Ok(ConversationMessagePage {
+        messages,
+        has_more_older,
+    })
 }
 
 /// FTR-005: fetches a single message's full content — `get_assistant_alternatives` only returns
