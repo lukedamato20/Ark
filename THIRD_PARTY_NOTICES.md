@@ -592,6 +592,8 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | npm | `@nodelib/fs.stat` | 2.0.5 | MIT |
 | npm | `@nodelib/fs.walk` | 1.2.8 | MIT |
 | npm | `@rolldown/pluginutils` | 1.0.0-beta.27 | MIT |
+| npm | `@tanstack/react-virtual` | 3.14.9 | MIT |
+| npm | `@tanstack/virtual-core` | 3.17.7 | MIT |
 | npm | `@tauri-apps/api` | 2.11.1 | Apache-2.0 OR MIT |
 | npm | `@tauri-apps/cli` | 2.11.4 | Apache-2.0 OR MIT |
 | npm | `@tauri-apps/plugin-notification` | 2.3.3 | MIT OR Apache-2.0 |

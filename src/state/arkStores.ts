@@ -40,6 +40,13 @@ export interface TranscriptState {
   conversationId?: string;
   messages: Message[];
   isLoading: boolean;
+  /** PERF-003: `true` when older messages exist beyond what's currently loaded — drives the
+   * "Load earlier messages" affordance. `false` for a conversation that hasn't loaded yet. */
+  hasMoreOlder: boolean;
+  /** PERF-003: whether an older-messages page is currently being fetched, distinct from the
+   * conversation's own initial `isLoading` — the transcript already has content to show while
+   * this is `true`. */
+  isLoadingOlder: boolean;
 }
 
 export interface GenerationOverlay {
@@ -137,7 +144,12 @@ export function createArkStores(initial?: {
       searchSnippets: {},
       showArchived: false,
     }),
-    transcript: createExternalStore<TranscriptState>({ messages: [], isLoading: false }),
+    transcript: createExternalStore<TranscriptState>({
+      messages: [],
+      isLoading: false,
+      hasMoreOlder: false,
+      isLoadingOlder: false,
+    }),
     generation: createExternalStore<GenerationState>({ byMessageId: {}, activeMessageIdByConversation: {} }),
     providers: createExternalStore<ProviderState>({
       providers: emptyEntityCollection(),

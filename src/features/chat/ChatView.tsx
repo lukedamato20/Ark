@@ -51,6 +51,12 @@ import { MessageScrollContainer } from "./MessageScrollContainer";
 /** COR-009: mirrors the authoritative limit enforced in `export::validate_conversation_export`. */
 const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
 
+/** PERF-003: `reconcileGenerationFailure` needs the conversation's effectively complete history,
+ * not the small bounded page `loadConversation` normally requests — well within the backend's
+ * own absolute `MAX_BRANCH_DEPTH` safety ceiling (20,000) for any conversation size this
+ * personal, single-user app realistically reaches. */
+const RECONCILIATION_MESSAGE_DEPTH_LIMIT = 5000;
+
 /** CMP-001: mirrors `validation::MAX_ATTACHMENT_BYTES` — a fast client-side rejection so a huge
  * file doesn't get read into memory and uploaded only to bounce off the server-side limit. */
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
@@ -79,6 +85,11 @@ interface ChatViewProps {
   /** FTR-003: for the persona picker in the conversation settings panel — mirrors `projects`. */
   personas: Persona[];
   isLoading: boolean;
+  /** PERF-003: `true` when older messages exist beyond `messages` — shows a "Load earlier
+   * messages" affordance above the transcript. */
+  hasMoreOlderMessages: boolean;
+  isLoadingOlderMessages: boolean;
+  onLoadOlderMessages: () => Promise<void>;
   /** UX-007: bumped by an explicit "New Chat"/conversation-select action (see `ShellState`'s own
    * doc comment) — focuses the composer, never on a passive background update. */
   focusComposerSignal: number;
@@ -105,6 +116,9 @@ export function ChatView({
   projects,
   personas,
   isLoading,
+  hasMoreOlderMessages,
+  isLoadingOlderMessages,
+  onLoadOlderMessages,
   focusComposerSignal,
   onMessagesChange,
   onConversationDeleted,
@@ -136,6 +150,9 @@ export function ChatView({
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const previousConversationIdRef = React.useRef<string | undefined>(undefined);
   const autoRefreshedProviderIdsRef = React.useRef<Set<string>>(new Set());
+  /** PERF-003: see `MessageScrollContainer`'s `suppressNextMutationRef` doc comment — set by
+   * `ChatMessageList`'s "Load earlier messages" handler right before it prepends older content. */
+  const loadOlderSuppressRef = React.useRef(false);
 
   // UX-007: focuses the composer only on an explicit "New Chat"/select action (see
   // `focusComposerSignal`'s doc comment on `ShellState`) — a plain `useEffect` on `conversation`
@@ -332,7 +349,8 @@ export function ChatView({
         return;
       }
       try {
-        onMessagesChange(await client.getConversationMessages(conversation.id));
+        const { messages } = await client.getConversationMessages(conversation.id, RECONCILIATION_MESSAGE_DEPTH_LIMIT);
+        onMessagesChange(messages);
         onError(originalMessage);
       } catch (reconciliationError) {
         onError(`${originalMessage} Refresh also failed: ${getErrorMessage(reconciliationError)}`);
@@ -927,7 +945,7 @@ export function ChatView({
           <EmptyChat />
         </div>
       ) : (
-        <MessageScrollContainer resetKey={conversation.id}>
+        <MessageScrollContainer resetKey={conversation.id} suppressNextMutationRef={loadOlderSuppressRef}>
           <ChatMessageList
             messages={messages}
             providers={providers}
@@ -946,6 +964,10 @@ export function ChatView({
             onKeepPartial={handleKeepPartial}
             onDiscardInterrupted={handleDiscardInterrupted}
             onError={onError}
+            hasMoreOlderMessages={hasMoreOlderMessages}
+            isLoadingOlderMessages={isLoadingOlderMessages}
+            onLoadOlderMessages={onLoadOlderMessages}
+            prependSuppressRef={loadOlderSuppressRef}
           />
         </MessageScrollContainer>
       )}

@@ -1,4 +1,4 @@
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   ArchiveRestore,
@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { formatDate } from "../../lib/format";
-import { MOTION_FAST_SECONDS } from "../../lib/motionTokens";
 import type { Conversation } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -70,12 +69,15 @@ export function ConversationSidebar({
   onPin,
   shortcutsTriggerRef,
 }: ConversationSidebarProps) {
-  // UX-008: this AnimatePresence enter/exit previously ignored prefers-reduced-motion — only the
-  // rail/expanded width transition (plain CSS, `motion-reduce:transition-none`) was covered.
-  const reducedMotion = useReducedMotion();
   const [query, setQuery] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
   const itemRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const scrollElementRef = React.useRef<HTMLElement | null>(null);
+  /** PERF-003: an index the user just requested via ArrowUp/Down that isn't mounted yet — set
+   * alongside `virtualizer.scrollToIndex`, focused by the effect below once that index's row
+   * actually appears in `itemRefs.current` (which may take a render or two after the scroll
+   * starts, unlike the pre-virtualization code where every row was always already mounted). */
+  const pendingFocusIndexRef = React.useRef<number | null>(null);
   const onSearchRef = React.useRef(onSearch);
   React.useEffect(() => {
     onSearchRef.current = onSearch;
@@ -104,9 +106,35 @@ export function ConversationSidebar({
     return [...pinned, ...unpinned];
   }, [conversations]);
 
+  // PERF-003: renders only the rows currently in (or near) the viewport instead of every loaded
+  // conversation — at 1,000+ loaded conversations (this task's own acceptance fixture) the
+  // previous unconditional `.map()` mounted every row's DOM/animation state at once. Estimates
+  // are refined per-row by `measureElement` (ref'd below); the two values just give the
+  // virtualizer a reasonable starting point for the two structurally-different row heights this
+  // sidebar has (collapsed: icon-only; expanded: icon + title + date/snippet lines).
+  const virtualizer = useVirtualizer({
+    count: sortedConversations.length,
+    getScrollElement: () => scrollElementRef.current,
+    estimateSize: () => (collapsed ? 44 : 60),
+    overscan: 8,
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  React.useEffect(() => {
+    const pendingIndex = pendingFocusIndexRef.current;
+    if (pendingIndex === null) return;
+    const element = itemRefs.current[pendingIndex];
+    if (element) {
+      element.focus();
+      pendingFocusIndexRef.current = null;
+    }
+  }, [virtualItems]);
+
   /** FTR-002: arrow-key traversal through the visible result list — a roving focus move, not a
    * selection change (selection still happens on click/Enter, which native `<button>` semantics
-   * already provide with no extra handling needed). */
+   * already provide with no extra handling needed). PERF-003: the target row may not be mounted
+   * (virtualized out of view) — `scrollToIndex` brings it into the DOM, and the effect above
+   * finishes the focus once it actually appears in `itemRefs.current`. */
   function handleListKeyDown(event: React.KeyboardEvent<HTMLElement>) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
@@ -114,7 +142,13 @@ export function ConversationSidebar({
     const delta = event.key === "ArrowDown" ? 1 : -1;
     const nextIndex =
       currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), sortedConversations.length - 1);
-    itemRefs.current[nextIndex]?.focus();
+    const existing = itemRefs.current[nextIndex];
+    if (existing) {
+      existing.focus();
+      return;
+    }
+    pendingFocusIndexRef.current = nextIndex;
+    virtualizer.scrollToIndex(nextIndex, { align: "auto" });
   }
 
   return (
@@ -181,86 +215,98 @@ export function ConversationSidebar({
 
       <nav
         aria-label="Conversation list"
+        ref={(element) => {
+          scrollElementRef.current = element;
+        }}
         className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
         onKeyDown={handleListKeyDown}
       >
-        <AnimatePresence initial={false}>
-          {sortedConversations.map((conversation, index) => {
-            const active = conversation.id === activeConversationId;
-            const snippet = searchSnippets[conversation.id];
-            return (
-              <motion.div
-                key={conversation.id}
-                layout={!reducedMotion}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={reducedMotion ? { duration: 0 } : { duration: MOTION_FAST_SECONDS }}
-                className="group relative mb-1"
-              >
-                <button
-                  ref={(element) => {
-                    itemRefs.current[index] = element;
+        {sortedConversations.length > 0 && (
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+            {virtualItems.map((virtualRow) => {
+              const conversation = sortedConversations[virtualRow.index];
+              const active = conversation.id === activeConversationId;
+              const snippet = searchSnippets[conversation.id];
+              return (
+                <div
+                  key={conversation.id}
+                  ref={virtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
                   }}
-                  type="button"
-                  aria-label={conversation.title}
-                  aria-current={active ? "true" : undefined}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
-                    "focus-visible:ring-2 focus-visible:ring-ring",
-                    active
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                  onClick={() => onSelect(conversation.id)}
+                  className="group relative mb-1"
                 >
-                  <MessageSquare className="h-4 w-4 shrink-0" />
+                  <button
+                    ref={(element) => {
+                      itemRefs.current[virtualRow.index] = element;
+                    }}
+                    type="button"
+                    aria-label={conversation.title}
+                    aria-current={active ? "true" : undefined}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
+                      "focus-visible:ring-2 focus-visible:ring-ring",
+                      active
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                    onClick={() => onSelect(conversation.id)}
+                  >
+                    <MessageSquare className="h-4 w-4 shrink-0" />
+                    {!collapsed && (
+                      <span className="min-w-0 flex-1 pr-10">
+                        <span className="flex items-center gap-1">
+                          {conversation.pinnedAt && (
+                            <Pin className="h-3 w-3 shrink-0 text-primary" aria-label="Pinned" />
+                          )}
+                          <span className="block truncate">{conversation.title}</span>
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {snippet ?? formatDate(conversation.updatedAt)}
+                        </span>
+                      </span>
+                    )}
+                  </button>
                   {!collapsed && (
-                    <span className="min-w-0 flex-1 pr-10">
-                      <span className="flex items-center gap-1">
-                        {conversation.pinnedAt && <Pin className="h-3 w-3 shrink-0 text-primary" aria-label="Pinned" />}
-                        <span className="block truncate">{conversation.title}</span>
-                      </span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {snippet ?? formatDate(conversation.updatedAt)}
-                      </span>
-                    </span>
+                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                      <button
+                        type="button"
+                        aria-label={conversation.pinnedAt ? "Unpin conversation" : "Pin conversation"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onPin(conversation.id, !conversation.pinnedAt);
+                        }}
+                        className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        {conversation.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={conversation.archived ? "Unarchive conversation" : "Archive conversation"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onArchive(conversation.id, !conversation.archived);
+                        }}
+                        className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        {conversation.archived ? (
+                          <ArchiveRestore className="h-3.5 w-3.5" />
+                        ) : (
+                          <Archive className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                   )}
-                </button>
-                {!collapsed && (
-                  <div className="absolute right-1 top-1/2 flex -translate-y-1/2 gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
-                    <button
-                      type="button"
-                      aria-label={conversation.pinnedAt ? "Unpin conversation" : "Pin conversation"}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onPin(conversation.id, !conversation.pinnedAt);
-                      }}
-                      className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      {conversation.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={conversation.archived ? "Unarchive conversation" : "Archive conversation"}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onArchive(conversation.id, !conversation.archived);
-                      }}
-                      className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      {conversation.archived ? (
-                        <ArchiveRestore className="h-3.5 w-3.5" />
-                      ) : (
-                        <Archive className="h-3.5 w-3.5" />
-                      )}
-                    </button>
-                  </div>
-                )}
-              </motion.div>
-            );
-          })}
-        </AnimatePresence>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {!collapsed && conversations.length === 0 && (
           <div className="px-3 py-6 text-sm text-muted-foreground">

@@ -9,6 +9,14 @@ interface MessageScrollContainerProps {
    * non-animated jump to the latest message, since that is a navigation, not "new content
    * arrived while reading." */
   resetKey: string;
+  /** PERF-003: when truthy at the moment a DOM mutation is observed, that one mutation is
+   * ignored for auto-follow/"new response" purposes and the flag is cleared. Set by a caller
+   * right before triggering a content change that isn't "new content arrived" in the sense this
+   * component cares about — specifically, `ChatMessageList`'s "Load earlier messages" prepend,
+   * which adds content *above* the current view, not below it. Native CSS scroll-anchoring still
+   * keeps the visible content stable for that case; only the auto-follow/new-response signaling
+   * needs to be skipped. */
+  suppressNextMutationRef?: React.RefObject<boolean>;
 }
 
 /**
@@ -32,7 +40,7 @@ interface MessageScrollContainerProps {
  * (follow-to-bottom, or the explicit jump-to-latest action); it never fights the browser over
  * position preservation while the user is reading.
  */
-export function MessageScrollContainer({ children, resetKey }: MessageScrollContainerProps) {
+export function MessageScrollContainer({ children, resetKey, suppressNextMutationRef }: MessageScrollContainerProps) {
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [autoFollow, setAutoFollow] = React.useState(true);
@@ -54,6 +62,10 @@ export function MessageScrollContainer({ children, resetKey }: MessageScrollCont
     if (!scrollEl || !contentEl) return;
 
     const observer = new MutationObserver(() => {
+      if (suppressNextMutationRef?.current) {
+        suppressNextMutationRef.current = false;
+        return;
+      }
       if (autoFollowRef.current) {
         scrollEl.scrollTop = scrollEl.scrollHeight;
       } else {
@@ -62,7 +74,7 @@ export function MessageScrollContainer({ children, resetKey }: MessageScrollCont
     });
     observer.observe(contentEl, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
-  }, []);
+  }, [suppressNextMutationRef]);
 
   function handleScroll() {
     const el = scrollRef.current;

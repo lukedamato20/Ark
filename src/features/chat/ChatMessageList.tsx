@@ -1,4 +1,4 @@
-import { AlertTriangle, Edit3, FileText, GitBranch, Info, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, ChevronUp, Edit3, FileText, GitBranch, Info, Loader2, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
@@ -37,6 +37,17 @@ interface ChatMessageListProps {
   onKeepPartial: (message: Message) => Promise<void>;
   onDiscardInterrupted: (message: Message) => Promise<void>;
   onError: (message: string) => void;
+  /** PERF-003: `true` when older messages exist beyond `messages` — shows the "Load earlier
+   * messages" affordance above the transcript. */
+  hasMoreOlderMessages: boolean;
+  isLoadingOlderMessages: boolean;
+  onLoadOlderMessages: () => Promise<void>;
+  /** PERF-003: set right before `onLoadOlderMessages` runs so `MessageScrollContainer`'s
+   * `MutationObserver` skips its usual auto-follow/"new response" handling for the resulting
+   * prepend — a prepend at the top is never "new content below," and native CSS scroll-anchoring
+   * (which that component already relies on and documents) keeps the visible content stable
+   * without any manual scroll-position math here. */
+  prependSuppressRef: React.RefObject<boolean>;
 }
 
 /** PERF-005: caps how often a streaming message's Markdown reparses — see the `throttledContent`
@@ -67,9 +78,36 @@ export function ChatMessageList({
   onKeepPartial,
   onDiscardInterrupted,
   onError,
+  hasMoreOlderMessages,
+  isLoadingOlderMessages,
+  onLoadOlderMessages,
+  prependSuppressRef,
 }: ChatMessageListProps) {
+  async function handleLoadOlder() {
+    prependSuppressRef.current = true;
+    try {
+      await onLoadOlderMessages();
+    } finally {
+      // A response that turned out to add nothing (already fully loaded) never mutates the DOM,
+      // so nothing would otherwise clear the flag — the next real mutation must not be suppressed.
+      prependSuppressRef.current = false;
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+      {hasMoreOlderMessages && (
+        <div className="flex justify-center">
+          <Button size="sm" variant="secondary" onClick={handleLoadOlder} disabled={isLoadingOlderMessages}>
+            {isLoadingOlderMessages ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ChevronUp className="h-3.5 w-3.5" />
+            )}
+            {isLoadingOlderMessages ? "Loading earlier messages…" : "Load earlier messages"}
+          </Button>
+        </div>
+      )}
       {messages.map((message) => (
         <MessageBubble
           key={message.id}
@@ -116,7 +154,16 @@ const MessageBubble = React.memo(function MessageBubble({
   onKeepPartial,
   onDiscardInterrupted,
   onError,
-}: Omit<ChatMessageListProps, "messages" | "editingMessageId" | "attachmentsByMessageId"> & {
+}: Omit<
+  ChatMessageListProps,
+  | "messages"
+  | "editingMessageId"
+  | "attachmentsByMessageId"
+  | "hasMoreOlderMessages"
+  | "isLoadingOlderMessages"
+  | "onLoadOlderMessages"
+  | "prependSuppressRef"
+> & {
   message: Message;
   provider: ProviderConfig | undefined;
   attachments: Attachment[] | undefined;

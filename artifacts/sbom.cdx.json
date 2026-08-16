@@ -14350,6 +14350,54 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40tanstack/react-virtual@3.14.9",
+      "name": "@tanstack/react-virtual",
+      "version": "3.14.9",
+      "purl": "pkg:npm/%40tanstack/react-virtual@3.14.9",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/TanStack/virtual.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "npm"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40tanstack/virtual-core@3.17.7",
+      "name": "@tanstack/virtual-core",
+      "version": "3.17.7",
+      "purl": "pkg:npm/%40tanstack/virtual-core@3.17.7",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/TanStack/virtual.git"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "npm"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/%40tauri-apps/api@2.11.1",
       "name": "@tauri-apps/api",
       "version": "2.11.1",

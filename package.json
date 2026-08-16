@@ -32,6 +32,7 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{js,json}\""
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.9",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0",

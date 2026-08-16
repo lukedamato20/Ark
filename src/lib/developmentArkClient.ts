@@ -146,7 +146,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
     getBuiltInRuntimeStatus: async () => status,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     refreshModels: async () => ({
       health: {
         providerId: provider.id,
@@ -230,7 +230,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     getSecretStoreStatus: async () => {
       statusChecks += 1;
       // React StrictMode intentionally runs the mount effect twice in development. Keep both
@@ -325,7 +325,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     getWorkspaceProtectionStatus: async () =>
       status(
         mode === "plaintext"
@@ -527,7 +527,7 @@ export function createLongConversationFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => computeActivePath(),
+    getConversationMessages: async () => ({ messages: computeActivePath(), hasMoreOlder: false }),
     getMessage: async (id) => {
       const found = allMessages.find((item) => item.id === id);
       if (!found) throw new Error(`fixture: message ${id} not found`);
@@ -1004,7 +1004,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     refreshModels: async () => ({
       health: {
         providerId: provider.id,
@@ -1631,7 +1631,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
 
   return createFakeArkClient({
     getAppBootstrap: async () => bootstrap,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     refreshModels: async () => ({
       health: {
         providerId: provider.id,

@@ -245,6 +245,15 @@ export interface Message {
   branchName?: string | null;
 }
 
+/** PERF-003: the bounded response `getConversationMessages` returns — see
+ * `Database::get_active_messages_page`'s doc comment on the Rust side for what "bounded" means. */
+export interface ConversationMessagePage {
+  messages: Message[];
+  /** `true` when the oldest message in `messages` still has a parent that wasn't loaded — shows
+   * the "Load earlier messages" affordance. */
+  hasMoreOlder: boolean;
+}
+
 export interface BranchAlternative {
   messageId: string;
   revisionOfMessageId?: string | null;

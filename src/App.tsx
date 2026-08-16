@@ -239,6 +239,9 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       projects={entityList(projectState.projects)}
       personas={entityList(personaState.personas)}
       isLoading={transcript.isLoading || booting}
+      hasMoreOlderMessages={transcript.hasMoreOlder}
+      isLoadingOlderMessages={transcript.isLoadingOlder}
+      onLoadOlderMessages={controller.loadOlderMessages}
       focusComposerSignal={focusComposerSignal}
       onMessagesChange={controller.setMessages}
       onConversationDeleted={controller.deleteActiveConversation}

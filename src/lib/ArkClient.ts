@@ -10,6 +10,7 @@ import type {
   BranchAlternative,
   BuiltInRuntimeStatus,
   Conversation,
+  ConversationMessagePage,
   ConversationNote,
   ConversationPage,
   DeviceSettings,
@@ -221,7 +222,9 @@ export interface ArkClient {
   /** FTR-003: `projectId: null` unassigns the conversation from any project. */
   setConversationProject(id: string, projectId: string | null): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
-  getConversationMessages(conversationId: string): Promise<Message[]>;
+  /** PERF-003: `depthLimit` bounds how far back the active path is walked — always pass an
+   * explicit page size (an initial load, or a larger one after "Load earlier messages"). */
+  getConversationMessages(conversationId: string, depthLimit: number): Promise<ConversationMessagePage>;
   /** FTR-005: full content, unlike `getAssistantAlternatives`' 140-character preview — used by
    * the branch comparison view. */
   getMessage(id: string): Promise<Message>;
@@ -462,7 +465,8 @@ export function createTauriArkClient(): ArkClient {
     setConversationPinned: (id, pinned) => invoke<Conversation>("set_conversation_pinned", { id, pinned }),
     setConversationProject: (id, projectId) => invoke<Conversation>("set_conversation_project", { id, projectId }),
     deleteConversation: (id) => invoke<void>("delete_conversation", { id }),
-    getConversationMessages: (conversationId) => invoke<Message[]>("get_conversation_messages", { conversationId }),
+    getConversationMessages: (conversationId, depthLimit) =>
+      invoke<ConversationMessagePage>("get_conversation_messages", { conversationId, depthLimit }),
     getMessage: (id) => invoke<Message>("get_message", { id }),
     getAssistantAlternatives: (conversationId, messageId) =>
       invoke<BranchAlternative[]>("get_assistant_alternatives", { request: { conversationId, messageId } }),
@@ -679,7 +683,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     setConversationPinned: notImplemented("setConversationPinned"),
     setConversationProject: notImplemented("setConversationProject"),
     deleteConversation: async () => undefined,
-    getConversationMessages: async () => [],
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     getMessage: notImplemented("getMessage"),
     getAssistantAlternatives: async () => [],
     switchActiveBranch: notImplemented("switchActiveBranch"),

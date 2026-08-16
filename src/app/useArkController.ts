@@ -34,6 +34,13 @@ import type {
   WorkspaceInfo,
 } from "../types/ark";
 
+/** PERF-003: the initial bounded page a conversation loads with — see `loadConversation`. */
+const INITIAL_MESSAGE_PAGE_SIZE = 50;
+/** PERF-003: each "Load earlier messages" click asks for this many more, from the same leaf —
+ * see `loadOlderMessages`'s own doc comment for why re-requesting from the leaf (rather than a
+ * cursor) is both simpler and correct here. */
+const MESSAGE_PAGE_INCREMENT = 50;
+
 export interface ArkController {
   bootstrap: () => Promise<void>;
   createConversation: () => Promise<void>;
@@ -42,6 +49,9 @@ export interface ArkController {
   importConversation: (conversation: Conversation) => void;
   renameConversation: (conversation: Conversation) => void;
   setMessages: (messages: Message[]) => void;
+  /** PERF-003: fetches the next page of older messages for the active conversation — a no-op
+   * if there's nothing more to load or a page is already in flight. */
+  loadOlderMessages: () => Promise<void>;
   searchConversations: (query: string) => Promise<void>;
   loadMoreConversations: () => Promise<void>;
   /** FTR-002: undo is calling this again with the opposite value. */
@@ -155,7 +165,7 @@ export function useArkController(): ArkController {
     (messages: Message[]) => {
       const catalog = stores.catalog.getSnapshot();
       const conversationId = catalog.activeId;
-      stores.transcript.set({ conversationId, messages, isLoading: false });
+      stores.transcript.set({ conversationId, messages, isLoading: false, hasMoreOlder: false, isLoadingOlder: false });
       if (!conversationId) return;
 
       const activeMessage = [...messages]
@@ -199,17 +209,24 @@ export function useArkController(): ArkController {
         conversationId,
         messages: changingConversation ? [] : currentTranscript.messages,
         isLoading: changingConversation,
+        hasMoreOlder: changingConversation ? false : currentTranscript.hasMoreOlder,
+        isLoadingOlder: false,
       });
       clearConversationGeneration(stores, conversationId);
       try {
-        const messages = await client.getConversationMessages(conversationId);
+        // PERF-003: a bounded initial page, not the conversation's full history — see
+        // `loadOlderMessages` for how the rest is fetched, on demand, if the user asks for it.
+        const { messages, hasMoreOlder } = await client.getConversationMessages(
+          conversationId,
+          INITIAL_MESSAGE_PAGE_SIZE,
+        );
         if (
           !isLatestRequest(sequence, transcriptSequenceRef.current) ||
           stores.catalog.getSnapshot().activeId !== conversationId
         ) {
           return;
         }
-        stores.transcript.set({ conversationId, messages, isLoading: false });
+        stores.transcript.set({ conversationId, messages, isLoading: false, hasMoreOlder, isLoadingOlder: false });
         const activeMessage = [...messages]
           .reverse()
           .find(
@@ -225,7 +242,13 @@ export function useArkController(): ArkController {
         }));
       } catch (error) {
         if (isLatestRequest(sequence, transcriptSequenceRef.current)) {
-          stores.transcript.set({ conversationId, messages: [], isLoading: false });
+          stores.transcript.set({
+            conversationId,
+            messages: [],
+            isLoading: false,
+            hasMoreOlder: false,
+            isLoadingOlder: false,
+          });
           setError(getErrorMessage(error));
         }
       } finally {
@@ -236,6 +259,47 @@ export function useArkController(): ArkController {
     },
     [client, setError, stores],
   );
+
+  /** PERF-003: re-requests the active path from the same leaf with a larger depth limit, rather
+   * than tracking cursor/continuation state — see `Database::get_active_messages_page`'s own
+   * doc comment for why this is both simpler and correct (the recursive query is cheap even at
+   * a few hundred/thousand messages; ARC-007's own tests already prove sub-100ms at 250 nodes).
+   * Because `MessageBubble`s are keyed by `message.id`, replacing `transcript.messages` with the
+   * new (strictly larger) result leaves already-mounted bubbles alone — React only mounts the
+   * newly-revealed older ones. Shares `transcriptSequenceRef` with `loadConversation` so
+   * switching conversations mid-fetch correctly discards a stale response. */
+  const loadOlderMessages = React.useCallback(async () => {
+    const transcript = stores.transcript.getSnapshot();
+    const { conversationId, hasMoreOlder, isLoadingOlder, messages } = transcript;
+    if (!conversationId || !hasMoreOlder || isLoadingOlder) return;
+    const sequence = ++transcriptSequenceRef.current;
+    patchStore(stores.transcript, { isLoadingOlder: true });
+    try {
+      const nextDepthLimit = messages.length + MESSAGE_PAGE_INCREMENT;
+      const { messages: olderMessages, hasMoreOlder: nextHasMoreOlder } = await client.getConversationMessages(
+        conversationId,
+        nextDepthLimit,
+      );
+      if (
+        !isLatestRequest(sequence, transcriptSequenceRef.current) ||
+        stores.transcript.getSnapshot().conversationId !== conversationId
+      ) {
+        return;
+      }
+      stores.transcript.set({
+        conversationId,
+        messages: olderMessages,
+        isLoading: false,
+        hasMoreOlder: nextHasMoreOlder,
+        isLoadingOlder: false,
+      });
+    } catch (error) {
+      if (isLatestRequest(sequence, transcriptSequenceRef.current)) {
+        patchStore(stores.transcript, { isLoadingOlder: false });
+        setError(getErrorMessage(error));
+      }
+    }
+  }, [client, setError, stores]);
 
   const selectConversation = React.useCallback(
     (id: string) => {
@@ -366,7 +430,13 @@ export function useArkController(): ArkController {
         conversations: entityCollection([conversation, ...conversations.filter((item) => item.id !== conversation.id)]),
         activeId: conversation.id,
       });
-      stores.transcript.set({ conversationId: conversation.id, messages: [], isLoading: false });
+      stores.transcript.set({
+        conversationId: conversation.id,
+        messages: [],
+        isLoading: false,
+        hasMoreOlder: false,
+        isLoadingOlder: false,
+      });
       const shell = stores.shell.getSnapshot();
       patchStore(stores.shell, { view: "chat", focusComposerSignal: shell.focusComposerSignal + 1 });
     } catch (error) {
@@ -383,7 +453,13 @@ export function useArkController(): ArkController {
       conversations: entityCollection(remaining),
       activeId: active?.id,
     });
-    stores.transcript.set({ conversationId: active?.id, messages: [], isLoading: Boolean(active) });
+    stores.transcript.set({
+      conversationId: active?.id,
+      messages: [],
+      isLoading: Boolean(active),
+      hasMoreOlder: false,
+      isLoadingOlder: false,
+    });
     if (active) void loadConversation(active.id);
   }, [loadConversation, stores]);
 
@@ -962,6 +1038,7 @@ export function useArkController(): ArkController {
       importConversation,
       renameConversation,
       setMessages,
+      loadOlderMessages,
       searchConversations,
       loadMoreConversations,
       changeConversationArchived,
@@ -1007,6 +1084,7 @@ export function useArkController(): ArkController {
       deleteActiveConversation,
       importConversation,
       loadMoreConversations,
+      loadOlderMessages,
       openSearch,
       refreshProviderModels,
       removeProject,
