@@ -950,7 +950,15 @@ pub fn regenerate_assistant_message(
 ///
 pub fn cancel_stream(app: AppHandle, state: &AppState, message_id: String) -> Result<(), AppError> {
     let message_id = crate::validation::validate_entity_id(&message_id, "Message ID")?.to_string();
+    let cancel_started = Instant::now();
     let (message, became_cancelled) = request_cancellation(state, &message_id)?;
+    crate::perf_metrics::record_if_enabled(
+        &app,
+        state,
+        "perf.cancellation",
+        Some(&message_id),
+        &[("ack_ms", cancel_started.elapsed().as_millis().to_string())],
+    );
 
     if became_cancelled {
         app.emit(
@@ -1206,12 +1214,25 @@ pub(crate) fn spawn_provider_stream(
         // of silently corrupting its client-accumulated content.
         let mut revision: i64 = 0;
 
+        // PERF-001: TTFT/throughput/checkpoint-rate evidence for the real generation path (not
+        // just the synthetic `diagnostics::run_benchmark` prompt). Recorded once after the
+        // stream ends, below — regardless of outcome, so a cancelled/interrupted/failed stream
+        // still contributes checkpoint-rate and TTFT evidence, not only a fully successful one.
+        let stream_started = Instant::now();
+        let mut first_delta_ms: Option<u128> = None;
+        let mut delta_count: u64 = 0;
+        let mut checkpoint_count: u64 = 0;
+
         let stream_result = {
             let mut on_delta = |delta: &str| {
                 if cancellation.is_requested() {
                     return Err(AppError::new("cancelled", "Generation was cancelled."));
                 }
 
+                if first_delta_ms.is_none() {
+                    first_delta_ms = Some(stream_started.elapsed().as_millis());
+                }
+                delta_count += 1;
                 buffer.push_str(delta);
 
                 if buffer.len() >= STREAM_CHECKPOINT_MAX_BYTES
@@ -1222,6 +1243,7 @@ pub(crate) fn spawn_provider_stream(
                     db.append_to_message_content(&assistant_message_id, &buffer)?;
                     buffer.clear();
                     last_checkpoint = Instant::now();
+                    checkpoint_count += 1;
                 }
 
                 revision += 1;
@@ -1260,7 +1282,29 @@ pub(crate) fn spawn_provider_stream(
             if let Ok(db) = crate::commands::lock_db(&app_for_task.state::<AppState>()) {
                 db.append_to_message_content(&assistant_message_id, &buffer)
                     .ok();
+                checkpoint_count += 1;
             }
+        }
+
+        {
+            let mut fields: Vec<(&str, String)> = vec![
+                (
+                    "duration_ms",
+                    stream_started.elapsed().as_millis().to_string(),
+                ),
+                ("delta_count", delta_count.to_string()),
+                ("checkpoint_count", checkpoint_count.to_string()),
+            ];
+            if let Some(ttft) = first_delta_ms {
+                fields.push(("ttft_ms", ttft.to_string()));
+            }
+            crate::perf_metrics::record_if_enabled(
+                &app_for_task,
+                &app_for_task.state::<AppState>(),
+                "perf.generation",
+                Some(&assistant_message_id),
+                &fields,
+            );
         }
 
         let was_cancelled = cancellation.is_requested();

@@ -35,6 +35,13 @@ pub struct DeviceSettings {
     /// back-compat reason as `crash_capture_enabled`.
     #[serde(default)]
     pub completion_notifications_enabled: bool,
+    /// PERF-001: opt-in, off by default. When true, `perf_metrics::record_if_enabled` writes
+    /// local performance measurements (durations/counts/identifiers only — see that module's
+    /// doc) into the same diagnostics log `crash_capture_enabled` already gates; when false,
+    /// nothing is measured or recorded anywhere. `#[serde(default)]` for the same back-compat
+    /// reason as the two fields above.
+    #[serde(default)]
+    pub perf_metrics_enabled: bool,
 }
 
 impl Default for DeviceSettings {
@@ -44,6 +51,7 @@ impl Default for DeviceSettings {
             built_in_model_path: None,
             crash_capture_enabled: false,
             completion_notifications_enabled: false,
+            perf_metrics_enabled: false,
         }
     }
 }
@@ -160,6 +168,7 @@ mod tests {
             built_in_model_path: Some("C:\\models\\model.gguf".to_string()),
             crash_capture_enabled: true,
             completion_notifications_enabled: true,
+            perf_metrics_enabled: true,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         let parsed: DeviceSettings = serde_json::from_str(&json).expect("deserializes");
@@ -170,6 +179,7 @@ mod tests {
         );
         assert!(parsed.crash_capture_enabled);
         assert!(parsed.completion_notifications_enabled);
+        assert!(parsed.perf_metrics_enabled);
     }
 
     #[test]
@@ -179,6 +189,7 @@ mod tests {
             built_in_model_path: Some("model.gguf".to_string()),
             crash_capture_enabled: false,
             completion_notifications_enabled: false,
+            perf_metrics_enabled: false,
         };
         let json = serde_json::to_string(&settings).expect("serializes");
         assert!(
@@ -187,6 +198,10 @@ mod tests {
         );
         assert!(
             json.contains("\"completionNotificationsEnabled\""),
+            "expected camelCase field name in: {json}"
+        );
+        assert!(
+            json.contains("\"perfMetricsEnabled\""),
             "expected camelCase field name in: {json}"
         );
     }

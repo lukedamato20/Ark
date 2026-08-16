@@ -105,9 +105,11 @@ pub fn update_provider(
 }
 
 pub async fn refresh_models(
+    app: &AppHandle,
     state: &AppState,
     provider_id: String,
 ) -> Result<RefreshModelsResult, AppError> {
+    let started = std::time::Instant::now();
     let provider_id =
         crate::validation::validate_entity_id(&provider_id, "Provider ID")?.to_string();
     let provider = {
@@ -120,6 +122,13 @@ pub async fn refresh_models(
     let health = runtime.health().await;
 
     if !health.is_reachable {
+        crate::perf_metrics::record_if_enabled(
+            app,
+            state,
+            "perf.provider_refresh",
+            Some(&provider_id),
+            &[("duration_ms", started.elapsed().as_millis().to_string())],
+        );
         return Ok(RefreshModelsResult {
             health,
             models: Vec::new(),
@@ -134,6 +143,14 @@ pub async fn refresh_models(
         db.upsert_models(&provider_id, &models)?;
         db.get_provider(&provider_id)?
     };
+
+    crate::perf_metrics::record_if_enabled(
+        app,
+        state,
+        "perf.provider_refresh",
+        Some(&provider_id),
+        &[("duration_ms", started.elapsed().as_millis().to_string())],
+    );
 
     Ok(RefreshModelsResult {
         health,

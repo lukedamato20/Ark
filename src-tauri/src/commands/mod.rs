@@ -931,10 +931,11 @@ pub fn save_diagnostics_bundle(
 
 #[tauri::command]
 pub async fn refresh_models(
+    app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<RefreshModelsResult, AppError> {
-    crate::provider_management::refresh_models(&state, provider_id).await
+    crate::provider_management::refresh_models(&app, &state, provider_id).await
 }
 
 // ARC-001: sending/editing/regenerating a chat message and cancelling a stream are the core
@@ -1000,6 +1001,35 @@ pub async fn run_diagnostics(
         include_runtime_logs.unwrap_or(false),
     )
     .await
+}
+
+/// PERF-001: the one frontend-originated performance metric — how long the frontend's own
+/// bootstrap took, from navigation start to the shell becoming interactive (see
+/// `useArkController.ts::bootstrap`'s `finally` block). `name` is checked against a fixed
+/// allowlist rather than accepted as free text: unlike every other metric in this pass (all
+/// recorded directly by Rust code that controls what it names), this one crosses the IPC
+/// boundary from a caller that could in principle pass anything, so it gets the same "centralize
+/// native input validation" treatment (COR-008) as any other command argument.
+const ALLOWED_FRONTEND_METRIC_NAMES: &[&str] = &["cached_shell_ms"];
+
+#[tauri::command]
+pub fn record_frontend_perf_metric(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    value_ms: f64,
+) -> Result<(), AppError> {
+    if !ALLOWED_FRONTEND_METRIC_NAMES.contains(&name.as_str()) {
+        return Err(AppError::invalid_input("Unknown performance metric name."));
+    }
+    crate::perf_metrics::record_if_enabled(
+        &app,
+        &state,
+        "perf.frontend",
+        None,
+        &[(name.as_str(), value_ms.round().to_string())],
+    );
+    Ok(())
 }
 
 // ARC-001: export/import is an application workflow, not command-handling logic — the

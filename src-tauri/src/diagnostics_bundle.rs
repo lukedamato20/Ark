@@ -70,24 +70,35 @@ pub fn build_diagnostics_bundle(state: &AppState) -> Result<DiagnosticsBundle, A
         .rev()
         .collect();
 
-    let app_log_lines = {
+    let format_record = |record: &crate::observability::LogRecord| {
+        format!(
+            "{} [{}] {} ({}) {}",
+            record.timestamp_ms,
+            format!("{:?}", record.level).to_lowercase(),
+            record.category,
+            record.correlation_id.as_deref().unwrap_or("-"),
+            record.message
+        )
+    };
+
+    let (perf_log_lines, app_log_lines) = {
         let log = state
             .observability_log
             .lock()
             .map_err(|_| AppError::new("state_error", "Could not access the diagnostics log."))?;
-        let mut lines: Vec<String> = log
-            .recent(MAX_APP_LOG_LINES)
+        let recent = log.recent(MAX_APP_LOG_LINES);
+        // PERF-001: metrics are recorded into the same log as every other event (see
+        // `perf_metrics.rs`), under a `"perf.*"` category — split them into their own bundle
+        // section here purely for readability, not because they need separate storage/redaction.
+        let perf_lines: Vec<String> = recent
             .iter()
-            .map(|record| {
-                format!(
-                    "{} [{}] {} ({}) {}",
-                    record.timestamp_ms,
-                    format!("{:?}", record.level).to_lowercase(),
-                    record.category,
-                    record.correlation_id.as_deref().unwrap_or("-"),
-                    record.message
-                )
-            })
+            .filter(|record| record.category.starts_with("perf."))
+            .map(format_record)
+            .collect();
+        let mut lines: Vec<String> = recent
+            .iter()
+            .filter(|record| !record.category.starts_with("perf."))
+            .map(format_record)
             .collect();
         // The in-memory ring resets every restart; the file tail can still hold a crash record
         // (or any other event) from a session that ended before this one started. Both are
@@ -100,7 +111,7 @@ pub fn build_diagnostics_bundle(state: &AppState) -> Result<DiagnosticsBundle, A
                 }
             }
         }
-        lines
+        (perf_lines, lines)
     };
 
     let mut preview_text = String::new();
@@ -144,6 +155,15 @@ pub fn build_diagnostics_bundle(state: &AppState) -> Result<DiagnosticsBundle, A
         preview_text.push_str("(none)\n");
     } else {
         for line in &app_log_lines {
+            preview_text.push_str(line);
+            preview_text.push('\n');
+        }
+    }
+    preview_text.push_str("\n-- Recent performance metrics --\n");
+    if perf_log_lines.is_empty() {
+        preview_text.push_str("(none — local performance metrics are off in Settings, or none have been recorded yet)\n");
+    } else {
+        for line in &perf_log_lines {
             preview_text.push_str(line);
             preview_text.push('\n');
         }

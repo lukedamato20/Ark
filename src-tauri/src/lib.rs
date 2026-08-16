@@ -17,6 +17,7 @@ mod file_permissions;
 mod generation;
 mod import_export;
 mod observability;
+mod perf_metrics;
 mod personas;
 mod projects;
 mod provider_management;
@@ -50,16 +51,16 @@ use commands::{
     list_persona_versions, list_personas, list_projects, list_tool_audit_events, list_tools,
     preview_conversation_import, preview_note_write, preview_persona_deletion,
     preview_project_deletion, preview_web_search, preview_workspace_import,
-    preview_workspace_restore, pull_ollama_model, refresh_models, regenerate_assistant_message,
-    regenerate_companion_api_token, rename_conversation, reset_workspace, restore_workspace_backup,
-    restore_workspace_recovery_key, retry_workspace_open, revoke_tool_capability,
-    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, search_web,
-    send_chat_message, set_branch_name, set_companion_api_enabled, set_conversation_archived,
-    set_conversation_persona, set_conversation_pinned, set_conversation_project,
-    set_persona_archived, set_project_archived, set_workspace, start_built_in_runtime,
-    start_pending_stream, stop_built_in_runtime, switch_active_branch,
-    update_conversation_settings, update_device_settings, update_note, update_persona,
-    update_project, update_provider, upsert_provider_secret, upsert_tool_secret,
+    preview_workspace_restore, pull_ollama_model, record_frontend_perf_metric, refresh_models,
+    regenerate_assistant_message, regenerate_companion_api_token, rename_conversation,
+    reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
+    retry_workspace_open, revoke_tool_capability, rotate_workspace_encryption, run_diagnostics,
+    save_diagnostics_bundle, search_web, send_chat_message, set_branch_name,
+    set_companion_api_enabled, set_conversation_archived, set_conversation_persona,
+    set_conversation_pinned, set_conversation_project, set_persona_archived, set_project_archived,
+    set_workspace, start_built_in_runtime, start_pending_stream, stop_built_in_runtime,
+    switch_active_branch, update_conversation_settings, update_device_settings, update_note,
+    update_persona, update_project, update_provider, upsert_provider_secret, upsert_tool_secret,
     verify_tool_audit_trail,
 };
 use db::Database;
@@ -68,6 +69,7 @@ use sidecar::SidecarState;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::Manager;
 
 pub struct AppState {
@@ -182,10 +184,11 @@ fn install_crash_hook(app_handle: tauri::AppHandle, log_file_path: Option<std::p
 }
 
 pub fn run() {
+    let process_start = Instant::now();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let (workspace, workspace_resolution_error) =
                 workspace::resolve_workspace_for_startup(app.handle())?;
             let workspace_info = workspace.info();
@@ -238,6 +241,23 @@ pub fn run() {
             }
 
             install_crash_hook(app.handle().clone(), diagnostics_log_path);
+
+            // PERF-001: a coarse backend-readiness proxy — process entry to the point every
+            // command becomes reachable (`AppState` managed). This is not the full "cached
+            // shell" budget on its own (that also includes the frontend's own bootstrap, see
+            // `useArkController.ts::bootstrap`'s separate `cached_shell_ms` metric) — the two
+            // are deliberately kept as two numbers rather than stitched into one, since there is
+            // no shared clock between the Rust process and the webview's `performance.now()`
+            // origin without invasive plumbing.
+            let backend_setup_ms = process_start.elapsed().as_millis().to_string();
+            if device_settings::load_device_settings(app.handle(), None).perf_metrics_enabled {
+                diagnostics_log.record(
+                    observability::LogLevel::Info,
+                    "perf.startup",
+                    None,
+                    &perf_metrics::format_metric(&[("backend_setup_ms", backend_setup_ms)]),
+                );
+            }
 
             app.manage(AppState {
                 db: Mutex::new(db),
@@ -307,6 +327,7 @@ pub fn run() {
             start_pending_stream,
             cancel_stream,
             refresh_models,
+            record_frontend_perf_metric,
             update_provider,
             get_secret_store_status,
             upsert_provider_secret,
