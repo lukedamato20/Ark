@@ -385,6 +385,10 @@ export interface DeviceSettings {
   /** CMP-006: opt-in, off by default. When true, a generation that completes, fails, or is
    * interrupted while the main window is unfocused shows a generic native OS notification. */
   completionNotificationsEnabled: boolean;
+  /** PERF-001: opt-in, off by default. When true, local performance metrics (durations/counts
+   * only, never content) are recorded into the same local diagnostics log crash capture uses,
+   * and appear in the diagnostics bundle's "Recent performance metrics" section. */
+  perfMetricsEnabled: boolean;
 }
 
 export interface WorkspaceInfo {

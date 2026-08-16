@@ -138,6 +138,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
       builtInModelPath: status.modelPath,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };
@@ -220,6 +221,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };
@@ -307,6 +309,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };
@@ -517,6 +520,7 @@ export function createLongConversationFixtureClient(): ArkClient {
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };
@@ -993,6 +997,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };
@@ -1616,6 +1621,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
     },
     workspaceOpenError: null,
   };

@@ -66,6 +66,7 @@ export interface ArkController {
   changeBuiltInModelPath: (path: string) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
   changeCompletionNotificationsEnabled: (enabled: boolean) => Promise<void>;
+  changePerfMetricsEnabled: (enabled: boolean) => Promise<void>;
   retryWorkspace: () => Promise<void>;
   setBuiltInStatus: (status: BuiltInRuntimeStatus) => void;
   setWorkspace: (workspace: WorkspaceInfo) => void;
@@ -324,6 +325,7 @@ export function useArkController(): ArkController {
         builtInModelPath: data.deviceSettings.builtInModelPath ?? null,
         crashCaptureEnabled: data.deviceSettings.crashCaptureEnabled,
         completionNotificationsEnabled: data.deviceSettings.completionNotificationsEnabled,
+        perfMetricsEnabled: data.deviceSettings.perfMetricsEnabled,
         workspaceOpenError: data.workspaceOpenError ?? null,
         retryingWorkspace: false,
       });
@@ -346,6 +348,11 @@ export function useArkController(): ArkController {
       patchStore(stores.shell, { bootstrapError: normalizeError(error) });
     } finally {
       patchStore(stores.shell, { booting: false });
+      // PERF-001: `performance.now()` is already relative to navigation start, so this is a
+      // direct "cached shell" proxy with no extra module-scope timestamp plumbing needed.
+      // Fire-and-forget — the backend no-ops when the opt-in setting is off, and a failed
+      // metric recording must never affect the app's actual bootstrap.
+      void client.recordFrontendPerfMetric("cached_shell_ms", performance.now());
     }
   }, [client, loadConversation, refreshProviderModels, stores]);
 
@@ -594,6 +601,7 @@ export function useArkController(): ArkController {
           builtInModelPath: settings.builtInModelPath,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -623,6 +631,7 @@ export function useArkController(): ArkController {
           builtInModelPath: path,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -655,6 +664,7 @@ export function useArkController(): ArkController {
           builtInModelPath: settings.builtInModelPath,
           crashCaptureEnabled: enabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -698,6 +708,7 @@ export function useArkController(): ArkController {
           builtInModelPath: settings.builtInModelPath,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: enabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
         }),
       );
       settingsWriteQueueRef.current = operation.then(
@@ -712,6 +723,42 @@ export function useArkController(): ArkController {
           stores.settings.getSnapshot().completionNotificationsEnabled === enabled
         ) {
           patchStore(stores.settings, { completionNotificationsEnabled: settings.completionNotificationsEnabled });
+        }
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
+  /** PERF-001: mirrors `changeCrashCaptureEnabled`'s exact optimistic-update/write-queue/rollback
+   * shape — no permission step needed (unlike notifications), since this only gates writes into
+   * the existing local diagnostics log. */
+  const changePerfMetricsEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      const settings = stores.settings.getSnapshot();
+      const sequence = ++settingsMutationSequenceRef.current;
+      patchStore(stores.settings, { perfMetricsEnabled: enabled });
+      const operation = settingsWriteQueueRef.current.then(() =>
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          builtInModelPath: settings.builtInModelPath,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: enabled,
+        }),
+      );
+      settingsWriteQueueRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        await operation;
+      } catch (error) {
+        if (
+          sequence === settingsMutationSequenceRef.current &&
+          stores.settings.getSnapshot().perfMetricsEnabled === enabled
+        ) {
+          patchStore(stores.settings, { perfMetricsEnabled: settings.perfMetricsEnabled });
         }
         setError(getErrorMessage(error));
       }
@@ -932,6 +979,7 @@ export function useArkController(): ArkController {
       changeBuiltInModelPath,
       changeCrashCaptureEnabled,
       changeCompletionNotificationsEnabled,
+      changePerfMetricsEnabled,
       retryWorkspace,
       setBuiltInStatus,
       setWorkspace,
@@ -953,6 +1001,7 @@ export function useArkController(): ArkController {
       changeConversationPersona,
       changeCrashCaptureEnabled,
       changeCompletionNotificationsEnabled,
+      changePerfMetricsEnabled,
       changeTheme,
       createConversation,
       deleteActiveConversation,

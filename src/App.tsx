@@ -280,6 +280,8 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onCrashCaptureEnabledChange={controller.changeCrashCaptureEnabled}
       completionNotificationsEnabled={settings.completionNotificationsEnabled}
       onCompletionNotificationsEnabledChange={controller.changeCompletionNotificationsEnabled}
+      perfMetricsEnabled={settings.perfMetricsEnabled}
+      onPerfMetricsEnabledChange={controller.changePerfMetricsEnabled}
       onThemeChange={controller.changeTheme}
       onWorkspaceChange={controller.setWorkspace}
       onProviderSaved={controller.saveProvider}

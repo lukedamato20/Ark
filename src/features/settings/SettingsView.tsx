@@ -8,6 +8,7 @@ import {
   Download,
   FileText,
   Folder,
+  Gauge,
   HardDrive,
   Info,
   Loader2,
@@ -93,6 +94,9 @@ interface SettingsViewProps {
   /** CMP-006: opt-in, off by default — see `generation.rs`'s `should_notify`. */
   completionNotificationsEnabled: boolean;
   onCompletionNotificationsEnabledChange: (enabled: boolean) => void;
+  /** PERF-001: opt-in, off by default — see `perf_metrics.rs`'s module doc. */
+  perfMetricsEnabled: boolean;
+  onPerfMetricsEnabledChange: (enabled: boolean) => void;
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
@@ -126,6 +130,8 @@ export function SettingsView({
   onCrashCaptureEnabledChange,
   completionNotificationsEnabled,
   onCompletionNotificationsEnabledChange,
+  perfMetricsEnabled,
+  onPerfMetricsEnabledChange,
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
@@ -651,6 +657,10 @@ export function SettingsView({
           <NotificationsPanel
             completionNotificationsEnabled={completionNotificationsEnabled}
             onCompletionNotificationsEnabledChange={onCompletionNotificationsEnabledChange}
+          />
+          <PerfMetricsPanel
+            perfMetricsEnabled={perfMetricsEnabled}
+            onPerfMetricsEnabledChange={onPerfMetricsEnabledChange}
           />
           <DiagnosticsBundlePanel
             onError={onError}
@@ -3189,6 +3199,41 @@ function NotificationsPanel({
           className="h-4 w-4"
         />
         Notify when a response finishes (off by default)
+      </label>
+    </Panel>
+  );
+}
+
+/** PERF-001: device-scoped, opt-in — same `DeviceSettings` struct/shape as the two toggles above
+ * it. No permission prompt, unlike notifications: this only gates writes into the existing local
+ * diagnostics log, visible in the diagnostics bundle's "Recent performance metrics" section. */
+function PerfMetricsPanel({
+  perfMetricsEnabled,
+  onPerfMetricsEnabledChange,
+}: {
+  perfMetricsEnabled: boolean;
+  onPerfMetricsEnabledChange: (enabled: boolean) => void;
+}) {
+  return (
+    <Panel className="p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Gauge className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Performance metrics</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Records local timing and count measurements — startup duration, response speed, database batch counts — to help
+        diagnose slowness. Never includes prompts, responses, or conversation content. Recorded metrics appear in the
+        diagnostics bundle above and are never sent anywhere automatically.
+      </p>
+
+      <label className="mt-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={perfMetricsEnabled}
+          onChange={(event) => onPerfMetricsEnabledChange(event.target.checked)}
+          className="h-4 w-4"
+        />
+        Record local performance metrics (off by default)
       </label>
     </Panel>
   );

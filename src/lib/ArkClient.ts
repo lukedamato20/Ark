@@ -202,6 +202,12 @@ export interface ArkClient {
    * this resolves `true`, so a denial is respected rather than silently assumed away. */
   requestNotificationPermission(): Promise<boolean>;
 
+  /** PERF-001: the one frontend-originated performance metric — how long the frontend's own
+   * bootstrap took (see `useArkController.ts::bootstrap`). Fire-and-forget: the backend no-ops
+   * silently when `perfMetricsEnabled` is off, and callers never block or surface an error for
+   * this — a failed metric recording must never affect the app's actual behavior. */
+  recordFrontendPerfMetric(name: string, valueMs: number): Promise<void>;
+
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
   createConversation(title?: string): Promise<Conversation>;
   renameConversation(id: string, title: string): Promise<Conversation>;
@@ -421,6 +427,14 @@ export function createTauriArkClient(): ArkClient {
     requestNotificationPermission: async () => {
       if (await isPermissionGranted()) return true;
       return (await requestPermission()) === "granted";
+    },
+
+    recordFrontendPerfMetric: async (name, valueMs) => {
+      try {
+        await invoke<void>("record_frontend_perf_metric", { name, valueMs });
+      } catch {
+        // Best-effort: a metric that fails to record must never surface as an app error.
+      }
     },
 
     listConversations: (input) =>
@@ -655,6 +669,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     updateDeviceSettings: async (settings) => settings,
     openExternalUrl: async () => undefined,
     requestNotificationPermission: async () => true,
+    recordFrontendPerfMetric: async () => undefined,
 
     listConversations: async () => ({ items: [], nextCursor: null, searchSnippets: {} }),
     createConversation: notImplemented("createConversation"),
