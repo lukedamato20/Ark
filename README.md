@@ -105,6 +105,7 @@ Ark can also create a standalone, verified backup of the current workspace datab
 - [Local data-at-rest protection and threat model](docs/data-at-rest.md)
 - [Diagnostics logs and crash capture](docs/diagnostics-and-logs.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Building and installing a local desktop package](docs/installing.md)
 - [Privacy and data flow](docs/privacy-and-data-flow.md)
 - [Security policy and vulnerability reporting](SECURITY.md)
 - [Incident response](docs/incident-response.md)
