@@ -302,8 +302,29 @@ pub async fn get_built_in_runtime_status(
 ) -> Result<BuiltInRuntimeStatus, AppError> {
     let binary = crate::sidecar::llama_server_binary(app);
     let binary_installed = binary.exists();
-    let runtime_verification =
-        binary_installed.then(|| crate::supply_chain::verify_runtime(&binary));
+    // PERF-002: `verify_runtime` hashes every installed runtime file (including the
+    // llama-server binary itself) with SHA-256 — real, potentially slow, CPU/IO-bound work that
+    // must not run inline on the async executor, since this function is awaited directly in
+    // `bootstrap()`'s critical path before the composer becomes interactive. `spawn_blocking`
+    // moves it onto Tokio's blocking thread pool, matching `secret_store.rs`'s established
+    // pattern for the same class of work.
+    let runtime_verification = if binary_installed {
+        let binary_for_verification = binary.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::supply_chain::verify_runtime(&binary_for_verification)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(AppError::new(
+                    "runtime_verification_failed",
+                    "Runtime verification worker did not complete. Retry.",
+                ))
+            }),
+        )
+    } else {
+        None
+    };
     let runtime_provenance = runtime_verification
         .as_ref()
         .and_then(|result| result.as_ref().ok())
