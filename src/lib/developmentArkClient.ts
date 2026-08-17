@@ -3,8 +3,13 @@ import type {
   Attachment,
   AuditEvent,
   BuiltInRuntimeStatus,
+  CodeAgentRun,
+  CodeAgentStep,
+  CodeObservation,
+  CodeRunDetail,
   CodeSession,
   CodeSessionDetail,
+  CodeToolInvocation,
   CompanionApiStatus,
   Conversation,
   ConversationNote,
@@ -1858,10 +1863,55 @@ export function createCodeEditFixtureClient(): ArkClient {
     providerId: "built_in",
     archived: false,
   };
+  const provider: ProviderConfig = {
+    id: "fixture-code-provider",
+    name: "Fixture Ollama",
+    providerType: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    defaultModelId: "fixture-model",
+    defaultTemperature: 0.7,
+    defaultMaxTokens: 4_096,
+    isLocal: true,
+    allowInsecureRemote: false,
+    destinationClass: "loopback",
+    capabilities: {
+      streaming: true,
+      modelListing: true,
+      modelPull: true,
+      modelDelete: true,
+      modelUnload: false,
+      requiresAuth: false,
+      reportsContextWindow: true,
+      vision: false,
+      embeddings: false,
+      tools: true,
+    },
+    isUserManaged: false,
+    isEnabled: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const model: ModelInfo = {
+    id: "fixture-code-model",
+    providerId: provider.id,
+    name: "fixture-model",
+    displayName: "Fixture Model",
+    contextWindow: 32_768,
+    supportsStreaming: true,
+    supportsTools: true,
+    toolCallingMode: "native",
+    supportsVision: false,
+    supportsEmbeddings: false,
+    isAvailable: true,
+    lastSeenAt: timestamp,
+    metadataJson: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
   const bootstrap: AppBootstrap = {
     conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
-    providers: [],
-    models: [],
+    providers: [provider],
+    models: [model],
     projects: [project],
     personas: [],
     applicationInstructions: null,
@@ -1888,6 +1938,28 @@ export function createCodeEditFixtureClient(): ArkClient {
   const filePath = "src/greeting.rs";
   let fileContent = 'pub fn greet() -> &\'static str {\n    "Hello, world!"\n}\n';
   let lastPreview: EditFilePreview | null = null;
+
+  interface FixtureStepRecord {
+    step: CodeAgentStep;
+    invocation?: CodeToolInvocation;
+    observations: CodeObservation[];
+  }
+  let runCounter = 0;
+  const runs = new Map<string, CodeAgentRun>();
+  const runSteps = new Map<string, FixtureStepRecord[]>();
+
+  function buildRunDetail(runId: string): CodeRunDetail {
+    const run = runs.get(runId);
+    if (!run) throw { code: "not_found", message: "Ark Code run not found." };
+    const records = runSteps.get(runId) ?? [];
+    return {
+      run,
+      steps: records.map((record) => record.step),
+      invocations: records.flatMap((record) => (record.invocation ? [record.invocation] : [])),
+      observations: records.flatMap((record) => record.observations),
+      events: [],
+    };
+  }
 
   function buildPreview(path: string, search: string, replace: string): EditFilePreview {
     if (path !== filePath) {
@@ -1942,9 +2014,106 @@ export function createCodeEditFixtureClient(): ArkClient {
     getCodeSession: async (id) => {
       const session = sessions.get(id);
       if (!session) throw { code: "not_found", message: "Ark Code session not found." };
-      const detail: CodeSessionDetail = { session, runs: [], events: [] };
+      const sessionRuns = Array.from(runs.values()).filter((run) => run.sessionId === id);
+      const detail: CodeSessionDetail = { session, runs: sessionRuns, events: [] };
       return detail;
     },
+    createCodeRun: async (input) => {
+      runCounter += 1;
+      const run: CodeAgentRun = {
+        id: `fixture-run-${runCounter}`,
+        sessionId: input.sessionId,
+        parentRunId: null,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        task: input.task,
+        repositoryPathSnapshot: project.repositoryPath ?? "",
+        repositoryIdentityHash: "f".repeat(64),
+        state: "queued",
+        maxSteps: input.maxSteps ?? 12,
+        maxActiveMs: input.maxActiveMs ?? 600_000,
+        maxTokens: input.maxTokens ?? 32_768,
+        maxCostMicrounits: null,
+        stepsUsed: 0,
+        activeElapsedMs: 0,
+        reservedTokens: 0,
+        actualTokens: 0,
+        actualCostMicrounits: null,
+        cancelRequestedAt: null,
+        terminalReason: null,
+        recoveryOutcome: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null,
+      };
+      runs.set(run.id, run);
+      runSteps.set(run.id, []);
+      return run;
+    },
+    runCodeAgentStep: async (sessionId, runId) => {
+      const run = runs.get(runId);
+      if (!run || run.sessionId !== sessionId) {
+        throw { code: "not_found", message: "Ark Code run not found." };
+      }
+      if (run.state !== "queued" && run.state !== "observing") {
+        throw {
+          code: "code_run_not_ready",
+          message: `Ark Code run is '${run.state}' and cannot start a new step.`,
+        };
+      }
+      const records = runSteps.get(runId) ?? [];
+      const stepIndex = run.stepsUsed;
+      const stepId = `fixture-step-${runId}-${stepIndex}`;
+      const step: CodeAgentStep = {
+        id: stepId,
+        runId,
+        stepIndex,
+        state: "completed",
+        reservedTokens: 512,
+        actualTokens: 96,
+        createdAt: timestamp,
+      };
+      let invocation: CodeToolInvocation | undefined;
+      const observations: CodeObservation[] = [];
+      if (stepIndex === 0) {
+        invocation = {
+          id: `fixture-invocation-${runId}`,
+          runId,
+          stepId,
+          toolName: "read_file",
+          canonicalArgumentsJson: JSON.stringify({ path: filePath }),
+          state: "applied",
+          createdAt: timestamp,
+        };
+        observations.push({
+          id: `fixture-observation-tool-${runId}`,
+          runId,
+          stepId,
+          kind: "tool_result",
+          content: fileContent,
+          createdAt: timestamp,
+        });
+        run.state = "observing";
+      } else {
+        observations.push({
+          id: `fixture-observation-text-${runId}`,
+          runId,
+          stepId,
+          kind: "model_text",
+          content: "The greeting function looks correct and returns a static string as expected.",
+          createdAt: timestamp,
+        });
+        run.state = "completed";
+        run.completedAt = timestamp;
+      }
+      run.stepsUsed += 1;
+      run.actualTokens += 96;
+      run.updatedAt = timestamp;
+      records.push({ step, invocation, observations });
+      runSteps.set(runId, records);
+      return buildRunDetail(runId);
+    },
+    getCodeRunDetail: async (runId) => buildRunDetail(runId),
     codePreviewEditFile: async (input) => {
       const [edit] = input.edits;
       return buildPreview(input.path, edit.search, edit.replace);

@@ -4,8 +4,9 @@ use crate::chat::{
     Message,
 };
 use crate::code_sessions::{
-    CodeAgentRun, CodeRecoveryOutcome, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
-    NewCodeRun,
+    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeObservation, CodeObservationKind,
+    CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+    CodeToolInvocation, CodeToolInvocationState, NewCodeRun,
 };
 use crate::config::{
     BUILT_IN_PROVIDER_BASE_URL, BUILT_IN_PROVIDER_ID, BUILT_IN_PROVIDER_NAME,
@@ -205,6 +206,11 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 18,
         name: "0018_ark_code_sessions",
         sql: include_str!("../../migrations/0018_ark_code_sessions.sql"),
+    },
+    MigrationDef {
+        version: 19,
+        name: "0019_code_agent_run_task",
+        sql: include_str!("../../migrations/0019_code_agent_run_task.sql"),
     },
 ];
 
@@ -1477,7 +1483,7 @@ impl Database {
     pub fn get_code_session_detail(&self, id: &str) -> Result<CodeSessionDetail, AppError> {
         let session = self.get_code_session(id)?;
         let mut run_statement = self.connection.prepare(
-            "SELECT id, session_id, parent_run_id, provider_id, model_id,
+            "SELECT id, session_id, parent_run_id, provider_id, model_id, task,
                     repository_path_snapshot, repository_identity_hash, state,
                     max_steps, max_active_ms, max_tokens, max_cost_microunits,
                     steps_used, active_elapsed_ms, reserved_tokens, actual_tokens,
@@ -1505,6 +1511,7 @@ impl Database {
     }
 
     pub fn create_code_agent_run(&self, input: &NewCodeRun<'_>) -> Result<CodeAgentRun, AppError> {
+        let task = crate::code_sessions::validate_task(input.task)?;
         crate::code_sessions::validate_run_budgets(
             input.max_steps,
             input.max_active_ms,
@@ -1559,12 +1566,12 @@ impl Database {
             let timestamp = now();
             self.connection.execute(
                 "INSERT INTO code_agent_runs (
-                    id, session_id, parent_run_id, provider_id, model_id,
+                    id, session_id, parent_run_id, provider_id, model_id, task,
                     repository_path_snapshot, repository_identity_hash, state,
                     max_steps, max_active_ms, max_tokens, max_cost_microunits,
                     next_event_sequence, created_at, updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, 1, ?12, ?12
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', ?9, ?10, ?11, ?12, 1, ?13, ?13
                  )",
                 params![
                     id,
@@ -1572,6 +1579,7 @@ impl Database {
                     input.parent_run_id,
                     input.provider_id,
                     input.model_id,
+                    task,
                     input.repository_path_snapshot,
                     input.repository_identity_hash,
                     max_steps,
@@ -1609,7 +1617,7 @@ impl Database {
     pub fn get_code_agent_run(&self, id: &str) -> Result<CodeAgentRun, AppError> {
         self.connection
             .query_row(
-                "SELECT id, session_id, parent_run_id, provider_id, model_id,
+                "SELECT id, session_id, parent_run_id, provider_id, model_id, task,
                         repository_path_snapshot, repository_identity_hash, state,
                         max_steps, max_active_ms, max_tokens, max_cost_microunits,
                         steps_used, active_elapsed_ms, reserved_tokens, actual_tokens,
@@ -1621,6 +1629,290 @@ impl Database {
             )
             .optional()?
             .ok_or_else(|| AppError::not_found("Ark Code run"))
+    }
+
+    /// CODE-007: everything the run's own timeline consists of, run-scoped rather than
+    /// session-scoped (unlike `get_code_session_detail`'s runs/events, `code_agent_steps` and its
+    /// children belong to one run).
+    pub fn get_code_run_detail(&self, run_id: &str) -> Result<CodeRunDetail, AppError> {
+        let run = self.get_code_agent_run(run_id)?;
+
+        let mut step_statement = self.connection.prepare(
+            "SELECT id, run_id, step_index, state, reserved_tokens, actual_tokens, created_at
+             FROM code_agent_steps WHERE run_id = ?1 ORDER BY step_index ASC",
+        )?;
+        let steps = collect_rows(step_statement.query_map(params![run_id], map_code_agent_step)?)?;
+
+        let mut invocation_statement = self.connection.prepare(
+            "SELECT id, run_id, step_id, tool_name, canonical_arguments_json, state, created_at
+             FROM code_tool_invocations WHERE run_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let invocations = collect_rows(
+            invocation_statement.query_map(params![run_id], map_code_tool_invocation)?,
+        )?;
+
+        let mut observation_statement = self.connection.prepare(
+            "SELECT id, run_id, step_id, kind, content, created_at
+             FROM code_observations WHERE run_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let observations =
+            collect_rows(observation_statement.query_map(params![run_id], map_code_observation)?)?;
+
+        let mut event_statement = self.connection.prepare(
+            "SELECT run_id, sequence, schema_version, kind, state, summary, created_at
+             FROM code_run_events WHERE run_id = ?1 ORDER BY sequence ASC",
+        )?;
+        let events = collect_rows(event_statement.query_map(params![run_id], map_code_run_event)?)?;
+
+        Ok(CodeRunDetail {
+            run,
+            steps,
+            invocations,
+            observations,
+            events,
+        })
+    }
+
+    fn append_code_run_event(
+        &self,
+        run_id: &str,
+        sequence: i64,
+        kind: &str,
+        state: CodeRunState,
+        summary: &str,
+        timestamp: &str,
+    ) -> Result<(), AppError> {
+        self.connection.execute(
+            "INSERT INTO code_run_events (
+                run_id, sequence, schema_version, kind, state, summary, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run_id,
+                sequence,
+                i64::from(crate::code_sessions::CODE_RUN_EVENT_SCHEMA_VERSION),
+                kind,
+                state.as_str(),
+                summary,
+                timestamp,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Conditionally advances a run's state — ADR 0003's "conditional update requires the
+    /// expected current state" rule, applied here to CODE-007's simplified loop's own transition
+    /// points: the pre-dispatch `planning` claim, and the budget/repository-identity/provider-call
+    /// early-exit paths that go straight to a terminal state rather than through
+    /// `commit_code_agent_step`.
+    pub fn transition_code_agent_run(
+        &self,
+        run_id: &str,
+        expected_states: &[CodeRunState],
+        new_state: CodeRunState,
+        terminal_reason: Option<&str>,
+        event_kind: &str,
+        event_summary: &str,
+    ) -> Result<CodeAgentRun, AppError> {
+        self.transaction(|| {
+            let run = self.get_code_agent_run(run_id)?;
+            if !expected_states.contains(&run.state) {
+                return Err(AppError::new(
+                    "code_run_state_conflict",
+                    format!(
+                        "Ark Code run is '{}', which does not allow this transition.",
+                        run.state.as_str()
+                    ),
+                ));
+            }
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )?;
+            let timestamp = now();
+            let completed_at = new_state.is_terminal().then(|| timestamp.clone());
+            self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET state = ?1, terminal_reason = ?2, completed_at = ?3,
+                     next_event_sequence = next_event_sequence + 1, updated_at = ?4
+                 WHERE id = ?5",
+                params![
+                    new_state.as_str(),
+                    terminal_reason,
+                    completed_at,
+                    timestamp,
+                    run_id
+                ],
+            )?;
+            self.append_code_run_event(
+                run_id,
+                next_sequence,
+                event_kind,
+                new_state,
+                event_summary,
+                &timestamp,
+            )?;
+            self.get_code_agent_run(run_id)
+        })
+    }
+
+    /// Persists one `code_agent::run_step` outcome — the step itself, its optional tool
+    /// invocation/observation, an optional model-text observation, and the run's own counter/state
+    /// update — as a single transaction. Requires the run to currently be `planning` (the state
+    /// `transition_code_agent_run` put it in before the provider call this step's data came from).
+    pub fn commit_code_agent_step(
+        &self,
+        input: &crate::code_sessions::NewCodeAgentStep<'_>,
+    ) -> Result<CodeRunDetail, AppError> {
+        self.transaction(|| {
+            let run = self.get_code_agent_run(input.run_id)?;
+            if run.state != CodeRunState::Planning {
+                return Err(AppError::new(
+                    "code_run_state_conflict",
+                    format!(
+                        "Ark Code run is '{}', which does not allow committing a step.",
+                        run.state.as_str()
+                    ),
+                ));
+            }
+            let timestamp = now();
+            let step_id = Uuid::new_v4().to_string();
+            self.connection.execute(
+                "INSERT INTO code_agent_steps (
+                    id, run_id, step_index, state, prompt_manifest_json, reserved_tokens,
+                    actual_tokens, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'completed', ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    step_id,
+                    input.run_id,
+                    i64::from(input.step_index),
+                    input.prompt_manifest_json,
+                    i64::try_from(input.reserved_tokens).unwrap_or(i64::MAX),
+                    input
+                        .actual_tokens
+                        .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                    timestamp,
+                ],
+            )?;
+
+            if let Some(text) = &input.model_text {
+                let observation_id = Uuid::new_v4().to_string();
+                self.connection.execute(
+                    "INSERT INTO code_observations (
+                        id, run_id, step_id, invocation_id, kind, content, content_hash,
+                        provenance_json, created_at
+                     ) VALUES (?1, ?2, ?3, NULL, 'model_text', ?4, ?5, ?6, ?7)",
+                    params![
+                        observation_id,
+                        input.run_id,
+                        step_id,
+                        text,
+                        crate::code_sessions::sha256_hex(text.as_bytes()),
+                        format!("{{\"stepIndex\":{}}}", input.step_index),
+                        timestamp,
+                    ],
+                )?;
+            }
+
+            if let Some(tool_call) = &input.tool_call {
+                let invocation_id = Uuid::new_v4().to_string();
+                let call_hash =
+                    crate::code_sessions::sha256_hex(tool_call.canonical_arguments_json.as_bytes());
+                let state = if tool_call.succeeded {
+                    "applied"
+                } else {
+                    "failed"
+                };
+                self.connection.execute(
+                    "INSERT INTO code_tool_invocations (
+                        id, run_id, step_id, provider_call_id, tool_name,
+                        canonical_arguments_json, call_hash, scope_json, idempotency_policy,
+                        state, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, 'idempotent', ?8, ?9, ?9)",
+                    params![
+                        invocation_id,
+                        input.run_id,
+                        step_id,
+                        tool_call.tool_name,
+                        tool_call.canonical_arguments_json,
+                        call_hash,
+                        tool_call.scope_json,
+                        state,
+                        timestamp,
+                    ],
+                )?;
+                let observation_id = Uuid::new_v4().to_string();
+                let kind = if tool_call.succeeded {
+                    "tool_result"
+                } else {
+                    "tool_error"
+                };
+                self.connection.execute(
+                    "INSERT INTO code_observations (
+                        id, run_id, step_id, invocation_id, kind, content, content_hash,
+                        provenance_json, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        observation_id,
+                        input.run_id,
+                        step_id,
+                        invocation_id,
+                        kind,
+                        tool_call.observation_content,
+                        crate::code_sessions::sha256_hex(tool_call.observation_content.as_bytes()),
+                        format!(
+                            "{{\"tool\":{}}}",
+                            serde_json::to_string(tool_call.tool_name).unwrap_or_default()
+                        ),
+                        timestamp,
+                    ],
+                )?;
+            }
+
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1",
+                params![input.run_id],
+                |row| row.get(0),
+            )?;
+            let completed_at = input.new_run_state.is_terminal().then(|| timestamp.clone());
+            let active_elapsed_delta =
+                i64::try_from(input.active_elapsed_ms_delta).unwrap_or(i64::MAX);
+            let actual_tokens_delta = input
+                .actual_tokens
+                .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET state = ?1, steps_used = steps_used + 1,
+                     active_elapsed_ms = active_elapsed_ms + ?2,
+                     actual_tokens = actual_tokens + ?3,
+                     completed_at = ?4, next_event_sequence = next_event_sequence + 1,
+                     updated_at = ?5
+                 WHERE id = ?6",
+                params![
+                    input.new_run_state.as_str(),
+                    active_elapsed_delta,
+                    actual_tokens_delta,
+                    completed_at,
+                    timestamp,
+                    input.run_id,
+                ],
+            )?;
+            self.append_code_run_event(
+                input.run_id,
+                next_sequence,
+                "step_completed",
+                input.new_run_state,
+                if input.tool_call.is_some() {
+                    "Step completed with a tool call"
+                } else {
+                    "Step completed with a final response"
+                },
+                &timestamp,
+            )?;
+
+            self.get_code_run_detail(input.run_id)
+        })
     }
 
     fn get_code_idempotency_receipt(
@@ -3853,6 +4145,21 @@ fn code_recovery_outcome_from_str(value: &str) -> rusqlite::Result<CodeRecoveryO
         .map_err(|_| code_sql_value_error(format!("unknown code recovery outcome: {value}")))
 }
 
+fn code_agent_step_state_from_str(value: &str) -> rusqlite::Result<CodeAgentStepState> {
+    CodeAgentStepState::try_from(value)
+        .map_err(|_| code_sql_value_error(format!("unknown code agent step state: {value}")))
+}
+
+fn code_tool_invocation_state_from_str(value: &str) -> rusqlite::Result<CodeToolInvocationState> {
+    CodeToolInvocationState::try_from(value)
+        .map_err(|_| code_sql_value_error(format!("unknown code tool invocation state: {value}")))
+}
+
+fn code_observation_kind_from_str(value: &str) -> rusqlite::Result<CodeObservationKind> {
+    CodeObservationKind::try_from(value)
+        .map_err(|_| code_sql_value_error(format!("unknown code observation kind: {value}")))
+}
+
 fn map_code_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
     Ok(CodeSession {
         id: row.get(0)?,
@@ -3865,35 +4172,74 @@ fn map_code_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
 }
 
 fn map_code_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeAgentRun> {
-    let state: String = row.get(7)?;
-    let recovery_outcome: Option<String> = row.get(19)?;
+    let state: String = row.get(8)?;
+    let recovery_outcome: Option<String> = row.get(20)?;
     Ok(CodeAgentRun {
         id: row.get(0)?,
         session_id: row.get(1)?,
         parent_run_id: row.get(2)?,
         provider_id: row.get(3)?,
         model_id: row.get(4)?,
-        repository_path_snapshot: row.get(5)?,
-        repository_identity_hash: row.get(6)?,
+        task: row.get(5)?,
+        repository_path_snapshot: row.get(6)?,
+        repository_identity_hash: row.get(7)?,
         state: code_run_state_from_str(&state)?,
-        max_steps: row.get::<_, i64>(8)? as u32,
-        max_active_ms: row.get::<_, i64>(9)? as u64,
-        max_tokens: row.get::<_, i64>(10)? as u64,
-        max_cost_microunits: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
-        steps_used: row.get::<_, i64>(12)? as u32,
-        active_elapsed_ms: row.get::<_, i64>(13)? as u64,
-        reserved_tokens: row.get::<_, i64>(14)? as u64,
-        actual_tokens: row.get::<_, i64>(15)? as u64,
-        actual_cost_microunits: row.get::<_, Option<i64>>(16)?.map(|value| value as u64),
-        cancel_requested_at: row.get(17)?,
-        terminal_reason: row.get(18)?,
+        max_steps: row.get::<_, i64>(9)? as u32,
+        max_active_ms: row.get::<_, i64>(10)? as u64,
+        max_tokens: row.get::<_, i64>(11)? as u64,
+        max_cost_microunits: row.get::<_, Option<i64>>(12)?.map(|value| value as u64),
+        steps_used: row.get::<_, i64>(13)? as u32,
+        active_elapsed_ms: row.get::<_, i64>(14)? as u64,
+        reserved_tokens: row.get::<_, i64>(15)? as u64,
+        actual_tokens: row.get::<_, i64>(16)? as u64,
+        actual_cost_microunits: row.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+        cancel_requested_at: row.get(18)?,
+        terminal_reason: row.get(19)?,
         recovery_outcome: recovery_outcome
             .as_deref()
             .map(code_recovery_outcome_from_str)
             .transpose()?,
-        created_at: row.get(20)?,
-        updated_at: row.get(21)?,
-        completed_at: row.get(22)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
+        completed_at: row.get(23)?,
+    })
+}
+
+fn map_code_agent_step(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeAgentStep> {
+    let state: String = row.get(3)?;
+    Ok(CodeAgentStep {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        step_index: row.get::<_, i64>(2)? as u32,
+        state: code_agent_step_state_from_str(&state)?,
+        reserved_tokens: row.get::<_, i64>(4)? as u64,
+        actual_tokens: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+        created_at: row.get(6)?,
+    })
+}
+
+fn map_code_tool_invocation(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeToolInvocation> {
+    let state: String = row.get(5)?;
+    Ok(CodeToolInvocation {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        step_id: row.get(2)?,
+        tool_name: row.get(3)?,
+        canonical_arguments_json: row.get(4)?,
+        state: code_tool_invocation_state_from_str(&state)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn map_code_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeObservation> {
+    let kind: String = row.get(3)?;
+    Ok(CodeObservation {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        step_id: row.get(2)?,
+        kind: code_observation_kind_from_str(&kind)?,
+        content: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }
 
@@ -8567,6 +8913,7 @@ mod tests {
             parent_run_id: None,
             provider_id: DEFAULT_PROVIDER_ID,
             model_id: "test-model",
+            task: "Investigate the parser",
             repository_path_snapshot: "C:\\repository",
             repository_identity_hash: &repository_hash,
             max_steps: 12,

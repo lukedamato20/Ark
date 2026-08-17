@@ -289,6 +289,8 @@ export interface CodeAgentRun {
   parentRunId?: string | null;
   providerId: string;
   modelId: string;
+  /** CODE-007: what Ark Code was asked to investigate. Immutable once the run is created. */
+  task: string;
   repositoryPathSnapshot: string;
   repositoryIdentityHash: string;
   state: CodeRunState;
@@ -322,6 +324,54 @@ export interface CodeRunEvent {
 export interface CodeSessionDetail {
   session: CodeSession;
   runs: CodeAgentRun[];
+  events: CodeRunEvent[];
+}
+
+export type CodeAgentStepState = "reserved" | "dispatched" | "completed" | "failed" | "interrupted";
+
+/** CODE-007: one planning/model turn of a run's synchronous read-only agent loop. */
+export interface CodeAgentStep {
+  id: string;
+  runId: string;
+  stepIndex: number;
+  state: CodeAgentStepState;
+  reservedTokens: number;
+  actualTokens?: number | null;
+  createdAt: string;
+}
+
+export type CodeToolInvocationState =
+  "proposed" | "approved" | "executing" | "applied" | "failed" | "denied" | "interrupted";
+
+/** CODE-007: at most one per step in this pass's loop — the tool call the model requested and
+ * whether it applied. */
+export interface CodeToolInvocation {
+  id: string;
+  runId: string;
+  stepId: string;
+  toolName: string;
+  canonicalArgumentsJson: string;
+  state: CodeToolInvocationState;
+  createdAt: string;
+}
+
+export type CodeObservationKind = "tool_result" | "tool_error" | "model_text" | "system";
+
+export interface CodeObservation {
+  id: string;
+  runId: string;
+  stepId: string;
+  kind: CodeObservationKind;
+  content: string;
+  createdAt: string;
+}
+
+/** CODE-007: everything `CodeView` needs to render one run's autonomous progress. */
+export interface CodeRunDetail {
+  run: CodeAgentRun;
+  steps: CodeAgentStep[];
+  invocations: CodeToolInvocation[];
+  observations: CodeObservation[];
   events: CodeRunEvent[];
 }
 

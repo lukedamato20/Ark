@@ -225,9 +225,12 @@ function ConversationSidebarContainer({
 function CodeContainer({ controller }: { controller: ArkController }) {
   const stores = useArkStores();
   const projects = useStore(stores.projects);
+  const providerState = useStore(stores.providers);
   return (
     <CodeView
       projects={entityList(projects.projects)}
+      providers={entityList(providerState.providers)}
+      models={entityList(providerState.models)}
       onBack={() => controller.setView("chat")}
       onError={controller.setError}
     />

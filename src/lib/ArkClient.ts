@@ -21,6 +21,7 @@ import type {
   CompanionApiStatus,
   CompanionApiTokenReveal,
   CodeAgentRun,
+  CodeRunDetail,
   CodeSession,
   CodeSessionDetail,
   EditBlock,
@@ -198,6 +199,7 @@ export interface CreateCodeRunInput {
   parentRunId?: string | null;
   providerId: string;
   modelId: string;
+  task: string;
   maxSteps?: number | null;
   maxActiveMs?: number | null;
   maxTokens?: number | null;
@@ -418,6 +420,10 @@ export interface ArkClient {
   listCodeSessions(includeArchived?: boolean): Promise<CodeSession[]>;
   getCodeSession(id: string): Promise<CodeSessionDetail>;
   createCodeRun(input: CreateCodeRunInput): Promise<CodeAgentRun>;
+  /** CODE-007: drives exactly one model turn of an existing `queued`/`observing` run — awaited in
+   * full, not backgrounded/streamed. See `code_agent::run_step`'s doc comment. */
+  runCodeAgentStep(sessionId: string, runId: string): Promise<CodeRunDetail>;
+  getCodeRunDetail(runId: string): Promise<CodeRunDetail>;
 
   /** CMP-003: every built-in tool's declared definition plus whichever grant (if any) currently
    * governs it. Today this is always exactly the one built-in "notes" tool. */
@@ -734,6 +740,8 @@ export function createTauriArkClient(): ArkClient {
     listCodeSessions: (includeArchived = false) => invoke<CodeSession[]>("list_code_sessions", { includeArchived }),
     getCodeSession: (id) => invoke<CodeSessionDetail>("get_code_session", { id }),
     createCodeRun: (input) => invoke<CodeAgentRun>("create_code_run", { request: input }),
+    runCodeAgentStep: (sessionId, runId) => invoke<CodeRunDetail>("run_code_agent_step", { sessionId, runId }),
+    getCodeRunDetail: (runId) => invoke<CodeRunDetail>("get_code_run_detail", { runId }),
 
     listTools: () => invoke<ToolStatus[]>("list_tools"),
     grantToolCapability: (toolId, ttlMinutes) =>
@@ -940,6 +948,8 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     listCodeSessions: async () => [],
     getCodeSession: notImplemented("getCodeSession"),
     createCodeRun: notImplemented("createCodeRun"),
+    runCodeAgentStep: notImplemented("runCodeAgentStep"),
+    getCodeRunDetail: notImplemented("getCodeRunDetail"),
 
     listTools: async () => [],
     grantToolCapability: notImplemented("grantToolCapability"),

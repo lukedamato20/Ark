@@ -13,7 +13,9 @@ use crate::chat::{
     Message, SendChatResult, StreamEvent,
 };
 use crate::code_sessions::{
-    CodeAgentRun, CodeRecoveryOutcome, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeObservation, CodeObservationKind,
+    CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+    CodeToolInvocation, CodeToolInvocationState,
 };
 use crate::code_tools::{
     RepositoryDirectoryListing, RepositoryEntry, RepositoryEntryKind, RepositoryFileRead,
@@ -520,6 +522,7 @@ fn ark_code_session_dtos_match_contract() {
         parent_run_id: None,
         provider_id: "ollama".to_string(),
         model_id: "qwen".to_string(),
+        task: "Investigate the parser".to_string(),
         repository_path_snapshot: "C:\\repository".to_string(),
         repository_identity_hash: "a".repeat(64),
         state: CodeRunState::Queued,
@@ -555,7 +558,47 @@ fn ark_code_session_dtos_match_contract() {
         "CodeSessionDetail",
         &CodeSessionDetail {
             session,
-            runs: vec![run],
+            runs: vec![run.clone()],
+            events: vec![event.clone()],
+        },
+    );
+
+    let step = CodeAgentStep {
+        id: "code-step-1".to_string(),
+        run_id: run.id.clone(),
+        step_index: 0,
+        state: CodeAgentStepState::Completed,
+        reserved_tokens: 4_096,
+        actual_tokens: Some(512),
+        created_at: run.created_at.clone(),
+    };
+    let invocation = CodeToolInvocation {
+        id: "code-invocation-1".to_string(),
+        run_id: run.id.clone(),
+        step_id: step.id.clone(),
+        tool_name: "read_file".to_string(),
+        canonical_arguments_json: "{\"path\":\"src/lib.rs\"}".to_string(),
+        state: CodeToolInvocationState::Applied,
+        created_at: run.created_at.clone(),
+    };
+    let observation = CodeObservation {
+        id: "code-observation-1".to_string(),
+        run_id: run.id.clone(),
+        step_id: step.id.clone(),
+        kind: CodeObservationKind::ToolResult,
+        content: "fn main() {}".to_string(),
+        created_at: run.created_at.clone(),
+    };
+    assert_matches_contract("CodeAgentStep", &step);
+    assert_matches_contract("CodeToolInvocation", &invocation);
+    assert_matches_contract("CodeObservation", &observation);
+    assert_matches_contract(
+        "CodeRunDetail",
+        &CodeRunDetail {
+            run,
+            steps: vec![step],
+            invocations: vec![invocation],
+            observations: vec![observation],
             events: vec![event],
         },
     );

@@ -197,6 +197,9 @@ pub struct CreateCodeRunRequest {
     pub parent_run_id: Option<String>,
     pub provider_id: String,
     pub model_id: String,
+    /// CODE-007: what Ark Code should investigate. Required — a run with nothing to do cannot
+    /// meaningfully plan its first step.
+    pub task: String,
     pub max_steps: Option<u32>,
     pub max_active_ms: Option<u64>,
     pub max_tokens: Option<u64>,
@@ -218,6 +221,7 @@ struct CodeRunRequestFingerprint<'a> {
     parent_run_id: Option<&'a str>,
     provider_id: &'a str,
     model_id: &'a str,
+    task: &'a str,
     repository_identity_hash: &'a str,
     max_steps: u32,
     max_active_ms: u64,
@@ -646,6 +650,7 @@ pub fn create_code_run(
             "Ark Code model ID must be between 1 and 512 characters.",
         ));
     }
+    let task = crate::code_sessions::validate_task(&request.task)?;
 
     let (session, project, provider, models) = {
         let db = lock_read_db(&state)?;
@@ -698,6 +703,7 @@ pub fn create_code_run(
         parent_run_id,
         provider_id,
         model_id,
+        task: &task,
         repository_identity_hash: &repository_identity_hash,
         max_steps,
         max_active_ms,
@@ -709,6 +715,7 @@ pub fn create_code_run(
         parent_run_id,
         provider_id,
         model_id,
+        task: &task,
         repository_path_snapshot: &repository_path,
         repository_identity_hash: &repository_identity_hash,
         max_steps,
@@ -718,6 +725,29 @@ pub fn create_code_run(
         idempotency_key: &request.idempotency_key,
         request_hash: &request_hash,
     })
+}
+
+/// CODE-007: drives exactly one model turn of an existing `queued`/`observing` run. Awaited in
+/// full by this command — see `code_agent::run_step`'s doc comment for why this pass is
+/// synchronous rather than backgrounded/streamed.
+#[tauri::command]
+pub async fn run_code_agent_step(
+    state: State<'_, AppState>,
+    session_id: String,
+    run_id: String,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let session_id = crate::validation::validate_entity_id(&session_id, "Ark Code session ID")?;
+    let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
+    crate::code_agent::run_step(&state, session_id, run_id).await
+}
+
+#[tauri::command]
+pub fn get_code_run_detail(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
+    lock_read_db(&state)?.get_code_run_detail(run_id)
 }
 
 fn code_repository_context(

@@ -118,6 +118,9 @@ pub struct CodeAgentRun {
     pub parent_run_id: Option<String>,
     pub provider_id: String,
     pub model_id: String,
+    /// CODE-007: what the user asked Ark Code to investigate. Immutable once the run is created —
+    /// a different task is a different run.
+    pub task: String,
     pub repository_path_snapshot: String,
     pub repository_identity_hash: String,
     pub state: CodeRunState,
@@ -163,6 +166,7 @@ pub struct NewCodeRun<'a> {
     pub parent_run_id: Option<&'a str>,
     pub provider_id: &'a str,
     pub model_id: &'a str,
+    pub task: &'a str,
     pub repository_path_snapshot: &'a str,
     pub repository_identity_hash: &'a str,
     pub max_steps: u32,
@@ -171,6 +175,218 @@ pub struct NewCodeRun<'a> {
     pub max_cost_microunits: Option<u64>,
     pub idempotency_key: &'a str,
     pub request_hash: &'a str,
+}
+
+/// CODE-007's read-only agent loop's own DTOs. One step, at most one executed tool call, and its
+/// resulting observation — see `code_agent::run_step`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeAgentStepState {
+    Reserved,
+    Dispatched,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl CodeAgentStepState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Dispatched => "dispatched",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl TryFrom<&str> for CodeAgentStepState {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "reserved" => Ok(Self::Reserved),
+            "dispatched" => Ok(Self::Dispatched),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "interrupted" => Ok(Self::Interrupted),
+            _ => Err(AppError::new(
+                "code_agent_step_state_invalid",
+                "Ark Code found an unknown durable step state and refused to guess.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeAgentStep {
+    pub id: String,
+    pub run_id: String,
+    pub step_index: u32,
+    pub state: CodeAgentStepState,
+    pub reserved_tokens: u64,
+    pub actual_tokens: Option<u64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeToolInvocationState {
+    Proposed,
+    Approved,
+    Executing,
+    Applied,
+    Failed,
+    Denied,
+    Interrupted,
+}
+
+impl CodeToolInvocationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Approved => "approved",
+            Self::Executing => "executing",
+            Self::Applied => "applied",
+            Self::Failed => "failed",
+            Self::Denied => "denied",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl TryFrom<&str> for CodeToolInvocationState {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "proposed" => Ok(Self::Proposed),
+            "approved" => Ok(Self::Approved),
+            "executing" => Ok(Self::Executing),
+            "applied" => Ok(Self::Applied),
+            "failed" => Ok(Self::Failed),
+            "denied" => Ok(Self::Denied),
+            "interrupted" => Ok(Self::Interrupted),
+            _ => Err(AppError::new(
+                "code_tool_invocation_state_invalid",
+                "Ark Code found an unknown durable tool invocation state and refused to guess.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeToolInvocation {
+    pub id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub tool_name: String,
+    pub canonical_arguments_json: String,
+    pub state: CodeToolInvocationState,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeObservationKind {
+    ToolResult,
+    ToolError,
+    ModelText,
+    System,
+}
+
+impl CodeObservationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolResult => "tool_result",
+            Self::ToolError => "tool_error",
+            Self::ModelText => "model_text",
+            Self::System => "system",
+        }
+    }
+}
+
+impl TryFrom<&str> for CodeObservationKind {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "tool_result" => Ok(Self::ToolResult),
+            "tool_error" => Ok(Self::ToolError),
+            "model_text" => Ok(Self::ModelText),
+            "system" => Ok(Self::System),
+            _ => Err(AppError::new(
+                "code_observation_kind_invalid",
+                "Ark Code found an unknown durable observation kind and refused to guess.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeObservation {
+    pub id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub kind: CodeObservationKind,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// Everything CODE-007's `CodeView` needs to render one run's autonomous progress: the run itself
+/// plus every step/invocation/observation/event it has produced so far, run-scoped (steps are not
+/// session-scoped, unlike `CodeSessionDetail`'s runs/events).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRunDetail {
+    pub run: CodeAgentRun,
+    pub steps: Vec<CodeAgentStep>,
+    pub invocations: Vec<CodeToolInvocation>,
+    pub observations: Vec<CodeObservation>,
+    pub events: Vec<CodeRunEvent>,
+}
+
+/// Inputs for `Database::commit_code_agent_step` — bundles everything one `code_agent::run_step`
+/// call produces after its provider call and (at most one) tool execution complete, so it can be
+/// persisted in a single transaction. `tool_call` and `model_text` are each optional and
+/// independent: a step may produce either, both, or (defensively) neither.
+pub struct NewCodeAgentStep<'a> {
+    pub run_id: &'a str,
+    pub step_index: u32,
+    pub prompt_manifest_json: String,
+    pub reserved_tokens: u64,
+    pub actual_tokens: Option<u64>,
+    pub active_elapsed_ms_delta: u64,
+    pub model_text: Option<String>,
+    pub tool_call: Option<NewCodeToolCallOutcome<'a>>,
+    /// `Observing` when a tool call was executed (ready for the next step); `Completed` when the
+    /// model returned a final answer with no tool call.
+    pub new_run_state: CodeRunState,
+}
+
+pub struct NewCodeToolCallOutcome<'a> {
+    pub tool_name: &'a str,
+    pub canonical_arguments_json: String,
+    pub scope_json: String,
+    pub succeeded: bool,
+    /// The tool's result content on success, or a bounded error message on failure.
+    pub observation_content: String,
+}
+
+pub const MAX_TASK_CHARS: usize = 4_000;
+
+pub fn validate_task(value: &str) -> Result<String, AppError> {
+    let task = value.trim();
+    if task.is_empty() || task.chars().count() > MAX_TASK_CHARS {
+        return Err(AppError::invalid_input(format!(
+            "Ark Code run task must be between 1 and {MAX_TASK_CHARS} characters."
+        )));
+    }
+    Ok(task.to_string())
 }
 
 pub fn validate_session_title(value: &str) -> Result<String, AppError> {
@@ -294,6 +510,55 @@ pub fn compute_precondition_hash<T: Serialize>(preconditions: &T) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_agent_step_and_tool_invocation_and_observation_state_round_trips() {
+        for state in [
+            CodeAgentStepState::Reserved,
+            CodeAgentStepState::Dispatched,
+            CodeAgentStepState::Completed,
+            CodeAgentStepState::Failed,
+            CodeAgentStepState::Interrupted,
+        ] {
+            assert_eq!(CodeAgentStepState::try_from(state.as_str()).unwrap(), state);
+        }
+        for state in [
+            CodeToolInvocationState::Proposed,
+            CodeToolInvocationState::Approved,
+            CodeToolInvocationState::Executing,
+            CodeToolInvocationState::Applied,
+            CodeToolInvocationState::Failed,
+            CodeToolInvocationState::Denied,
+            CodeToolInvocationState::Interrupted,
+        ] {
+            assert_eq!(
+                CodeToolInvocationState::try_from(state.as_str()).unwrap(),
+                state
+            );
+        }
+        for kind in [
+            CodeObservationKind::ToolResult,
+            CodeObservationKind::ToolError,
+            CodeObservationKind::ModelText,
+            CodeObservationKind::System,
+        ] {
+            assert_eq!(CodeObservationKind::try_from(kind.as_str()).unwrap(), kind);
+        }
+        assert!(CodeAgentStepState::try_from("bogus").is_err());
+        assert!(CodeToolInvocationState::try_from("bogus").is_err());
+        assert!(CodeObservationKind::try_from("bogus").is_err());
+    }
+
+    #[test]
+    fn task_validation_trims_and_bounds_length() {
+        assert_eq!(
+            validate_task("  investigate the parser  ").unwrap(),
+            "investigate the parser"
+        );
+        assert!(validate_task(" ").is_err());
+        assert!(validate_task(&"x".repeat(MAX_TASK_CHARS + 1)).is_err());
+        assert!(validate_task(&"x".repeat(MAX_TASK_CHARS)).is_ok());
+    }
 
     #[test]
     fn every_durable_state_round_trips_and_terminal_states_stay_closed() {

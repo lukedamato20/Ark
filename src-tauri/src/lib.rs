@@ -1,6 +1,7 @@
 mod attachments;
 mod backup;
 mod chat;
+mod code_agent;
 mod code_sessions;
 pub mod code_tools;
 pub mod code_write_tools;
@@ -53,27 +54,28 @@ use commands::{
     export_conversation_markdown, export_diagnostics_bundle, export_persona_json,
     export_workspace_json, export_workspace_markdown, get_app_bootstrap,
     get_assistant_alternatives, get_attachment_content, get_built_in_runtime_status,
-    get_code_session, get_companion_api_status, get_conversation_branch_topology,
-    get_conversation_messages, get_message, get_provider_secret_metadata, get_secret_store_status,
-    get_tool_secret_metadata, get_workspace_protection_status, grant_tool_capability,
-    import_conversation_json, import_persona_json, import_workspace_json, keep_partial_message,
-    list_ark_code_tools, list_code_sessions, list_conversation_attachments,
-    list_conversation_notes, list_conversations, list_managed_models, list_persona_versions,
-    list_personas, list_projects, list_tool_audit_events, list_tools, preflight_managed_model,
-    preview_conversation_import, preview_note_write, preview_persona_deletion,
-    preview_project_deletion, preview_web_search, preview_workspace_import,
-    preview_workspace_restore, pull_ollama_model, record_frontend_perf_metric, refresh_models,
-    regenerate_assistant_message, regenerate_companion_api_token, rename_conversation,
-    reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
-    retry_workspace_open, revoke_tool_capability, rotate_workspace_encryption, run_diagnostics,
-    save_diagnostics_bundle, search_web, send_chat_message, set_branch_name,
-    set_companion_api_enabled, set_conversation_archived, set_conversation_persona,
-    set_conversation_pinned, set_conversation_project, set_persona_archived, set_project_archived,
-    set_project_repository, set_workspace, start_built_in_runtime, start_managed_model,
-    start_pending_stream, stop_built_in_runtime, switch_active_branch,
-    update_application_instructions, update_conversation_settings, update_device_settings,
-    update_note, update_persona, update_project, update_provider, upsert_provider_secret,
-    upsert_tool_secret, verify_tool_audit_trail,
+    get_code_run_detail, get_code_session, get_companion_api_status,
+    get_conversation_branch_topology, get_conversation_messages, get_message,
+    get_provider_secret_metadata, get_secret_store_status, get_tool_secret_metadata,
+    get_workspace_protection_status, grant_tool_capability, import_conversation_json,
+    import_persona_json, import_workspace_json, keep_partial_message, list_ark_code_tools,
+    list_code_sessions, list_conversation_attachments, list_conversation_notes, list_conversations,
+    list_managed_models, list_persona_versions, list_personas, list_projects,
+    list_tool_audit_events, list_tools, preflight_managed_model, preview_conversation_import,
+    preview_note_write, preview_persona_deletion, preview_project_deletion, preview_web_search,
+    preview_workspace_import, preview_workspace_restore, pull_ollama_model,
+    record_frontend_perf_metric, refresh_models, regenerate_assistant_message,
+    regenerate_companion_api_token, rename_conversation, reset_workspace, restore_workspace_backup,
+    restore_workspace_recovery_key, retry_workspace_open, revoke_tool_capability,
+    rotate_workspace_encryption, run_code_agent_step, run_diagnostics, save_diagnostics_bundle,
+    search_web, send_chat_message, set_branch_name, set_companion_api_enabled,
+    set_conversation_archived, set_conversation_persona, set_conversation_pinned,
+    set_conversation_project, set_persona_archived, set_project_archived, set_project_repository,
+    set_workspace, start_built_in_runtime, start_managed_model, start_pending_stream,
+    stop_built_in_runtime, switch_active_branch, update_application_instructions,
+    update_conversation_settings, update_device_settings, update_note, update_persona,
+    update_project, update_provider, upsert_provider_secret, upsert_tool_secret,
+    verify_tool_audit_trail,
 };
 use db::Database;
 use errors::AppError;
@@ -346,6 +348,8 @@ pub fn run() {
             list_code_sessions,
             get_code_session,
             create_code_run,
+            run_code_agent_step,
+            get_code_run_detail,
             set_conversation_persona,
             list_personas,
             create_persona,
