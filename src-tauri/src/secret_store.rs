@@ -207,15 +207,30 @@ fn validate_reference(reference: &str) -> Result<&'static str, SecretStoreError>
     Ok(service)
 }
 
+fn validate_reference_service(
+    reference: &str,
+    expected_service: &'static str,
+) -> Result<(), SecretStoreError> {
+    if validate_reference(reference)? != expected_service {
+        return Err(SecretStoreError::new(
+            SecretStoreErrorKind::Invalid,
+            "Stored credential reference belongs to a different secret family.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn store_workspace_key(reference: &str, key: &str) -> Result<(), AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, WORKSPACE_KEY_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .create(reference, SecretValue(key.to_string()))
         .map_err(|error| error.to_app_error())
 }
 
 pub(crate) fn read_workspace_key(reference: &str) -> Result<zeroize::Zeroizing<String>, AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, WORKSPACE_KEY_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .read(reference)
         .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
@@ -223,7 +238,8 @@ pub(crate) fn read_workspace_key(reference: &str) -> Result<zeroize::Zeroizing<S
 }
 
 pub(crate) fn delete_workspace_key(reference: &str) -> Result<(), AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, WORKSPACE_KEY_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .delete(reference)
         .map_err(|error| error.to_app_error())
@@ -239,7 +255,8 @@ pub(crate) fn delete_workspace_key(reference: &str) -> Result<(), AppError> {
 pub(crate) fn read_provider_secret(
     reference: &str,
 ) -> Result<zeroize::Zeroizing<String>, AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, PROVIDER_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .read(reference)
         .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
@@ -251,7 +268,8 @@ pub(crate) fn read_provider_secret(
 /// directly) so the companion API's storage concern stays self-contained here even though the
 /// underlying keychain call is identical.
 pub(crate) fn store_companion_api_token(reference: &str, token: &str) -> Result<(), AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, COMPANION_API_TOKEN_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .create(reference, SecretValue(token.to_string()))
         .map_err(|error| error.to_app_error())
@@ -260,7 +278,8 @@ pub(crate) fn store_companion_api_token(reference: &str, token: &str) -> Result<
 /// FTR-010: replaces an existing companion API token's value in place (regeneration) — the
 /// reference itself, and therefore the frontend's `tokenConfigured` signal, is unchanged.
 pub(crate) fn update_companion_api_token(reference: &str, token: &str) -> Result<(), AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, COMPANION_API_TOKEN_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .update(reference, SecretValue(token.to_string()))
         .map_err(|error| error.to_app_error())
@@ -275,7 +294,8 @@ pub(crate) fn update_companion_api_token(reference: &str, token: &str) -> Result
 pub(crate) fn read_companion_api_token(
     reference: &str,
 ) -> Result<zeroize::Zeroizing<String>, AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, COMPANION_API_TOKEN_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .read(reference)
         .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
@@ -288,7 +308,8 @@ pub(crate) fn read_companion_api_token(
 /// info over IPC. Deliberately kept out of `commands/mod.rs`, like `read_provider_secret`/
 /// `read_companion_api_token` — see `scripts/check-secret-boundaries.mjs`'s matching guard.
 pub(crate) fn read_tool_secret(reference: &str) -> Result<zeroize::Zeroizing<String>, AppError> {
-    validate_reference(reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(reference, TOOL_SECRET_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     SystemSecretStore
         .read(reference)
         .map(|value| zeroize::Zeroizing::new(value.expose().to_string()))
@@ -304,26 +325,24 @@ pub(crate) fn read_tool_secret(reference: &str) -> Result<zeroize::Zeroizing<Str
 /// authentication independently of Ark and gets no header, same as before this covered the cloud
 /// case.
 ///
-/// Reads the OS keychain synchronously rather than via `tokio::spawn_blocking` — every caller
-/// (`generation.rs`, `provider_management.rs`, `diagnostics.rs`) is a plain (non-`async`)
-/// `#[tauri::command]` handler or is itself called from one, which Tauri already runs off the
-/// async reactor thread — the same reasoning that already applied to this function's
-/// sidecar-mutex read before it also covered the keychain case.
+/// A configured credential reference is a security boundary, not a best-effort hint: if the
+/// operating-system store is locked, unavailable, or no longer contains the value, propagate its
+/// typed recoverable error rather than silently downgrading the request to unauthenticated.
 pub(crate) fn resolve_bearer_token(
     state: &crate::AppState,
     provider: &crate::providers::ProviderConfig,
-) -> Option<String> {
+) -> Result<Option<String>, AppError> {
     if provider.provider_type == crate::config::BUILT_IN_PROVIDER_TYPE {
-        return state
+        return Ok(state
             .sidecar
             .lock()
-            .ok()
-            .and_then(|sidecar| sidecar.api_key());
+            .map_err(|_| AppError::new("state_error", "Could not access runtime state."))?
+            .api_key());
     }
-    let reference = provider.api_key_ref.as_deref()?;
-    read_provider_secret(reference)
-        .ok()
-        .map(|value| value.to_string())
+    let Some(reference) = provider.api_key_ref.as_deref() else {
+        return Ok(None);
+    };
+    read_provider_secret(reference).map(|value| Some(value.to_string()))
 }
 
 fn validate_secret(value: String) -> Result<SecretValue, AppError> {
@@ -387,7 +406,8 @@ pub async fn upsert_provider_secret(
         .api_key_ref;
     let reference = existing.clone().unwrap_or_else(new_reference);
     let is_update = existing.is_some();
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, PROVIDER_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     let reference_for_store = reference.clone();
     tokio::task::spawn_blocking(move || {
         if is_update {
@@ -439,7 +459,8 @@ pub async fn get_provider_secret_metadata(
     else {
         return Ok(None);
     };
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, PROVIDER_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     let reference_for_store = reference.clone();
     let result = tokio::task::spawn_blocking(move || SystemSecretStore.read(&reference_for_store))
         .await
@@ -473,7 +494,8 @@ pub async fn delete_provider_secret(
     else {
         return Ok(());
     };
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, PROVIDER_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     tokio::task::spawn_blocking(move || SystemSecretStore.delete(&reference))
         .await
         .map_err(|_| {
@@ -484,6 +506,64 @@ pub async fn delete_provider_secret(
         })?
         .map_err(|error| error.to_app_error())?;
     crate::commands::lock_db(state)?.set_provider_api_key_ref(&provider_id, None)?;
+    Ok(())
+}
+
+/// FTR-007: deletes a user-managed provider and its credential as one compensating operation.
+/// SQLite and the OS keychain cannot share a transaction, so Ark removes the credential first,
+/// retains it only in zeroizing memory, and restores it if the database transaction fails.
+pub(crate) async fn delete_user_provider_and_secret(
+    state: &crate::AppState,
+    provider: crate::providers::ProviderConfig,
+) -> Result<(), AppError> {
+    let reference = provider.api_key_ref.clone();
+    let removed_secret = if let Some(reference) = reference.as_deref() {
+        validate_reference_service(reference, PROVIDER_SERVICE)
+            .map_err(|error| error.to_app_error())?;
+        let read_reference = reference.to_string();
+        let existing = tokio::task::spawn_blocking(move || SystemSecretStore.read(&read_reference))
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    "secret_store_failed",
+                    "Credential-store worker did not complete. Retry provider deletion.",
+                )
+            })?;
+        let value = match existing {
+            Ok(value) => Some(value),
+            Err(error) if error.kind == SecretStoreErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_app_error()),
+        };
+        let delete_reference = reference.to_string();
+        tokio::task::spawn_blocking(move || SystemSecretStore.delete(&delete_reference))
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    "secret_store_failed",
+                    "Credential-store worker did not complete. Retry provider deletion.",
+                )
+            })?
+            .map_err(|error| error.to_app_error())?;
+        value
+    } else {
+        None
+    };
+
+    let database_result = crate::commands::lock_db(state)?.delete_user_provider(&provider.id);
+    if let Err(database_error) = database_result {
+        if let (Some(reference), Some(value)) = (reference, removed_secret) {
+            let compensation =
+                tokio::task::spawn_blocking(move || SystemSecretStore.create(&reference, value))
+                    .await;
+            if !matches!(compensation, Ok(Ok(()))) {
+                return Err(AppError::new(
+                    "secret_store_compensation_failed",
+                    "Provider deletion failed and Ark could not restore its credential. Re-add the credential before retrying.",
+                ));
+            }
+        }
+        return Err(database_error);
+    }
     Ok(())
 }
 
@@ -501,7 +581,8 @@ pub async fn upsert_tool_secret(
     let existing = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)?;
     let reference = existing.clone().unwrap_or_else(new_tool_secret_reference);
     let is_update = existing.is_some();
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, TOOL_SECRET_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     let reference_for_store = reference.clone();
     tokio::task::spawn_blocking(move || {
         if is_update {
@@ -548,7 +629,8 @@ pub async fn get_tool_secret_metadata(
     let Some(reference) = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)? else {
         return Ok(None);
     };
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, TOOL_SECRET_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     let reference_for_store = reference.clone();
     let result = tokio::task::spawn_blocking(move || SystemSecretStore.read(&reference_for_store))
         .await
@@ -575,7 +657,8 @@ pub async fn delete_tool_secret(state: &crate::AppState, tool_id: String) -> Res
     let Some(reference) = crate::commands::lock_db(state)?.get_tool_secret_ref(&tool_id)? else {
         return Ok(());
     };
-    validate_reference(&reference).map_err(|error| error.to_app_error())?;
+    validate_reference_service(&reference, TOOL_SECRET_SERVICE)
+        .map_err(|error| error.to_app_error())?;
     tokio::task::spawn_blocking(move || SystemSecretStore.delete(&reference))
         .await
         .map_err(|_| {
@@ -706,6 +789,42 @@ mod tests {
         assert!(validate_secret("x".repeat(MAX_SECRET_BYTES + 1)).is_err());
     }
 
+    #[test]
+    fn typed_secret_wrappers_reject_cross_family_references_before_platform_access() {
+        let provider = new_reference();
+        let workspace = new_workspace_key_reference();
+        let companion = new_companion_api_token_reference();
+        let tool = new_tool_secret_reference();
+
+        assert!(validate_reference_service(&provider, PROVIDER_SERVICE).is_ok());
+        assert!(validate_reference_service(&workspace, WORKSPACE_KEY_SERVICE).is_ok());
+        assert!(validate_reference_service(&companion, COMPANION_API_TOKEN_SERVICE).is_ok());
+        assert!(validate_reference_service(&tool, TOOL_SECRET_SERVICE).is_ok());
+
+        for (reference, wrong_service) in [
+            (&workspace, PROVIDER_SERVICE),
+            (&companion, PROVIDER_SERVICE),
+            (&tool, PROVIDER_SERVICE),
+            (&provider, WORKSPACE_KEY_SERVICE),
+            (&provider, COMPANION_API_TOKEN_SERVICE),
+            (&provider, TOOL_SECRET_SERVICE),
+        ] {
+            let error = validate_reference_service(reference, wrong_service)
+                .expect_err("cross-family reference must be rejected");
+            assert_eq!(error.kind, SecretStoreErrorKind::Invalid);
+        }
+
+        for result in [
+            read_provider_secret(&workspace).map(|_| ()),
+            read_workspace_key(&provider).map(|_| ()),
+            read_companion_api_token(&provider).map(|_| ()),
+            read_tool_secret(&provider).map(|_| ()),
+        ] {
+            let error = result.expect_err("typed wrapper must reject a different secret family");
+            assert_eq!(error.code, "secret_reference_invalid");
+        }
+    }
+
     /// CMP-004: the tool-secret reference family (4th prefix) round-trips through the same
     /// generic `SecretStore` port as the other three — proving `validate_reference`'s new arm and
     /// `new_tool_secret_reference` actually produce a working reference, not just a
@@ -777,6 +896,8 @@ mod tests {
             pending_streams: Mutex::new(HashMap::new()),
             active_imports: Mutex::new(HashMap::new()),
             active_ollama_pulls: Mutex::new(HashMap::new()),
+            active_provider_refreshes: Mutex::new(HashMap::new()),
+            active_managed_model_downloads: Mutex::new(HashMap::new()),
             storage_maintenance: AtomicBool::new(false),
             sidecar: Arc::new(Mutex::new(SidecarState::new())),
             observability_log: Arc::new(Mutex::new(crate::observability::DiagnosticsLog::new())),
@@ -789,6 +910,7 @@ mod tests {
             upsert_provider_secret(&state, DEFAULT_PROVIDER_ID.to_string(), first.clone())
                 .await
                 .expect("create and link platform credential");
+        let remote_cleanup = Arc::new(Mutex::new(None::<String>));
         let result = async {
             assert_eq!(
                 store
@@ -821,9 +943,20 @@ mod tests {
             assert_eq!(*read_provider_secret(&created.id)?, second);
             let provider = crate::commands::lock_db(&state)?.get_provider(DEFAULT_PROVIDER_ID)?;
             assert_eq!(
-                resolve_bearer_token(&state, &provider),
+                resolve_bearer_token(&state, &provider)?,
                 Some(second.clone())
             );
+            let mut provider_without_credential = provider.clone();
+            provider_without_credential.api_key_ref = None;
+            assert_eq!(
+                resolve_bearer_token(&state, &provider_without_credential)?,
+                None
+            );
+            let mut provider_with_invalid_reference = provider.clone();
+            provider_with_invalid_reference.api_key_ref = Some("not-an-opaque-reference".into());
+            let invalid_reference = resolve_bearer_token(&state, &provider_with_invalid_reference)
+                .expect_err("a configured invalid reference must fail closed");
+            assert_eq!(invalid_reference.code, "secret_reference_invalid");
             let public = get_provider_secret_metadata(&state, DEFAULT_PROVIDER_ID.to_string())
                 .await?
                 .expect("metadata exists");
@@ -844,10 +977,43 @@ mod tests {
                     ..
                 })
             ));
+
+            // FTR-007 deletion acceptance: a confirmed user-provider deletion removes both the
+            // SQLite reference/row and the actual platform credential, not just one side.
+            let remote = crate::commands::lock_db(&state)?.create_remote_provider(
+                crate::db::CreateRemoteProviderChanges {
+                    name: "Platform deletion provider",
+                    provider_type: crate::config::OPENAI_PROVIDER_TYPE,
+                    base_url: crate::config::OPENAI_PROVIDER_BASE_URL,
+                    acknowledge_remote_risk: true,
+                    allow_insecure_remote: false,
+                },
+            )?;
+            let remote_secret = upsert_provider_secret(
+                &state,
+                remote.id.clone(),
+                format!("platform-remote-{}", uuid::Uuid::new_v4()),
+            )
+            .await?;
+            *remote_cleanup.lock().expect("cleanup lock") = Some(remote_secret.id.clone());
+            crate::provider_management::delete_provider(&state, remote.id.clone(), true).await?;
+            assert!(crate::commands::lock_db(&state)?
+                .get_provider(&remote.id)
+                .is_err());
+            assert!(matches!(
+                store.read(&remote_secret.id),
+                Err(SecretStoreError {
+                    kind: SecretStoreErrorKind::NotFound,
+                    ..
+                })
+            ));
             Ok::<(), AppError>(())
         }
         .await;
         let _ = store.delete(&created.id);
+        if let Some(reference) = remote_cleanup.lock().expect("cleanup lock").take() {
+            let _ = store.delete(&reference);
+        }
         drop(state);
         for candidate in [
             path.clone(),

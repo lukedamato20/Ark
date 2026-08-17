@@ -116,6 +116,91 @@ pub struct UpdateProjectRequest {
     pub tone: Option<String>,
 }
 
+/// CODE-004: every read-only coding command names the Project whose persisted Repository binding
+/// supplies the filesystem authority. No command accepts an arbitrary root path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeProjectRequest {
+    pub project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeListDirectoryRequest {
+    pub project_id: String,
+    pub path: String,
+    pub max_entries: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeReadFileRequest {
+    pub project_id: String,
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub max_lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSearchRequest {
+    pub project_id: String,
+    pub query: String,
+    pub path: Option<String>,
+    pub case_sensitive: Option<bool>,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRepositoryMapRequest {
+    pub project_id: String,
+    pub max_entries: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCodeSessionRequest {
+    pub project_id: String,
+    pub title: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCodeRunRequest {
+    pub session_id: String,
+    pub parent_run_id: Option<String>,
+    pub provider_id: String,
+    pub model_id: String,
+    pub max_steps: Option<u32>,
+    pub max_active_ms: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub max_cost_microunits: Option<u64>,
+    pub idempotency_key: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeSessionRequestFingerprint<'a> {
+    project_id: &'a str,
+    title: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeRunRequestFingerprint<'a> {
+    session_id: &'a str,
+    parent_run_id: Option<&'a str>,
+    provider_id: &'a str,
+    model_id: &'a str,
+    repository_identity_hash: &'a str,
+    max_steps: u32,
+    max_active_ms: u64,
+    max_tokens: u64,
+    max_cost_microunits: Option<u64>,
+}
+
 /// FTR-003: `name` and `instructions` are always sent (unlike a project's optional
 /// `instructions`, a persona's prompt content is required); `Database::create_persona` rejects a
 /// blank `instructions` the same way it rejects a blank `name`.
@@ -153,12 +238,16 @@ pub struct AssistantBranchRequest {
 }
 
 pub use crate::provider_management::{
-    BuiltInRuntimeStatus, DeleteOllamaModelRequest, PullOllamaModelRequest, RefreshModelsResult,
-    UpdateProviderRequest,
+    BuiltInRuntimeStatus, CreateRemoteProviderRequest, DeleteOllamaModelRequest,
+    PullOllamaModelRequest, RefreshModelsResult, UpdateProviderRequest,
 };
 
 pub use crate::data_protection::{WorkspaceProtectionChange, WorkspaceProtectionStatus};
 pub use crate::device_settings::DeviceSettings;
+pub use crate::managed_models::{
+    ManagedModelDownloadRequest, ManagedModelOperation, ManagedModelPreflight, ManagedModelStatus,
+    StartManagedModelRequest,
+};
 pub use crate::secret_store::{SecretMetadata, SecretStoreStatus};
 
 #[derive(Debug, Deserialize)]
@@ -342,6 +431,253 @@ pub fn update_project(
     )
 }
 
+/// CODE-003: binds, switches, or removes the code Repository for an existing Project without
+/// mutating Ark's storage Workspace. A blank value is normalized to removal for consistency
+/// with the other optional Project settings.
+#[tauri::command]
+pub fn set_project_repository(
+    state: State<'_, AppState>,
+    id: String,
+    repository_path: Option<String>,
+) -> Result<crate::projects::Project, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Project ID")?.to_string();
+    // Reject a nonexistent Project before touching the filesystem with a writability probe.
+    lock_read_db(&state)?.get_project(&id)?;
+
+    let repository_path = repository_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let workspace_root = state
+                .workspace
+                .lock()
+                .map_err(|_| AppError::new("state_error", "Could not access Workspace state."))?
+                .root_path
+                .clone();
+            let canonical = crate::repository::validate_repository_root(
+                path,
+                std::path::Path::new(&workspace_root),
+            )?;
+            canonical.to_str().map(str::to_string).ok_or_else(|| {
+                AppError::invalid_input("Repository path must contain valid Unicode.")
+            })
+        })
+        .transpose()?;
+
+    lock_db(&state)?.set_project_repository(&id, repository_path.as_deref())
+}
+
+/// CODE-004's registry is intentionally separate from `list_tools`: Ark Chat never discovers or
+/// grants Repository-tier tools through its Tools panel.
+#[tauri::command]
+pub fn list_ark_code_tools() -> Vec<crate::tools::ToolDefinition> {
+    crate::code_tools::ark_code_tools()
+}
+
+#[tauri::command]
+pub fn code_list_directory(
+    state: State<'_, AppState>,
+    request: CodeListDirectoryRequest,
+) -> Result<crate::code_tools::RepositoryDirectoryListing, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::list_directory(&context, &request.path, request.max_entries)
+}
+
+#[tauri::command]
+pub fn code_read_file(
+    state: State<'_, AppState>,
+    request: CodeReadFileRequest,
+) -> Result<crate::code_tools::RepositoryFileRead, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::read_file(
+        &context,
+        &request.path,
+        request.start_line,
+        request.max_lines,
+    )
+}
+
+#[tauri::command]
+pub fn code_search(
+    state: State<'_, AppState>,
+    request: CodeSearchRequest,
+) -> Result<crate::code_tools::RepositorySearchResult, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::search(
+        &context,
+        &request.query,
+        request.path.as_deref(),
+        request.case_sensitive.unwrap_or(false),
+        request.max_results,
+    )
+}
+
+#[tauri::command]
+pub fn code_repository_map(
+    state: State<'_, AppState>,
+    request: CodeRepositoryMapRequest,
+) -> Result<crate::code_tools::RepositoryMap, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::repository_map(&context, request.max_entries)
+}
+
+#[tauri::command]
+pub async fn code_git_status(
+    state: State<'_, AppState>,
+    request: CodeProjectRequest,
+) -> Result<crate::code_tools::RepositoryGitStatus, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::git_status(&context).await
+}
+
+#[tauri::command]
+pub async fn code_git_diff(
+    state: State<'_, AppState>,
+    request: CodeProjectRequest,
+) -> Result<crate::code_tools::RepositoryGitDiff, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_tools::git_diff(&context).await
+}
+
+#[tauri::command]
+pub fn create_code_session(
+    state: State<'_, AppState>,
+    request: CreateCodeSessionRequest,
+) -> Result<crate::code_sessions::CodeSession, AppError> {
+    let project_id = crate::validation::validate_entity_id(&request.project_id, "Project ID")?;
+    let title = crate::code_sessions::validate_session_title(&request.title)?;
+    let request_hash = crate::code_sessions::request_hash(&CodeSessionRequestFingerprint {
+        project_id,
+        title: &title,
+    })?;
+    lock_db(&state)?.create_code_session(
+        project_id,
+        &title,
+        &request.idempotency_key,
+        &request_hash,
+    )
+}
+
+#[tauri::command]
+pub fn list_code_sessions(
+    state: State<'_, AppState>,
+    include_archived: Option<bool>,
+) -> Result<Vec<crate::code_sessions::CodeSession>, AppError> {
+    lock_read_db(&state)?.list_code_sessions(include_archived.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn get_code_session(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::code_sessions::CodeSessionDetail, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Ark Code session ID")?;
+    lock_read_db(&state)?.get_code_session_detail(id)
+}
+
+#[tauri::command]
+pub fn create_code_run(
+    state: State<'_, AppState>,
+    request: CreateCodeRunRequest,
+) -> Result<crate::code_sessions::CodeAgentRun, AppError> {
+    let session_id =
+        crate::validation::validate_entity_id(&request.session_id, "Ark Code session ID")?;
+    let parent_run_id = request
+        .parent_run_id
+        .as_deref()
+        .map(|id| crate::validation::validate_entity_id(id, "Parent Ark Code run ID"))
+        .transpose()?;
+    let provider_id = crate::validation::validate_entity_id(&request.provider_id, "Provider ID")?;
+    let model_id = request.model_id.trim();
+    if model_id.is_empty() || model_id.chars().count() > 512 {
+        return Err(AppError::invalid_input(
+            "Ark Code model ID must be between 1 and 512 characters.",
+        ));
+    }
+
+    let (session, project, provider, models) = {
+        let db = lock_read_db(&state)?;
+        let session = db.get_code_session(session_id)?;
+        let project = db.get_project(&session.project_id)?;
+        let provider = db.get_provider(provider_id)?;
+        let models = db.list_models(provider_id)?;
+        (session, project, provider, models)
+    };
+    if !provider.is_enabled {
+        return Err(AppError::new(
+            "provider_disabled",
+            "Enable the selected provider before starting Ark Code.",
+        ));
+    }
+    let model = models
+        .iter()
+        .find(|model| model.name == model_id && model.is_available)
+        .ok_or_else(|| {
+            AppError::new(
+                "provider_model_unavailable",
+                "Refresh models and select an available model before starting Ark Code.",
+            )
+        })?;
+    if model.tool_calling_mode == crate::providers::ToolCallingMode::Unsupported {
+        return Err(AppError::new(
+            "model_tools_unsupported",
+            "This model does not support Ark Code tool calling. Choose a native or prompted-tool model.",
+        ));
+    }
+
+    let context = crate::code_tools::RepositoryContext::from_project(&project)?;
+    let (repository_path, repository_identity_hash) =
+        crate::code_sessions::repository_snapshot(context.root())?;
+    let max_steps = request
+        .max_steps
+        .unwrap_or(crate::code_sessions::DEFAULT_MAX_STEPS);
+    let max_active_ms = request
+        .max_active_ms
+        .unwrap_or(crate::code_sessions::DEFAULT_MAX_ACTIVE_MS);
+    let max_tokens = request.max_tokens.unwrap_or_else(|| {
+        model
+            .context_window
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(crate::code_sessions::DEFAULT_MAX_TOKENS)
+    });
+    crate::code_sessions::validate_run_budgets(max_steps, max_active_ms, max_tokens)?;
+    let request_hash = crate::code_sessions::request_hash(&CodeRunRequestFingerprint {
+        session_id: &session.id,
+        parent_run_id,
+        provider_id,
+        model_id,
+        repository_identity_hash: &repository_identity_hash,
+        max_steps,
+        max_active_ms,
+        max_tokens,
+        max_cost_microunits: request.max_cost_microunits,
+    })?;
+    lock_db(&state)?.create_code_agent_run(&crate::code_sessions::NewCodeRun {
+        session_id: &session.id,
+        parent_run_id,
+        provider_id,
+        model_id,
+        repository_path_snapshot: &repository_path,
+        repository_identity_hash: &repository_identity_hash,
+        max_steps,
+        max_active_ms,
+        max_tokens,
+        max_cost_microunits: request.max_cost_microunits,
+        idempotency_key: &request.idempotency_key,
+        request_hash: &request_hash,
+    })
+}
+
+fn code_repository_context(
+    state: &AppState,
+    project_id: &str,
+) -> Result<crate::code_tools::RepositoryContext, AppError> {
+    let project_id = crate::validation::validate_entity_id(project_id, "Project ID")?;
+    let project = lock_read_db(state)?.get_project(project_id)?;
+    crate::code_tools::RepositoryContext::from_project(&project)
+}
+
 #[tauri::command]
 pub fn set_project_archived(
     state: State<'_, AppState>,
@@ -438,6 +774,22 @@ pub fn list_persona_versions(
 ) -> Result<Vec<crate::personas::PersonaVersionSummary>, AppError> {
     let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
     lock_read_db(&state)?.list_persona_versions(id)
+}
+
+#[tauri::command]
+pub fn export_persona_json(state: State<'_, AppState>, id: String) -> Result<String, AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Persona ID")?;
+    let db = lock_read_db(&state)?;
+    crate::personas::export_persona_json(&db, id)
+}
+
+#[tauri::command]
+pub fn import_persona_json(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<crate::personas::Persona, AppError> {
+    let db = lock_db(&state)?;
+    crate::personas::import_persona_json(&db, &json)
 }
 
 #[tauri::command]
@@ -740,6 +1092,16 @@ pub fn get_assistant_alternatives(
 }
 
 #[tauri::command]
+pub fn get_conversation_branch_topology(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<crate::chat::BranchTopologyNode>, AppError> {
+    let conversation_id =
+        crate::validation::validate_entity_id(&conversation_id, "Conversation ID")?;
+    lock_read_db(&state)?.get_branch_topology(conversation_id)
+}
+
+#[tauri::command]
 pub fn switch_active_branch(
     state: State<'_, AppState>,
     request: AssistantBranchRequest,
@@ -793,6 +1155,23 @@ pub fn update_provider(
     request: UpdateProviderRequest,
 ) -> Result<ProviderConfig, AppError> {
     crate::provider_management::update_provider(&state, request)
+}
+
+#[tauri::command]
+pub fn create_remote_provider(
+    state: State<'_, AppState>,
+    request: CreateRemoteProviderRequest,
+) -> Result<ProviderConfig, AppError> {
+    crate::provider_management::create_remote_provider(&state, request)
+}
+
+#[tauri::command]
+pub async fn delete_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+    confirmed: bool,
+) -> Result<(), AppError> {
+    crate::provider_management::delete_provider(&state, provider_id, confirmed).await
 }
 
 // SEC-005: these adapters expose only availability, masked metadata, and opaque identifiers.
@@ -876,6 +1255,23 @@ pub fn update_device_settings(
     crate::device_settings::update_device_settings(&app, settings)
 }
 
+/// FTR-003: updates the workspace-wide instruction fallback. Blank input clears the setting;
+/// validation matches every other free-form system-instruction tier.
+#[tauri::command]
+pub fn update_application_instructions(
+    state: State<'_, AppState>,
+    instructions: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let instructions = crate::validation::validate_system_prompt(instructions)?;
+    let db = lock_db(&state)?;
+    if let Some(value) = instructions.as_deref() {
+        db.set_setting(crate::config::APPLICATION_INSTRUCTIONS_SETTING_KEY, value)?;
+    } else {
+        db.delete_setting(crate::config::APPLICATION_INSTRUCTIONS_SETTING_KEY)?;
+    }
+    Ok(instructions)
+}
+
 #[tauri::command]
 pub fn set_workspace(
     app: AppHandle,
@@ -946,6 +1342,14 @@ pub async fn refresh_models(
     provider_id: String,
 ) -> Result<RefreshModelsResult, AppError> {
     crate::provider_management::refresh_models(&app, &state, provider_id).await
+}
+
+#[tauri::command]
+pub fn cancel_provider_refresh(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<(), AppError> {
+    crate::provider_management::cancel_provider_refresh(&state, provider_id)
 }
 
 // ARC-001: sending/editing/regenerating a chat message and cancelling a stream are the core
@@ -1339,6 +1743,64 @@ pub async fn start_built_in_runtime(
         model_path,
         model_source,
         model_license,
+        &app,
+        &state,
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn list_managed_models(app: AppHandle) -> Result<Vec<ManagedModelStatus>, AppError> {
+    crate::managed_models::list_managed_models(&app)
+}
+
+#[tauri::command]
+pub fn preflight_managed_model(
+    model_id: String,
+    operation: ManagedModelOperation,
+    app: AppHandle,
+) -> Result<ManagedModelPreflight, AppError> {
+    crate::managed_models::preflight_managed_model(&app, &model_id, operation)
+}
+
+#[tauri::command]
+pub async fn download_managed_model(
+    request: ManagedModelDownloadRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ManagedModelStatus, AppError> {
+    crate::managed_models::download_managed_model(&app, &state, request).await
+}
+
+#[tauri::command]
+pub fn cancel_managed_model_download(
+    model_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    crate::managed_models::cancel_managed_model_download(&state, &model_id)
+}
+
+#[tauri::command]
+pub fn delete_managed_model(
+    model_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    crate::managed_models::delete_managed_model(&app, &state, &model_id)
+}
+
+#[tauri::command]
+pub async fn start_managed_model(
+    request: StartManagedModelRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BuiltInRuntimeStatus, AppError> {
+    let (model, path) = crate::managed_models::authorize_start(&app, &request)?;
+    crate::provider_management::start_built_in_runtime_with_expected_digest(
+        path.display().to_string(),
+        model.source_repository,
+        model.license,
+        Some(&model.sha256),
         &app,
         &state,
     )

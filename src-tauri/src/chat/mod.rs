@@ -45,6 +45,26 @@ pub struct BranchAlternative {
     pub branch_name: Option<String>,
 }
 
+/// FTR-005: one compact node in the whole-conversation branch topology. Unlike `Message`, this
+/// never returns full historical content or error/metadata payloads: the explorer needs ancestry,
+/// a short label, route provenance, and active-path state only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchTopologyNode {
+    pub message_id: String,
+    pub parent_message_id: Option<String>,
+    pub revision_of_message_id: Option<String>,
+    pub path_index: i64,
+    pub role: String,
+    pub created_at: String,
+    pub status: String,
+    pub content_preview: String,
+    pub is_active: bool,
+    pub branch_name: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {

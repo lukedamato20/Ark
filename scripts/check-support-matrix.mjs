@@ -28,6 +28,9 @@ for (const platform of matrix.artifactPlatforms) {
   if (!supportDocument.includes(platform.minimumVersionClaim)) {
     failures.push(`support matrix document omits ${platform.minimumVersionClaim}`);
   }
+  if (typeof platform.runtimeTarget !== "string" || !supportDocument.includes(platform.runtimeTarget)) {
+    failures.push(`support matrix document omits qualified runtime target ${platform.runtimeTarget}`);
+  }
 }
 for (const [providerType, claim] of Object.entries(matrix.providers)) {
   if (claim.visible && !frontendGate.includes("providerIsVisible")) {

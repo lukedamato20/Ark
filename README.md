@@ -26,15 +26,15 @@ Install these before running Ark:
 - Node.js and pnpm
 - Rust
 - Tauri desktop prerequisites for your operating system
-- At least one supported local runtime: Ollama or an OpenAI-compatible local server
+- For development, at least one supported local runtime: Ollama, an OpenAI-compatible local
+  server, or the pinned llama.cpp runtime installed by Ark's verified setup script
 
-Ark does not bundle Ollama, llama.cpp, or model files. The setup-script-installed llama.cpp
-launcher remains available for development, but is hidden and disabled in release builds until
-the pinned upstream server can meet Ark's complete endpoint-authentication and browser-origin
-isolation requirements. See the [support matrix](docs/support-matrix.md) for exact artifact
-claims.
+Ark never bundles Ollama or model files. Packaged-build CI now installs, executes, and bundles the
+target-specific pinned llama.cpp runtime after size, SHA-256, archive, per-file, provenance, and
+version/commit verification. Release visibility stays off until those packaged jobs are green on
+every declared target. See the [support matrix](docs/support-matrix.md) for exact artifact claims.
 
-The development setup scripts read only `config/native-artifacts.json`, verify the pinned
+The development and packaged-build setup paths read only `config/native-artifacts.json`, verify the pinned
 artifact's checked-in size and SHA-256 before extraction, reject unsafe archive entries, and
 atomically install it with per-file provenance. `pnpm supply-chain:check` verifies the archive
 safety tests plus the checked-in CycloneDX SBOM and third-party notices.
@@ -94,6 +94,33 @@ In Settings → Storage, you can enter an absolute folder path for a portable wo
 
 Ark can also create a standalone, verified backup of the current workspace database at any time (Settings → Backup & Restore), independent of switching workspaces — see [docs/secrets-and-backups.md](docs/secrets-and-backups.md).
 
+Ark Code uses a separate **Repository** boundary. A Project can optionally bind an existing code
+directory under Settings → AI & Behavior → Projects. Binding or switching is immediate, stores
+only the canonical path, and never moves Workspace data. Ark rejects a Repository that overlaps
+the storage Workspace and confines future Ark Code filesystem paths to the bound Repository.
+
+## Companion API
+
+Ark includes a disabled-by-default, authenticated integration API that binds to `127.0.0.1` on an
+OS-assigned port. Under Settings → Companion API, generate and save the one-time-revealed bearer
+token before enabling the API, then use the URL shown there. Every route—including health and the contract document—
+requires `Authorization: Bearer <token>`.
+
+The machine-readable OpenAPI 3.1 contract is available in
+[`docs/companion-api.openapi.json`](docs/companion-api.openapi.json) and, while the API is running,
+from authenticated `GET /v1/openapi.json`. Paired-LAN/phone access is not implemented yet; the
+current listener is loopback-only.
+
+Read operations list conversations, active message paths, sanitized provider summaries, and Ark's
+cached model inventory. `POST /v1/conversations`, `PATCH /v1/conversations/{conversationId}`,
+`POST /v1/conversations/{conversationId}/messages`, and `POST /v1/messages/{messageId}/cancel`
+create/update conversations and drive the same durable generation lifecycle as the desktop UI.
+Every mutation requires a unique `Idempotency-Key`; matching retries—even after an application
+restart—return the original transaction result without duplicating a turn or provider request,
+while reuse for a different request fails with `409`. Message state and streaming content are
+read by polling the active message path. Selecting a non-local provider has the same outbound-data
+implications as selecting it in Ark's desktop composer.
+
 ## Planning Docs
 
 - [Implementation plan](implementation-plan.md)
@@ -107,6 +134,7 @@ Ark can also create a standalone, verified backup of the current workspace datab
 - [Troubleshooting](docs/troubleshooting.md)
 - [Building and installing a local desktop package](docs/installing.md)
 - [Privacy and data flow](docs/privacy-and-data-flow.md)
+- [Companion API OpenAPI contract](docs/companion-api.openapi.json)
 - [Security policy and vulnerability reporting](SECURITY.md)
 - [Incident response](docs/incident-response.md)
 - [Secure development checklist](docs/secure-development-checklist.md)
@@ -121,16 +149,16 @@ Ark can also create a standalone, verified backup of the current workspace datab
 
 ## Known MVP Limitations
 
-- Ark supports Ollama, an OpenAI-compatible local inference host, and the setup-script-installed
-  managed llama.cpp host. No cloud provider is enabled.
-- Cloud providers, RAG, document chat, memory, agents, voice, image generation, and local tools are intentionally not implemented.
+- Ark supports Ollama, an OpenAI-compatible local inference host, the setup-script-installed
+  managed llama.cpp host, and opt-in OpenAI. No cloud provider is configured or selected by default.
+- Additional cloud providers, RAG, document chat, memory, agents, voice, and image generation are intentionally not implemented.
 - Command palette is deferred.
 - GPU detection is not implemented; diagnostics use observed benchmark results and basic system information.
 - Workspace path changes require an app restart and do not automatically migrate existing data.
 - Edit and retry create append-only branches. Branch browsing/switching beyond the active branch is still limited.
 - Conversation JSON import validates schema, message roles/statuses, and branch references, but full workspace backup/restore is later-phase work.
-- API keys are not needed by the current local providers. Ark's credential boundary is ready for
-  future authenticated providers: values are stored in the operating-system credential store,
+- API keys are optional for local providers and required for curated OpenAI. Values are stored in
+  the operating-system credential store,
   never SQLite, localStorage, conversation exports, diagnostics, or automatic clipboard writes.
 
 ## Roadmap

@@ -1,3 +1,4 @@
+use crate::attachments::Attachment;
 use crate::chat::{Conversation, Message};
 use crate::errors::AppError;
 use crate::providers::ProviderConfig;
@@ -24,7 +25,42 @@ pub fn conversation_messages_fingerprint(messages: &[Message]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub const CONVERSATION_EXPORT_SCHEMA_VERSION: u32 = 1;
+/// FTR-008 schema-v2 fingerprint: message content plus stable attachment content identity.
+/// Attachment IDs, timestamps, and linked message IDs are deliberately excluded because import
+/// remaps them. Ordering is the database's stable attachment creation order.
+pub fn conversation_content_fingerprint(
+    messages: &[Message],
+    attachments: &[AttachmentExport],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(conversation_messages_fingerprint(messages).as_bytes());
+    for export in attachments {
+        hasher.update([0u8]);
+        hasher.update(export.attachment.file_name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(export.attachment.sha256.as_bytes());
+        hasher.update([0u8]);
+        if let Some(message_id) = export.attachment.message_id.as_deref() {
+            if let Some(message) = messages.iter().find(|message| message.id == message_id) {
+                hasher.update(b"linked");
+                hasher.update(message.path_index.to_le_bytes());
+                hasher.update(message.role.as_bytes());
+                hasher.update([0u8]);
+                hasher.update(message.content.as_bytes());
+            } else {
+                // Validation rejects this case; keep the hash deterministic before validation.
+                hasher.update(b"invalid-link");
+            }
+        } else {
+            hasher.update(b"staged");
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+pub const CONVERSATION_EXPORT_SCHEMA_VERSION: u32 = 2;
+pub const MIN_CONVERSATION_EXPORT_SCHEMA_VERSION: u32 = 1;
+pub const ATTACHMENT_EXPORT_SCHEMA_VERSION: u32 = 1;
 
 /// COR-009 bounded-import ceilings. Conservative and visible on purpose — raising them is a
 /// deliberate decision, not a side effect of someone hitting the limit.
@@ -41,10 +77,23 @@ pub struct ConversationExport {
     pub conversation: Conversation,
     pub messages: Vec<Message>,
     pub provider: Option<ProviderConfig>,
+    /// Added in schema v2. `default` preserves import compatibility with v1 bundles.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentExport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentExport {
+    pub schema_version: u32,
+    pub attachment: Attachment,
+    pub content: String,
 }
 
 pub fn validate_conversation_export(export: &ConversationExport) -> Result<(), AppError> {
-    if export.schema_version != CONVERSATION_EXPORT_SCHEMA_VERSION {
+    if !(MIN_CONVERSATION_EXPORT_SCHEMA_VERSION..=CONVERSATION_EXPORT_SCHEMA_VERSION)
+        .contains(&export.schema_version)
+    {
         return Err(AppError::invalid_input(
             "Unsupported conversation export schema version.",
         ));
@@ -147,10 +196,60 @@ pub fn validate_conversation_export(export: &ConversationExport) -> Result<(), A
         }
     }
 
+    const MAX_IMPORT_ATTACHMENTS: usize = 10_000;
+    if export.attachments.len() > MAX_IMPORT_ATTACHMENTS {
+        return Err(AppError::invalid_input(format!(
+            "Conversation export contains {} attachments, which exceeds the {MAX_IMPORT_ATTACHMENTS} attachment import limit.",
+            export.attachments.len()
+        )));
+    }
+    let mut attachment_ids = HashSet::new();
+    for attachment_export in &export.attachments {
+        if attachment_export.schema_version != ATTACHMENT_EXPORT_SCHEMA_VERSION {
+            return Err(AppError::invalid_input(
+                "Unsupported attachment export schema version.",
+            ));
+        }
+        let attachment = &attachment_export.attachment;
+        if attachment.id.trim().is_empty() || !attachment_ids.insert(attachment.id.as_str()) {
+            return Err(AppError::invalid_input(
+                "Conversation export contains a missing or duplicate attachment ID.",
+            ));
+        }
+        if attachment.conversation_id != export.conversation.id {
+            return Err(AppError::invalid_input(
+                "Conversation export contains an attachment from a different conversation.",
+            ));
+        }
+        if attachment
+            .message_id
+            .as_deref()
+            .is_some_and(|message_id| !all_ids.contains(message_id))
+        {
+            return Err(AppError::invalid_input(
+                "Conversation export attachment references a message outside the conversation.",
+            ));
+        }
+        let (validated_name, validated_content) = crate::validation::validate_attachment(
+            &attachment.file_name,
+            &attachment_export.content,
+        )?;
+        let digest = format!("{:x}", Sha256::digest(validated_content.as_bytes()));
+        if validated_name != attachment.file_name
+            || attachment.byte_size != validated_content.len() as i64
+            || attachment.sha256 != digest
+        {
+            return Err(AppError::invalid_input(
+                "Conversation export attachment metadata does not match its content.",
+            ));
+        }
+    }
+
     Ok(())
 }
 
-pub const WORKSPACE_EXPORT_SCHEMA_VERSION: u32 = 1;
+pub const WORKSPACE_EXPORT_SCHEMA_VERSION: u32 = 2;
+pub const MIN_WORKSPACE_EXPORT_SCHEMA_VERSION: u32 = 1;
 
 /// FTR-008: one entry per included conversation. `sha256` is computed over the conversation's
 /// serialized `messages` only (not the wrapping `ConversationExport`, whose `conversation`/
@@ -163,7 +262,29 @@ pub struct WorkspaceExportManifestEntry {
     pub conversation_id: String,
     pub title: String,
     pub message_count: usize,
+    #[serde(default)]
+    pub attachment_count: usize,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntityVersions {
+    pub conversation: u32,
+    pub message: u32,
+    pub provider: u32,
+    pub attachment: u32,
+}
+
+impl WorkspaceEntityVersions {
+    pub const fn current() -> Self {
+        Self {
+            conversation: CONVERSATION_EXPORT_SCHEMA_VERSION,
+            message: 1,
+            provider: 1,
+            attachment: ATTACHMENT_EXPORT_SCHEMA_VERSION,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +296,10 @@ pub struct WorkspaceExportManifest {
     /// re-import) can tell what this bundle was scoped to without re-deriving it from the entry
     /// list.
     pub scope: String,
+    /// Added in workspace schema v2. The manifest records the version of every included entity
+    /// family instead of leaving those versions implicit in Rust types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_versions: Option<WorkspaceEntityVersions>,
     pub entries: Vec<WorkspaceExportManifestEntry>,
 }
 
@@ -194,7 +319,9 @@ pub struct WorkspaceExport {
 pub const MAX_IMPORT_CONVERSATIONS: usize = 5_000;
 
 pub fn validate_workspace_export(export: &WorkspaceExport) -> Result<(), AppError> {
-    if export.manifest.schema_version != WORKSPACE_EXPORT_SCHEMA_VERSION {
+    if !(MIN_WORKSPACE_EXPORT_SCHEMA_VERSION..=WORKSPACE_EXPORT_SCHEMA_VERSION)
+        .contains(&export.manifest.schema_version)
+    {
         return Err(AppError::invalid_input(
             "Unsupported workspace export schema version.",
         ));
@@ -211,19 +338,61 @@ pub fn validate_workspace_export(export: &WorkspaceExport) -> Result<(), AppErro
             "Workspace export manifest does not match its conversation entries.",
         ));
     }
+    if export.manifest.schema_version >= 2
+        && export.manifest.entity_versions.as_ref() != Some(&WorkspaceEntityVersions::current())
+    {
+        return Err(AppError::invalid_input(
+            "Workspace export entity versions are missing or unsupported.",
+        ));
+    }
     let manifest_ids: HashSet<&str> = export
         .manifest
         .entries
         .iter()
         .map(|entry| entry.conversation_id.as_str())
         .collect();
+    if manifest_ids.len() != export.manifest.entries.len() {
+        return Err(AppError::invalid_input(
+            "Workspace export manifest contains duplicate conversation IDs.",
+        ));
+    }
     for conversation_export in &export.conversations {
-        if !manifest_ids.contains(conversation_export.conversation.id.as_str()) {
+        let Some(entry) = export
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.conversation_id == conversation_export.conversation.id)
+        else {
             return Err(AppError::invalid_input(
                 "Workspace export contains a conversation not listed in its manifest.",
             ));
+        };
+        if export.manifest.schema_version >= 2
+            && conversation_export.schema_version != CONVERSATION_EXPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::invalid_input(
+                "Workspace export conversation entity version does not match its manifest.",
+            ));
         }
         validate_conversation_export(conversation_export)?;
+        let expected_hash = if export.manifest.schema_version >= 2 {
+            conversation_content_fingerprint(
+                &conversation_export.messages,
+                &conversation_export.attachments,
+            )
+        } else {
+            conversation_messages_fingerprint(&conversation_export.messages)
+        };
+        if entry.title != conversation_export.conversation.title
+            || entry.message_count != conversation_export.messages.len()
+            || (export.manifest.schema_version >= 2
+                && entry.attachment_count != conversation_export.attachments.len())
+            || entry.sha256 != expected_hash
+        {
+            return Err(AppError::invalid_input(
+                "Workspace export manifest counts or hashes do not match its content.",
+            ));
+        }
     }
     Ok(())
 }
@@ -345,6 +514,7 @@ mod tests {
             },
             messages,
             provider: None,
+            attachments: Vec::new(),
         }
     }
 

@@ -34,6 +34,9 @@ pub struct AppBootstrap {
     /// FTR-003: every persona (active and archived), each already carrying its *current*
     /// version's content — mirrors `projects` exactly.
     pub personas: Vec<Persona>,
+    /// FTR-003: portable workspace-wide fallback instructions. More-specific project, persona,
+    /// and conversation instructions override this value at generation time.
+    pub application_instructions: Option<String>,
     pub workspace_path: String,
     pub workspace: WorkspaceInfo,
     /// ARC-006: device-scoped (theme, built-in runtime model path) — see
@@ -60,6 +63,9 @@ pub fn get_app_bootstrap(app: &AppHandle, state: &AppState) -> Result<AppBootstr
     let models = db.list_all_models()?;
     let projects = db.list_projects()?;
     let personas = db.list_personas()?;
+    let application_instructions = db
+        .get_setting(crate::config::APPLICATION_INSTRUCTIONS_SETTING_KEY)?
+        .filter(|value| !value.trim().is_empty());
 
     // ARC-006: `appearance.theme` is the pre-ARC-006 workspace-scoped setting this device
     // settings file replaces — read here only as a one-time migration seed (see
@@ -93,6 +99,7 @@ pub fn get_app_bootstrap(app: &AppHandle, state: &AppState) -> Result<AppBootstr
         models,
         projects,
         personas,
+        application_instructions,
         workspace_path: workspace_info.database_path.clone(),
         workspace: workspace_info,
         device_settings,

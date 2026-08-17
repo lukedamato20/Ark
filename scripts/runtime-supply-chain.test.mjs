@@ -1,7 +1,43 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { selectArtifact, validateArchiveEntries, verifyArtifactBytes } from "./runtime-supply-chain.mjs";
+import {
+  measureArchivePayload,
+  selectArtifact,
+  validateModelCatalog,
+  validateArchiveEntries,
+  validateArchiveExpansion,
+  verifyArtifactBytes,
+} from "./runtime-supply-chain.mjs";
+
+test("managed model catalog stays pinned to reviewed runtime targets and immutable sources", async () => {
+  const catalog = JSON.parse(await readFile(new URL("../config/model-catalog.json", import.meta.url), "utf8"));
+  const nativeManifest = JSON.parse(
+    await readFile(new URL("../config/native-artifacts.json", import.meta.url), "utf8"),
+  );
+  const releaseCapabilities = JSON.parse(
+    await readFile(new URL("../config/release-capabilities.json", import.meta.url), "utf8"),
+  );
+  assert.equal(validateModelCatalog(catalog, nativeManifest, releaseCapabilities), 1);
+
+  const floating = structuredClone(catalog);
+  floating.models[0].downloadUrl = "https://huggingface.co/Qwen/model/resolve/main/model.gguf";
+  assert.throws(
+    () => validateModelCatalog(floating, nativeManifest, releaseCapabilities),
+    /floating or non-HTTPS/u,
+  );
+
+  const unsupported = structuredClone(catalog);
+  unsupported.models[0].compatibility.platforms.push("freebsd-x64");
+  assert.throws(
+    () => validateModelCatalog(unsupported, nativeManifest, releaseCapabilities),
+    /platform claims drift/u,
+  );
+});
 
 function fixtureArtifact(bytes) {
   return {
@@ -33,6 +69,33 @@ test("archive validation rejects traversal, absolute paths, links, and device en
     { path: "safe/device", type: "b" },
   ]) {
     assert.throws(() => validateArchiveEntries([entry]));
+  }
+});
+
+test("archive expansion limits reject decompression bombs before filesystem extraction", () => {
+  assert.equal(validateArchiveExpansion(1_024, 200 * 1_024), 200 * 1_024);
+  assert.throws(() => validateArchiveExpansion(1_024, 200 * 1_024 + 1), /expansion exceeded/u);
+  assert.equal(validateArchiveExpansion(100 * 1024 * 1024, 4 * 1024 * 1024 * 1024), 4 * 1024 * 1024 * 1024);
+  assert.throws(() => validateArchiveExpansion(100 * 1024 * 1024, 4 * 1024 * 1024 * 1024 + 1), /safety limit/u);
+  assert.throws(() => validateArchiveExpansion(0, 0), /Archive size is invalid/u);
+});
+
+test("archive payload inspection streams and counts members without extracting to disk", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ark-archive-measure-"));
+  const payload = Buffer.alloc(64 * 1024, 0x61);
+  const archive = path.join(directory, "fixture.tar");
+  try {
+    await writeFile(path.join(directory, "payload.bin"), payload);
+    const created = spawnSync("tar", ["-cf", archive, "-C", directory, "payload.bin"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(created.status, 0, created.stderr);
+    const archiveBytes = (await stat(archive)).size;
+
+    assert.equal(await measureArchivePayload(archive, archiveBytes), payload.length);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

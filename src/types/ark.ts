@@ -42,6 +42,8 @@ export interface Conversation {
 export interface Project {
   id: string;
   name: string;
+  /** CODE-003: canonical codebase bound for Ark Code. This is distinct from Ark's storage Workspace. */
+  repositoryPath?: string | null;
   /** `null` means no project-level instructions are injected. */
   instructions?: string | null;
   defaultProviderId?: string | null;
@@ -63,6 +65,8 @@ export interface Project {
 export interface ProjectDeletionPreview {
   project: Project;
   conversationCount: number;
+  /** Attachments stay with their retained conversations; this count makes that explicit. */
+  attachmentCount: number;
 }
 
 /** FTR-003: a reusable, named instruction identity a conversation can be assigned to,
@@ -167,6 +171,130 @@ export interface ToolStatus {
   activeGrant?: ToolCapabilityGrant | null;
 }
 
+export type RepositoryEntryKind = "directory" | "file" | "symlink";
+
+/** CODE-004: one bounded, ignore-aware entry beneath a Project's bound Repository. */
+export interface RepositoryEntry {
+  path: string;
+  kind: RepositoryEntryKind;
+  byteSize?: number | null;
+  contextEligible: boolean;
+}
+
+export interface RepositoryDirectoryListing {
+  path: string;
+  entries: RepositoryEntry[];
+  truncated: boolean;
+}
+
+export interface RepositoryFileRead {
+  path: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  content: string;
+  sha256: string;
+  truncated: boolean;
+  nextStartLine?: number | null;
+}
+
+export interface RepositorySearchMatch {
+  path: string;
+  lineNumber: number;
+  line: string;
+}
+
+export interface RepositorySearchResult {
+  matches: RepositorySearchMatch[];
+  filesScanned: number;
+  bytesScanned: number;
+  skippedFiles: number;
+  truncated: boolean;
+}
+
+export interface RepositoryMap {
+  entries: RepositoryEntry[];
+  inspectedFiles: number;
+  skippedFiles: number;
+  truncated: boolean;
+}
+
+export interface RepositoryGitStatus {
+  clean: boolean;
+  porcelain: string;
+}
+
+export interface RepositoryGitDiff {
+  workingTree: string;
+  staged: string;
+}
+
+export type CodeRunState =
+  | "queued"
+  | "planning"
+  | "awaiting_approval"
+  | "executing_tool"
+  | "observing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type CodeRecoveryOutcome = "applied" | "not_applied" | "diverged" | "unknown";
+
+/** CODE-007: one persistent Ark Code thread, owned by an existing Project. */
+export interface CodeSession {
+  id: string;
+  projectId: string;
+  title: string;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** ADR 0003: an immutable run attempt. Resume/retry creates a child run. */
+export interface CodeAgentRun {
+  id: string;
+  sessionId: string;
+  parentRunId?: string | null;
+  providerId: string;
+  modelId: string;
+  repositoryPathSnapshot: string;
+  repositoryIdentityHash: string;
+  state: CodeRunState;
+  maxSteps: number;
+  maxActiveMs: number;
+  maxTokens: number;
+  maxCostMicrounits?: number | null;
+  stepsUsed: number;
+  activeElapsedMs: number;
+  reservedTokens: number;
+  actualTokens: number;
+  actualCostMicrounits?: number | null;
+  cancelRequestedAt?: string | null;
+  terminalReason?: string | null;
+  recoveryOutcome?: CodeRecoveryOutcome | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface CodeRunEvent {
+  runId: string;
+  sequence: number;
+  schemaVersion: number;
+  kind: string;
+  state: CodeRunState;
+  summary: string;
+  createdAt: string;
+}
+
+export interface CodeSessionDetail {
+  session: CodeSession;
+  runs: CodeAgentRun[];
+  events: CodeRunEvent[];
+}
+
 /** CMP-003: the built-in "notes" tool's own data — a short scratch note attached to a
  * conversation. */
 export interface ConversationNote {
@@ -265,6 +393,22 @@ export interface BranchAlternative {
   branchName?: string | null;
 }
 
+/** FTR-005: compact whole-conversation topology node; full content stays behind `getMessage`. */
+export interface BranchTopologyNode {
+  messageId: string;
+  parentMessageId?: string | null;
+  revisionOfMessageId?: string | null;
+  pathIndex: number;
+  role: Message["role"];
+  createdAt: string;
+  status: MessageStatus;
+  contentPreview: string;
+  isActive: boolean;
+  branchName?: string | null;
+  providerId?: string | null;
+  modelId?: string | null;
+}
+
 export type DestinationClass = "loopback" | "private_lan" | "public";
 
 /**
@@ -301,6 +445,8 @@ export interface ProviderConfig {
   /** SEC-001: computed in Rust from the provider's base URL — the single source of truth. */
   destinationClass: DestinationClass;
   capabilities: ProviderCapabilities;
+  /** True for providers created by the user and therefore eligible for deletion. */
+  isUserManaged: boolean;
   isEnabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -335,6 +481,8 @@ export interface WorkspaceProtectionChange {
   recoveryKey?: string | null;
 }
 
+export type ToolCallingMode = "native" | "prompted" | "unsupported";
+
 export interface ModelInfo {
   id: string;
   providerId: string;
@@ -343,6 +491,7 @@ export interface ModelInfo {
   contextWindow?: number | null;
   supportsStreaming: boolean;
   supportsTools: boolean;
+  toolCallingMode: ToolCallingMode;
   supportsVision: boolean;
   supportsEmbeddings: boolean;
   isAvailable: boolean;
@@ -372,6 +521,8 @@ export interface AppBootstrap {
   /** FTR-003: every persona (active and archived), each already carrying its current version's
    * content — mirrors `projects` exactly. */
   personas: Persona[];
+  /** FTR-003: portable workspace-wide fallback instructions. */
+  applicationInstructions: string | null;
   workspacePath: string;
   workspace: WorkspaceInfo;
   /** ARC-006: device-scoped (theme, built-in runtime model path) — see docs/settings-catalog.md. */
@@ -388,6 +539,9 @@ export interface AppBootstrap {
 export interface DeviceSettings {
   theme: ThemeMode;
   builtInModelPath?: string | null;
+  /** FTR-006: absolute device-local override for catalog-managed GGUF storage. Null uses Ark's
+   * per-user application-data models directory. */
+  managedModelDirectory?: string | null;
   /** OPS-001: opt-in, off by default. Never transmitted anywhere automatically — see the
    * diagnostics bundle export flow for the only way crash/log data ever leaves the device. */
   crashCaptureEnabled: boolean;
@@ -571,13 +725,77 @@ export interface BuiltInRuntimeStatus {
   running: boolean;
   port?: number | null;
   modelPath?: string | null;
-  /** COR-012: whether the llama-server binary is actually present on disk (not bundled by default). */
+  /** COR-012/FTR-006: whether the verified development or packaged llama-server resource exists. */
   binaryInstalled: boolean;
   binaryVerified: boolean;
   runtimeProvenance?: RuntimeProvenance | null;
   modelProvenance?: ModelProvenance | null;
   state: RuntimeLifecycleState;
   failure?: RuntimeFailure | null;
+}
+
+export interface ManagedModelCompatibility {
+  runtime: string;
+  runtimeVersion: string;
+  format: string;
+  platforms: string[];
+}
+
+export interface ManagedModelCatalogEntry {
+  id: string;
+  displayName: string;
+  publisher: string;
+  description: string;
+  sourceRepository: string;
+  sourceCommit: string;
+  downloadUrl: string;
+  allowedDownloadHostSuffixes: string[];
+  fileName: string;
+  sizeBytes: number;
+  sha256: string;
+  license: string;
+  licenseUrl: string;
+  quantization: string;
+  contextWindow: number;
+  architecture: string;
+  parameterCount: string;
+  minimumAvailableMemoryBytes: number;
+  recommendedAvailableMemoryBytes: number;
+  compatibility: ManagedModelCompatibility;
+}
+
+export interface ManagedModelStatus {
+  model: ManagedModelCatalogEntry;
+  storageDirectory: string;
+  modelPath: string;
+  installed: boolean;
+  verified: boolean;
+  partialBytes: number;
+}
+
+export type ManagedModelOperation = "download" | "load";
+export type HardwareFitRisk = "safe" | "warning" | "blocked";
+
+export interface ManagedModelPreflight {
+  modelId: string;
+  operation: ManagedModelOperation;
+  risk: HardwareFitRisk;
+  availableMemoryBytes: number;
+  minimumAvailableMemoryBytes: number;
+  recommendedAvailableMemoryBytes: number;
+  availableDiskBytes: number;
+  requiredDiskBytes: number;
+  advisories: string[];
+  advancedOverrideAllowed: boolean;
+}
+
+export interface ManagedModelDownloadProgress {
+  schemaVersion: number;
+  modelId: string;
+  status: string;
+  completedBytes: number;
+  totalBytes: number;
+  resumed: boolean;
 }
 
 export interface AppErrorShape {
@@ -626,6 +844,7 @@ export interface WorkspaceImportPreviewEntry {
   conversationId: string;
   title: string;
   messageCount: number;
+  attachmentCount: number;
   duplicateOfLocalId?: string | null;
 }
 

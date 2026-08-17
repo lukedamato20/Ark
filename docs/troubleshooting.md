@@ -38,9 +38,10 @@ Settings → Provider → the built-in runtime card shows a red alert box with a
 whenever it fails, plus (for a crash) a short excerpt of the runtime's own recent, redacted log
 output.
 
-- **Runtime not installed** — Ark doesn't bundle `llama-server` by default. Run
+- **Runtime not installed in a development build** — run
   `scripts/setup-llama.ps1` (Windows) or `scripts/setup-llama.sh` (macOS/Linux) from the repo root,
-  then reopen Settings.
+  then reopen Settings. A qualified packaged release includes its target's verified runtime; this
+  message there means the installation is incomplete or damaged and should be reinstalled.
 - **Verification failed** — The installed binary or its supporting files don't match Ark's
   reviewed hash manifest. This blocks Start entirely rather than running unverified files —
   re-run the setup script to get a clean install.
@@ -53,11 +54,9 @@ output.
 - **Did not become ready within 30 seconds / health endpoint unreachable** — The process started
   but never finished loading in time. A very large model on slow storage can genuinely take longer
   than that; also check the log excerpt for a port conflict or an actual crash.
-- **"The managed llama.cpp runtime is disabled in release builds..."** — This is an intentional
-  gate: the bundled runtime's upstream HTTP server doesn't authenticate every route or restrict
-  browser-origin access strongly enough for Ark to enable it outside a debug build (see
-  [docs/data-at-rest.md](data-at-rest.md) and the implementation plan's SEC-002 entry). It only
-  runs in local development builds today.
+- **Built-in provider absent in a release candidate** — the authenticated isolating proxy is
+  complete, but the UI capability remains hidden until Windows/macOS/Linux packaged-build jobs
+  have all installed, executed, and bundled the exact reviewed runtime for that release.
 
 ## A provider (Ollama or another server) won't connect
 

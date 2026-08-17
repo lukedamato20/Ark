@@ -22,6 +22,11 @@ pub struct DeviceSettings {
     /// Absolute path to the last GGUF model file selected for the built-in runtime on this
     /// device. `None` until the user starts the built-in runtime at least once.
     pub built_in_model_path: Option<String>,
+    /// FTR-006: optional user-selected directory for catalog-managed GGUF files. This is
+    /// device-scoped because absolute filesystem locations are never portable with a workspace.
+    /// `None` uses Ark's OS application-data `models` directory.
+    #[serde(default)]
+    pub managed_model_directory: Option<String>,
     /// OPS-001: opt-in, off by default. When true, an uncaught panic is recorded (redacted) to
     /// the local diagnostics log file so it can be included in a diagnostics bundle after
     /// restart — never transmitted anywhere automatically; export is always a separate,
@@ -49,6 +54,7 @@ impl Default for DeviceSettings {
         Self {
             theme: "dark".to_string(),
             built_in_model_path: None,
+            managed_model_directory: None,
             crash_capture_enabled: false,
             completion_notifications_enabled: false,
             perf_metrics_enabled: false,
@@ -138,10 +144,17 @@ pub fn save_device_settings(app: &AppHandle, settings: &DeviceSettings) -> Resul
 /// is no partial-update/merge logic to get right here.
 pub fn update_device_settings(
     app: &AppHandle,
-    settings: DeviceSettings,
+    mut settings: DeviceSettings,
 ) -> Result<DeviceSettings, AppError> {
     if settings.theme != "dark" && settings.theme != "light" {
         return Err(AppError::invalid_input("Theme must be dark or light."));
+    }
+    if let Some(directory) = settings.managed_model_directory.as_deref() {
+        let canonical = crate::validation::validate_directory_target_path(
+            directory,
+            "Managed model directory",
+        )?;
+        settings.managed_model_directory = Some(canonical.display().to_string());
     }
     save_device_settings(app, &settings)?;
     Ok(settings)
@@ -166,6 +179,7 @@ mod tests {
         let settings = DeviceSettings {
             theme: "light".to_string(),
             built_in_model_path: Some("C:\\models\\model.gguf".to_string()),
+            managed_model_directory: Some("C:\\models".to_string()),
             crash_capture_enabled: true,
             completion_notifications_enabled: true,
             perf_metrics_enabled: true,
@@ -187,6 +201,7 @@ mod tests {
         let settings = DeviceSettings {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
+            managed_model_directory: None,
             crash_capture_enabled: false,
             completion_notifications_enabled: false,
             perf_metrics_enabled: false,
@@ -195,6 +210,10 @@ mod tests {
         assert!(
             json.contains("\"builtInModelPath\""),
             "expected camelCase field name in: {json}"
+        );
+        assert!(
+            json.contains("\"managedModelDirectory\""),
+            "expected camelCase managed-model field name in: {json}"
         );
         assert!(
             json.contains("\"completionNotificationsEnabled\""),

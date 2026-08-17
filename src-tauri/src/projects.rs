@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// CODE-003: the canonical, user-selected codebase Ark Code may operate on. This is not
+    /// Ark's storage Workspace; `None` means this Project has no Repository bound.
+    pub repository_path: Option<String>,
     /// `None` means no project-level instructions are injected. See `generation.rs`'s
     /// `resolve_text_settings` for how this composes with a conversation's own override.
     pub instructions: Option<String>,
@@ -51,4 +54,7 @@ pub struct UpdateProjectChanges<'a> {
 pub struct ProjectDeletionPreview {
     pub project: Project,
     pub conversation_count: i64,
+    /// Attachments remain owned by their conversations and are retained when the project is
+    /// deleted; surfaced explicitly so "files are safe" is visible before confirmation.
+    pub attachment_count: i64,
 }

@@ -91,7 +91,7 @@ pub async fn run_diagnostics(
         let db = crate::commands::lock_db(state)?;
         db.get_provider(&provider_id)?
     };
-    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider);
+    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider)?;
     let runtime = ProviderRegistry::create_with_bearer_token(provider.clone(), bearer_token)?;
     let provider_health = runtime.health().await;
 
@@ -173,10 +173,12 @@ async fn run_benchmark(runtime: &dyn Provider, model: String) -> Result<Benchmar
         .stream_chat(
             ProviderChatRequest {
                 model,
+                system_instructions: None,
                 messages: vec![ChatMessage {
                     role: "user".to_string(),
                     content: "Reply with one short sentence about local AI readiness.".to_string(),
                 }],
+                untrusted_context: Vec::new(),
                 temperature: Some(0.2),
                 max_tokens: Some(64),
                 user_deadline: Some(std::time::Duration::from_secs(30)),
@@ -352,6 +354,7 @@ mod tests {
             capabilities: crate::providers::ProviderCapabilities::for_provider_type(
                 DEFAULT_PROVIDER_TYPE,
             ),
+            is_user_managed: false,
             is_enabled: true,
             created_at: "2026-07-02T00:00:00Z".to_string(),
             updated_at: "2026-07-02T00:00:00Z".to_string(),

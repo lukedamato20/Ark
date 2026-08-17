@@ -1186,6 +1186,30 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/bstr@1.13.1",
+      "name": "bstr",
+      "version": "1.13.1",
+      "purl": "pkg:cargo/bstr@1.13.1",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/BurntSushi/bstr"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/bumpalo@3.20.3",
       "name": "bumpalo",
       "version": "3.20.3",
@@ -2135,30 +2159,6 @@
         {
           "type": "vcs",
           "url": "https://github.com/TedDriggs/darling"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/dbus@0.9.11",
-      "name": "dbus",
-      "version": "0.9.11",
-      "purl": "pkg:cargo/dbus@0.9.11",
-      "licenses": [
-        {
-          "expression": "Apache-2.0/MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/diwic/dbus-rs"
         }
       ],
       "properties": [
@@ -3514,54 +3514,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/gdkx11-sys@0.18.2",
-      "name": "gdkx11-sys",
-      "version": "0.18.2",
-      "purl": "pkg:cargo/gdkx11-sys@0.18.2",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/gtk-rs/gtk3-rs"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/gdkx11@0.18.2",
-      "name": "gdkx11",
-      "version": "0.18.2",
-      "purl": "pkg:cargo/gdkx11@0.18.2",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/gtk-rs/gtk3-rs"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:cargo/generic-array@0.14.7",
       "name": "generic-array",
       "version": "0.14.7",
@@ -3791,6 +3743,30 @@
         {
           "type": "vcs",
           "url": "https://github.com/rust-lang/glob"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/globset@0.4.19",
+      "name": "globset",
+      "version": "0.4.19",
+      "purl": "pkg:cargo/globset@0.4.19",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/BurntSushi/ripgrep/tree/master/crates/globset"
         }
       ],
       "properties": [
@@ -4618,6 +4594,30 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:cargo/ignore@0.4.32",
+      "name": "ignore",
+      "version": "0.4.32",
+      "purl": "pkg:cargo/ignore@0.4.32",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ark:ecosystem",
+          "value": "cargo"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:cargo/indexmap@1.9.3",
       "name": "indexmap",
       "version": "1.9.3",
@@ -5098,42 +5098,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/libappindicator-sys@0.9.0",
-      "name": "libappindicator-sys",
-      "version": "0.9.0",
-      "purl": "pkg:cargo/libappindicator-sys@0.9.0",
-      "licenses": [
-        {
-          "expression": "Apache-2.0 OR MIT"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/libappindicator@0.9.0",
-      "name": "libappindicator",
-      "version": "0.9.0",
-      "purl": "pkg:cargo/libappindicator@0.9.0",
-      "licenses": [
-        {
-          "expression": "Apache-2.0 OR MIT"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:cargo/libc@0.2.186",
       "name": "libc",
       "version": "0.2.186",
@@ -5147,54 +5111,6 @@
         {
           "type": "vcs",
           "url": "https://github.com/rust-lang/libc"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/libdbus-sys@0.2.7",
-      "name": "libdbus-sys",
-      "version": "0.2.7",
-      "purl": "pkg:cargo/libdbus-sys@0.2.7",
-      "licenses": [
-        {
-          "expression": "Apache-2.0/MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/diwic/dbus-rs"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/libloading@0.7.4",
-      "name": "libloading",
-      "version": "0.7.4",
-      "purl": "pkg:cargo/libloading@0.7.4",
-      "licenses": [
-        {
-          "expression": "ISC"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/nagisa/rust_libloading/"
         }
       ],
       "properties": [
@@ -10294,30 +10210,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:cargo/tray-icon@0.24.1",
-      "name": "tray-icon",
-      "version": "0.24.1",
-      "purl": "pkg:cargo/tray-icon@0.24.1",
-      "licenses": [
-        {
-          "expression": "MIT OR Apache-2.0"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/tauri-apps/tray-icon"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:cargo/try-lock@0.2.5",
       "name": "try-lock",
       "version": "0.2.5",
@@ -12803,54 +12695,6 @@
         {
           "type": "vcs",
           "url": "https://github.com/tauri-apps/wry"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/x11-dl@2.21.0",
-      "name": "x11-dl",
-      "version": "2.21.0",
-      "purl": "pkg:cargo/x11-dl@2.21.0",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/AltF02/x11-rs.git"
-        }
-      ],
-      "properties": [
-        {
-          "name": "ark:ecosystem",
-          "value": "cargo"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:cargo/x11@2.21.0",
-      "name": "x11",
-      "version": "2.21.0",
-      "purl": "pkg:cargo/x11@2.21.0",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "externalReferences": [
-        {
-          "type": "vcs",
-          "url": "https://github.com/AltF02/x11-rs.git"
         }
       ],
       "properties": [

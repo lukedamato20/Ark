@@ -56,6 +56,15 @@ pub fn resolve_workspace_for_startup(
     app: &AppHandle,
 ) -> Result<(Workspace, Option<AppError>), AppError> {
     let default_root = default_workspace_root(app)?;
+    let default_root = crate::validation::validate_directory_target_path(
+        default_root.to_str().ok_or_else(|| {
+            AppError::new(
+                "workspace_error",
+                "The default workspace path is not valid Unicode.",
+            )
+        })?,
+        "Default workspace path",
+    )?;
     let config_path = workspace_config_path(app)?;
     let (configured_root, config_error) = read_workspace_config_recoverably(&config_path);
     let root = configured_root.unwrap_or_else(|| default_root.clone());
@@ -98,8 +107,7 @@ pub fn set_workspace_root(
 ) -> Result<WorkspaceInfo, AppError> {
     // COR-008: centralized validator (also rejects embedded NUL bytes, which the previous
     // inline check here did not).
-    let validated = crate::validation::validate_workspace_path(root)?;
-    let path = PathBuf::from(validated);
+    let path = crate::validation::validate_workspace_path(root)?;
 
     prepare_workspace_root(&path)?;
     if copy_data {
@@ -107,6 +115,15 @@ pub fn set_workspace_root(
     }
 
     let default_root = default_workspace_root(app)?;
+    let default_root = crate::validation::validate_directory_target_path(
+        default_root.to_str().ok_or_else(|| {
+            AppError::new(
+                "workspace_error",
+                "The default workspace path is not valid Unicode.",
+            )
+        })?,
+        "Default workspace path",
+    )?;
     let config_path = workspace_config_path(app)?;
     write_workspace_config(
         &config_path,
@@ -127,6 +144,15 @@ pub fn set_workspace_root(
 
 pub fn reset_workspace_root(app: &AppHandle) -> Result<WorkspaceInfo, AppError> {
     let default_root = default_workspace_root(app)?;
+    let default_root = crate::validation::validate_directory_target_path(
+        default_root.to_str().ok_or_else(|| {
+            AppError::new(
+                "workspace_error",
+                "The default workspace path is not valid Unicode.",
+            )
+        })?,
+        "Default workspace path",
+    )?;
     prepare_workspace_root(&default_root)?;
 
     let config_path = workspace_config_path(app)?;
@@ -185,10 +211,23 @@ fn read_workspace_config(path: &Path) -> Result<Option<PathBuf>, AppError> {
         )
     })?;
 
-    Ok(config
+    let Some(raw_root) = config
         .workspace_root
         .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from))
+    else {
+        return Ok(None);
+    };
+    crate::validation::validate_workspace_path(&raw_root)
+        .map(Some)
+        .map_err(|error| {
+            AppError::new(
+                "workspace_change_interrupted",
+                format!(
+                    "The configured workspace path is unsafe or invalid ({}). Ark left the selection file untouched; choose a workspace to replace it safely.",
+                    error.message
+                ),
+            )
+        })
 }
 
 fn config_previous_path(path: &Path) -> PathBuf {
@@ -318,42 +357,7 @@ fn prepare_workspace_root(root: &Path) -> Result<(), AppError> {
 }
 
 fn probe_workspace_root(root: &Path, probe_name: &str) -> Result<(), AppError> {
-    let probe = root.join(probe_name);
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return AppError::new(
-                    "workspace_missing",
-                    "The workspace folder disappeared while Ark was checking it.",
-                );
-            }
-            let classified = AppError::from(error);
-            AppError::new(
-                if classified.code == "io_error" {
-                    "workspace_error".to_string()
-                } else {
-                    classified.code
-                },
-                format!("Workspace is not writable: {}", classified.message),
-            )
-        })?;
-    crate::file_permissions::harden_file(&probe)?;
-    // A crash between create and removal can leave only a uniquely named zero-byte probe. It
-    // never collides with the next run because names are UUIDs, and may be removed manually.
-    // A live cleanup failure is surfaced instead of silently leaving a file behind.
-    fs::remove_file(&probe).map_err(|error| {
-        AppError::new(
-            "workspace_cleanup_failed",
-            format!(
-                "Workspace is writable, but Ark could not remove its probe '{}': {error}",
-                probe.display()
-            ),
-        )
-    })?;
-    Ok(())
+    crate::validation::probe_writable_directory(root, probe_name, "Workspace", "workspace")
 }
 
 #[cfg(test)]
@@ -478,25 +482,34 @@ mod tests {
         let root = temp_dir("config-atomic");
         fs::create_dir_all(&root).expect("create config dir");
         let config_path = root.join("workspace.json");
+        let first = root.join("first");
+        let second = root.join("second");
 
         write_workspace_config(
             &config_path,
             WorkspaceConfig {
-                workspace_root: Some("C:\\first".to_string()),
+                workspace_root: Some(first.display().to_string()),
             },
         )
         .expect("first config write");
         write_workspace_config(
             &config_path,
             WorkspaceConfig {
-                workspace_root: Some("C:\\second".to_string()),
+                workspace_root: Some(second.display().to_string()),
             },
         )
         .expect("replacement config write");
 
         assert_eq!(
             read_workspace_config(&config_path).expect("read config"),
-            Some(PathBuf::from("C:\\second"))
+            Some(
+                crate::validation::validate_directory_target_path(
+                    root.to_str().expect("utf8 root"),
+                    "Config root",
+                )
+                .expect("canonical config root")
+                .join("second")
+            )
         );
         assert!(!config_next_path(&config_path).exists());
         assert!(!config_previous_path(&config_path).exists());
@@ -509,17 +522,28 @@ mod tests {
         fs::create_dir_all(&root).expect("create config dir");
         let config_path = root.join("workspace.json");
         let previous = config_previous_path(&config_path);
+        let preserved = root.join("preserved");
         fs::write(
             &previous,
             serde_json::to_vec(&WorkspaceConfig {
-                workspace_root: Some("C:\\preserved".to_string()),
+                workspace_root: Some(preserved.display().to_string()),
             })
             .expect("serialize fixture"),
         )
         .expect("seed interrupted previous file");
 
         let (selected, error) = read_workspace_config_recoverably(&config_path);
-        assert_eq!(selected, Some(PathBuf::from("C:\\preserved")));
+        assert_eq!(
+            selected,
+            Some(
+                crate::validation::validate_directory_target_path(
+                    root.to_str().expect("utf8 root"),
+                    "Config root",
+                )
+                .expect("canonical config root")
+                .join("preserved")
+            )
+        );
         assert_eq!(
             error.expect("recovery error").code,
             "workspace_change_interrupted"
@@ -549,6 +573,40 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_workspace_config_is_canonicalized_without_modifying_the_original() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("config-symlink");
+        let real_workspace = root.join("real-workspace");
+        fs::create_dir_all(&real_workspace).expect("create real workspace");
+        let linked_workspace = root.join("linked-workspace");
+        symlink(&real_workspace, &linked_workspace).expect("create workspace symlink");
+        let config_path = root.join("workspace.json");
+        let original = serde_json::to_vec(&WorkspaceConfig {
+            workspace_root: Some(linked_workspace.display().to_string()),
+        })
+        .expect("serialize config");
+        fs::write(&config_path, &original).expect("seed symlinked config");
+
+        let (selected, error) = read_workspace_config_recoverably(&config_path);
+
+        assert_eq!(
+            selected,
+            Some(
+                crate::validation::validate_directory_target_path(
+                    real_workspace.to_str().expect("utf8 workspace"),
+                    "Workspace path",
+                )
+                .expect("canonical workspace")
+            )
+        );
+        assert!(error.is_none());
+        assert_eq!(fs::read(&config_path).expect("read original"), original);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn config_writer_refuses_to_overwrite_interrupted_change_artifacts() {
         let root = temp_dir("config-refuse-artifacts");
@@ -560,7 +618,7 @@ mod tests {
         let error = write_workspace_config(
             &config_path,
             WorkspaceConfig {
-                workspace_root: Some("C:\\replacement".to_string()),
+                workspace_root: Some(root.join("replacement").display().to_string()),
             },
         )
         .expect_err("must not overwrite interrupted state");

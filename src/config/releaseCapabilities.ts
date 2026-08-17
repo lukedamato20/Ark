@@ -1,6 +1,6 @@
 import matrix from "../../config/release-capabilities.json";
 
-export type ProviderReleaseMode = "ollama" | "local_inference_host" | "built_in";
+export type ProviderReleaseMode = "ollama" | "local_inference_host" | "built_in" | "openai";
 
 /**
  * FND-001: the typed frontend view of the versioned artifact claim. The JSON file is also

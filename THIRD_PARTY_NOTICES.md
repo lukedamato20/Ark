@@ -43,6 +43,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `brotli` | 8.0.4 | BSD-3-Clause AND MIT |
 | cargo | `brotli-decompressor` | 5.0.3 | BSD-3-Clause/MIT |
 | cargo | `bs58` | 0.5.1 | MIT/Apache-2.0 |
+| cargo | `bstr` | 1.13.1 | MIT OR Apache-2.0 |
 | cargo | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 |
 | cargo | `bytemuck` | 1.25.0 | Zlib OR Apache-2.0 OR MIT |
 | cargo | `byteorder` | 1.5.0 | Unlicense OR MIT |
@@ -83,7 +84,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `darling` | 0.23.0 | MIT |
 | cargo | `darling_core` | 0.23.0 | MIT |
 | cargo | `darling_macro` | 0.23.0 | MIT |
-| cargo | `dbus` | 0.9.11 | Apache-2.0/MIT |
 | cargo | `deranged` | 0.5.8 | MIT OR Apache-2.0 |
 | cargo | `derive_more` | 2.1.1 | MIT |
 | cargo | `derive_more-impl` | 2.1.1 | MIT |
@@ -140,8 +140,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `gdk-pixbuf-sys` | 0.18.0 | MIT |
 | cargo | `gdk-sys` | 0.18.2 | MIT |
 | cargo | `gdkwayland-sys` | 0.18.2 | MIT |
-| cargo | `gdkx11` | 0.18.2 | MIT |
-| cargo | `gdkx11-sys` | 0.18.2 | MIT |
 | cargo | `generic-array` | 0.14.7 | MIT |
 | cargo | `getrandom` | 0.2.17 | MIT OR Apache-2.0 |
 | cargo | `getrandom` | 0.3.4 | MIT OR Apache-2.0 |
@@ -152,6 +150,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `glib-macros` | 0.18.5 | MIT |
 | cargo | `glib-sys` | 0.18.1 | MIT |
 | cargo | `glob` | 0.3.3 | MIT OR Apache-2.0 |
+| cargo | `globset` | 0.4.19 | Unlicense OR MIT |
 | cargo | `gobject-sys` | 0.18.0 | MIT |
 | cargo | `gtk` | 0.18.2 | MIT |
 | cargo | `gtk-sys` | 0.18.2 | MIT |
@@ -186,6 +185,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `ident_case` | 1.0.1 | MIT/Apache-2.0 |
 | cargo | `idna` | 1.1.0 | MIT OR Apache-2.0 |
 | cargo | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT |
+| cargo | `ignore` | 0.4.32 | Unlicense OR MIT |
 | cargo | `indexmap` | 1.9.3 | Apache-2.0 OR MIT |
 | cargo | `indexmap` | 2.14.0 | Apache-2.0 OR MIT |
 | cargo | `infer` | 0.19.0 | MIT |
@@ -206,11 +206,7 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `keyboard-types` | 0.7.0 | MIT OR Apache-2.0 |
 | cargo | `keyring` | 4.1.6 | MIT OR Apache-2.0 |
 | cargo | `keyring-core` | 1.0.0 | MIT OR Apache-2.0 |
-| cargo | `libappindicator` | 0.9.0 | Apache-2.0 OR MIT |
-| cargo | `libappindicator-sys` | 0.9.0 | Apache-2.0 OR MIT |
 | cargo | `libc` | 0.2.186 | MIT OR Apache-2.0 |
-| cargo | `libdbus-sys` | 0.2.7 | Apache-2.0/MIT |
-| cargo | `libloading` | 0.7.4 | ISC |
 | cargo | `libredox` | 0.1.18 | MIT |
 | cargo | `libsqlite3-sys` | 0.38.2 | MIT |
 | cargo | `linux-raw-sys` | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -423,7 +419,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `tracing` | 0.1.44 | MIT |
 | cargo | `tracing-attributes` | 0.1.31 | MIT |
 | cargo | `tracing-core` | 0.1.36 | MIT |
-| cargo | `tray-icon` | 0.24.1 | MIT OR Apache-2.0 |
 | cargo | `try-lock` | 0.2.5 | MIT |
 | cargo | `typeid` | 1.0.3 | MIT OR Apache-2.0 |
 | cargo | `typenum` | 1.20.1 | MIT OR Apache-2.0 |
@@ -528,8 +523,6 @@ artifact hashes, license URL, and license hash are recorded in `config/native-ar
 | cargo | `wit-bindgen` | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | cargo | `writeable` | 0.6.3 | Unicode-3.0 |
 | cargo | `wry` | 0.55.1 | Apache-2.0 OR MIT |
-| cargo | `x11` | 2.21.0 | MIT |
-| cargo | `x11-dl` | 2.21.0 | MIT |
 | cargo | `yoke` | 0.8.3 | Unicode-3.0 |
 | cargo | `yoke-derive` | 0.8.2 | Unicode-3.0 |
 | cargo | `zbus` | 5.19.0 | MIT |

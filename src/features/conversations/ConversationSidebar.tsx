@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   ArchiveRestore,
+  Code2,
   Keyboard,
   MessageSquare,
   PanelLeftClose,
@@ -39,6 +40,7 @@ interface ConversationSidebarProps {
   onSearch: (query: string) => void;
   onLoadMore: () => void;
   onOpenSettings: () => void;
+  onOpenCode: () => void;
   onOpenShortcuts: () => void;
   onShowArchivedChange: (showArchived: boolean) => void;
   /** FTR-002: undo is calling this again with the opposite value. */
@@ -63,6 +65,7 @@ export function ConversationSidebar({
   onSearch,
   onLoadMore,
   onOpenSettings,
+  onOpenCode,
   onOpenShortcuts,
   onShowArchivedChange,
   onArchive,
@@ -321,6 +324,15 @@ export function ConversationSidebar({
       </nav>
 
       <div className="border-t border-border p-3 grid gap-1">
+        <Button
+          className="w-full justify-start"
+          variant="ghost"
+          onClick={onOpenCode}
+          aria-label={collapsed ? "Ark Code" : undefined}
+        >
+          <Code2 className="h-4 w-4" />
+          {!collapsed && "Ark Code"}
+        </Button>
         <Button
           ref={shortcutsTriggerRef}
           className="w-full justify-start"

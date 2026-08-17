@@ -520,9 +520,11 @@ pub fn spawn_llama_server(
     api_key: &str,
 ) -> Result<Child, AppError> {
     if !binary.exists() {
-        return Err(AppError::provider(
-            "Built-in runtime not installed. Run scripts/setup-llama.ps1 (or setup-llama.sh on Mac/Linux) from the repo root to download it.",
-        ));
+        return Err(AppError::provider(if cfg!(debug_assertions) {
+            "Built-in runtime not installed. Run scripts/setup-llama.ps1 (or setup-llama.sh on Mac/Linux) from the repo root to download it."
+        } else {
+            "The packaged built-in runtime is missing. Reinstall this Ark package."
+        }));
     }
 
     let mut command = Command::new(binary);
@@ -546,6 +548,10 @@ fn llama_server_arguments(model_path: &str, api_key: &str) -> Vec<String> {
         "--port".to_string(),
         "0".to_string(),
         "--no-ui".to_string(),
+        // CODE-001: llama.cpp only enables its OpenAI-compatible native tool parser when Jinja
+        // chat templates are enabled. Tool execution remains entirely in Ark's permission layer;
+        // this flag only makes the model/runtime wire contract available.
+        "--jinja".to_string(),
         "-c".to_string(),
         "4096".to_string(),
         "--api-key".to_string(),
@@ -942,6 +948,7 @@ mod tests {
                 "--port",
                 "0",
                 "--no-ui",
+                "--jinja",
                 "-c",
                 "4096",
                 "--api-key",

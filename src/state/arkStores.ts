@@ -1,6 +1,8 @@
 import type {
   AppErrorShape,
   BuiltInRuntimeStatus,
+  CodeSession,
+  CodeSessionDetail,
   Conversation,
   Message,
   ModelInfo,
@@ -15,7 +17,7 @@ import type {
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "../lib/settingsSections.ts";
 import { createExternalStore, type ExternalStore } from "./externalStore.ts";
 
-export type ActiveView = "chat" | "settings";
+export type ActiveView = "chat" | "code" | "settings";
 
 export interface EntityCollection<T> {
   ids: string[];
@@ -80,12 +82,22 @@ export interface PersonaState {
   personas: EntityCollection<Persona>;
 }
 
+export interface CodeState {
+  sessions: EntityCollection<CodeSession>;
+  activeId?: string;
+  detail?: CodeSessionDetail;
+  isLoading: boolean;
+}
+
 export interface SettingsState {
   workspacePath: string;
   workspace: WorkspaceInfo | null;
+  /** FTR-003: portable workspace-wide instruction fallback. */
+  applicationInstructions: string | null;
   theme: ThemeMode;
   builtInStatus: BuiltInRuntimeStatus;
   builtInModelPath: string | null;
+  managedModelDirectory: string | null;
   crashCaptureEnabled: boolean;
   completionNotificationsEnabled: boolean;
   perfMetricsEnabled: boolean;
@@ -126,6 +138,7 @@ export interface ArkStores {
   providers: ExternalStore<ProviderState>;
   projects: ExternalStore<ProjectState>;
   personas: ExternalStore<PersonaState>;
+  code: ExternalStore<CodeState>;
   settings: ExternalStore<SettingsState>;
   shell: ExternalStore<ShellState>;
 }
@@ -162,9 +175,14 @@ export function createArkStores(initial?: {
     personas: createExternalStore<PersonaState>({
       personas: emptyEntityCollection(),
     }),
+    code: createExternalStore<CodeState>({
+      sessions: emptyEntityCollection(),
+      isLoading: false,
+    }),
     settings: createExternalStore<SettingsState>({
       workspacePath: "",
       workspace: null,
+      applicationInstructions: null,
       theme: initial?.theme ?? "dark",
       builtInStatus: {
         running: false,
@@ -174,6 +192,7 @@ export function createArkStores(initial?: {
         failure: null,
       },
       builtInModelPath: null,
+      managedModelDirectory: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
       perfMetricsEnabled: false,

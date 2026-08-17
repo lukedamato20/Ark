@@ -19,6 +19,7 @@ import { StatePanel } from "./ui/statePanel";
 import type { AppErrorShape } from "./types/ark";
 
 const ChatView = React.lazy(() => import("./features/chat/ChatView").then((module) => ({ default: module.ChatView })));
+const CodeView = React.lazy(() => import("./features/code/CodeView").then((module) => ({ default: module.CodeView })));
 const SettingsView = React.lazy(() =>
   import("./features/settings/SettingsView").then((module) => ({ default: module.SettingsView })),
 );
@@ -97,6 +98,8 @@ export default function App() {
         <React.Suspense fallback={<MainViewFallback />}>
           {view === "settings" ? (
             <SettingsContainer controller={controller} />
+          ) : view === "code" ? (
+            <CodeContainer controller={controller} />
           ) : (
             <ChatContainer controller={controller} />
           )}
@@ -209,11 +212,24 @@ function ConversationSidebarContainer({
       onSearch={(query) => void controller.searchConversations(query)}
       onLoadMore={() => void controller.loadMoreConversations()}
       onOpenSettings={() => controller.setView("settings")}
+      onOpenCode={() => controller.setView("code")}
       onOpenShortcuts={() => controller.setShortcutsOpen(true)}
       onShowArchivedChange={(showArchived) => void controller.setShowArchived(showArchived)}
       onArchive={(id, archived) => void controller.changeConversationArchived(id, archived)}
       onPin={(id, pinned) => void controller.changeConversationPinned(id, pinned)}
       shortcutsTriggerRef={shortcutsTriggerRef}
+    />
+  );
+}
+
+function CodeContainer({ controller }: { controller: ArkController }) {
+  const stores = useArkStores();
+  const projects = useStore(stores.projects);
+  return (
+    <CodeView
+      projects={entityList(projects.projects)}
+      onBack={() => controller.setView("chat")}
+      onError={controller.setError}
     />
   );
 }
@@ -273,12 +289,16 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       providerHealth={providerState.health}
       projects={entityList(projectState.projects)}
       personas={entityList(personaState.personas)}
+      applicationInstructions={settings.applicationInstructions}
+      onApplicationInstructionsChange={controller.changeApplicationInstructions}
       theme={settings.theme}
       workspace={settings.workspace}
       builtInStatus={settings.builtInStatus}
       onBuiltInStatusChange={controller.setBuiltInStatus}
       builtInModelPath={settings.builtInModelPath}
       onBuiltInModelPathChange={controller.changeBuiltInModelPath}
+      managedModelDirectory={settings.managedModelDirectory}
+      onManagedModelDirectoryChange={controller.changeManagedModelDirectory}
       crashCaptureEnabled={settings.crashCaptureEnabled}
       onCrashCaptureEnabledChange={controller.changeCrashCaptureEnabled}
       completionNotificationsEnabled={settings.completionNotificationsEnabled}
@@ -288,11 +308,13 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       onThemeChange={controller.changeTheme}
       onWorkspaceChange={controller.setWorkspace}
       onProviderSaved={controller.saveProvider}
+      onProviderDeleted={controller.removeProvider}
       onProjectSaved={controller.saveProject}
       onProjectDeleted={controller.removeProject}
       onPersonaSaved={controller.savePersona}
       onPersonaDeleted={controller.removePersona}
       onRefreshProviderModels={controller.refreshProviderModels}
+      onCancelProviderRefresh={controller.cancelProviderRefresh}
       onBack={() => controller.setView("chat")}
       onError={controller.setError}
     />

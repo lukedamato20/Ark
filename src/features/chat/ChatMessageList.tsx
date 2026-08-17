@@ -4,6 +4,7 @@ import { getErrorMessage } from "../../lib/arkErrors";
 import { cn } from "../../lib/cn";
 import { CONNECTION_METADATA } from "../../lib/destinationClass";
 import { checkExternalLink } from "../../lib/externalLinks";
+import { formatGenerationSettingSource, parseGenerationProvenance } from "../../lib/generationProvenance";
 import { computeAnnouncementDelta } from "../../lib/streamAnnouncement";
 import { messageWithGenerationOverlay } from "../../state/arkStores";
 import { useStoreSelector } from "../../state/externalStore";
@@ -768,9 +769,8 @@ function MetadataRow({ label, value, detail }: { label: string; value: string; d
 
 /**
  * FTR-005: renders two selected branch alternatives side by side (stacked on narrow viewports
- * via CSS grid's auto-fit) with full content and lightweight provenance — the same
- * provider/model fields `MetadataRow` already shows for a single message, not a new parsed
- * view of `metadata_json`.
+ * via CSS grid's auto-fit) with full content and validated generation provenance. Imported
+ * metadata is parsed through `parseGenerationProvenance`; malformed/unknown claims stay hidden.
  */
 function BranchComparison({
   messages,
@@ -796,6 +796,11 @@ function BranchComparison({
         {messages.map((compared) => {
           const alternative = alternatives.find((item) => item.messageId === compared.id);
           const comparedProvider = providers.find((item) => item.id === compared.providerId);
+          const provenance = parseGenerationProvenance(compared.metadataJson);
+          const withSource = (value: string, source?: Parameters<typeof formatGenerationSettingSource>[0]) => {
+            const label = formatGenerationSettingSource(source);
+            return label ? `${value} · ${label}` : value;
+          };
           return (
             <div key={compared.id} className="min-w-0 rounded-md border border-border/70 bg-background p-2.5 text-xs">
               <div className="mb-1.5 font-medium">
@@ -805,6 +810,40 @@ function BranchComparison({
                 {comparedProvider && <MetadataRow label="Provider" value={comparedProvider.name} />}
                 {compared.modelId && <MetadataRow label="Model" value={compared.modelId} />}
                 {compared.tokenCount != null && <MetadataRow label="Tokens" value={String(compared.tokenCount)} />}
+                {provenance?.temperature != null && (
+                  <MetadataRow
+                    label="Temperature"
+                    value={withSource(String(provenance.temperature), provenance.temperatureSource)}
+                  />
+                )}
+                {provenance?.maxTokens != null && (
+                  <MetadataRow
+                    label="Max tokens"
+                    value={withSource(String(provenance.maxTokens), provenance.maxTokensSource)}
+                  />
+                )}
+                {provenance?.systemPromptSource && (
+                  <MetadataRow
+                    label="Instructions"
+                    value={formatGenerationSettingSource(provenance.systemPromptSource) ?? "unknown"}
+                  />
+                )}
+                {provenance?.responseStyle && (
+                  <MetadataRow
+                    label="Response style"
+                    value={withSource(provenance.responseStyle, provenance.responseStyleSource)}
+                  />
+                )}
+                {provenance?.tone && (
+                  <MetadataRow label="Tone" value={withSource(provenance.tone, provenance.toneSource)} />
+                )}
+                {provenance?.personaId && (
+                  <MetadataRow
+                    label="Persona"
+                    value={`${provenance.personaId}${provenance.personaVersion ? ` · v${provenance.personaVersion}` : ""}`}
+                  />
+                )}
+                {provenance?.projectId && <MetadataRow label="Project" value={provenance.projectId} />}
               </div>
               <div className="max-h-80 overflow-y-auto break-words">
                 <MarkdownMessage content={compared.content} />

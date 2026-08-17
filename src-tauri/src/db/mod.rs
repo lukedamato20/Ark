@@ -1,6 +1,11 @@
 use crate::attachments::Attachment;
 use crate::chat::{
-    BranchAlternative, Conversation, ConversationListRequest, ConversationPage, Message,
+    BranchAlternative, BranchTopologyNode, Conversation, ConversationListRequest, ConversationPage,
+    Message,
+};
+use crate::code_sessions::{
+    CodeAgentRun, CodeRecoveryOutcome, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+    NewCodeRun,
 };
 use crate::config::{
     BUILT_IN_PROVIDER_BASE_URL, BUILT_IN_PROVIDER_ID, BUILT_IN_PROVIDER_NAME,
@@ -8,11 +13,12 @@ use crate::config::{
     DEFAULT_PROVIDER_NAME, DEFAULT_PROVIDER_TYPE, DEFAULT_TEMPERATURE,
     LOCAL_INFERENCE_HOST_BASE_URL, LOCAL_INFERENCE_HOST_PROVIDER_ID,
     LOCAL_INFERENCE_HOST_PROVIDER_NAME, LOCAL_INFERENCE_HOST_PROVIDER_TYPE,
+    OPENAI_PROVIDER_BASE_URL, OPENAI_PROVIDER_TYPE,
 };
 use crate::errors::AppError;
-use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
+use crate::personas::{Persona, PersonaDeletionPreview, PersonaExport, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview, UpdateProjectChanges};
-use crate::providers::{ModelInfo, ProviderConfig};
+use crate::providers::{ModelInfo, ProviderConfig, ToolCallingMode};
 use crate::tool_policy::{
     next_audit_event, AuditEvent, AuditEventKind, CapabilityScope, CapabilityTier,
 };
@@ -20,12 +26,16 @@ use crate::tools::{ConversationNote, ToolCapabilityGrant};
 use chrono::{Duration, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 use zeroize::Zeroizing;
+
+const MAX_COMPANION_API_IDEMPOTENCY_RECORDS: i64 = 10_000;
+const MAX_COMPANION_API_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// Parameters for [`Database::update_provider`], grouped to keep the method's argument count
 /// within clippy's `too_many_arguments` threshold.
@@ -41,6 +51,53 @@ pub struct UpdateProviderChanges<'a> {
     pub convert_to_remote_provider: bool,
     /// Explicit, warned development-mode exception for non-loopback HTTP.
     pub allow_insecure_remote: bool,
+}
+
+/// Parameters for creating a user-managed remote provider. Destination validation deliberately
+/// lives in this persistence boundary too, so future transports cannot bypass SEC-001.
+pub struct CreateRemoteProviderChanges<'a> {
+    pub name: &'a str,
+    pub provider_type: &'a str,
+    pub base_url: &'a str,
+    pub acknowledge_remote_risk: bool,
+    pub allow_insecure_remote: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompanionApiIdempotencyRecord {
+    pub method: String,
+    pub path: String,
+    pub request_hash: String,
+    pub response_status: u16,
+    pub response_json: String,
+}
+
+pub struct NewCompanionApiIdempotencyRecord<'a> {
+    pub idempotency_key: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub request_hash: &'a str,
+    pub response_status: u16,
+    pub response_json: &'a str,
+}
+
+/// FTR-010: the stable fingerprint for one mutating companion-API request. Kept in the
+/// authoritative database layer so every transport-exposed use case (conversation changes,
+/// generation, cancellation) shares one replay/conflict implementation.
+pub struct CompanionApiIdempotencyRequest<'a> {
+    pub idempotency_key: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub request_hash: &'a str,
+    pub response_status: u16,
+}
+
+#[derive(Debug)]
+pub struct CompanionApiIdempotentResult<T> {
+    pub value: T,
+    /// True only when `value` came from a previously committed request. Callers use this to
+    /// avoid repeating non-durable side effects such as starting provider work.
+    pub replayed: bool,
 }
 
 struct MigrationDef {
@@ -128,6 +185,26 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 14,
         name: "0014_tool_secrets",
         sql: include_str!("../../migrations/0014_tool_secrets.sql"),
+    },
+    MigrationDef {
+        version: 15,
+        name: "0015_companion_api_idempotency",
+        sql: include_str!("../../migrations/0015_companion_api_idempotency.sql"),
+    },
+    MigrationDef {
+        version: 16,
+        name: "0016_model_tool_calling_mode",
+        sql: include_str!("../../migrations/0016_model_tool_calling_mode.sql"),
+    },
+    MigrationDef {
+        version: 17,
+        name: "0017_project_repository",
+        sql: include_str!("../../migrations/0017_project_repository.sql"),
+    },
+    MigrationDef {
+        version: 18,
+        name: "0018_ark_code_sessions",
+        sql: include_str!("../../migrations/0018_ark_code_sessions.sql"),
     },
 ];
 
@@ -1261,7 +1338,7 @@ impl Database {
 
     pub fn list_projects(&self) -> Result<Vec<Project>, AppError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, instructions, default_provider_id, default_model_id,
+            "SELECT id, name, repository_path, instructions, default_provider_id, default_model_id,
                 default_temperature, default_max_tokens, response_style, tone, archived_at, created_at, updated_at
              FROM projects
              ORDER BY archived_at IS NOT NULL, name ASC",
@@ -1273,7 +1350,7 @@ impl Database {
     pub fn get_project(&self, id: &str) -> Result<Project, AppError> {
         self.connection
             .query_row(
-                "SELECT id, name, instructions, default_provider_id, default_model_id,
+                "SELECT id, name, repository_path, instructions, default_provider_id, default_model_id,
                     default_temperature, default_max_tokens, response_style, tone, archived_at, created_at, updated_at
                  FROM projects
                  WHERE id = ?1",
@@ -1317,6 +1394,277 @@ impl Database {
         self.get_project(id)
     }
 
+    /// CODE-003: changes only a Project's code Repository binding. Storage Workspace state is
+    /// owned by `workspace/mod.rs` and is intentionally absent from this transaction.
+    pub fn set_project_repository(
+        &self,
+        id: &str,
+        repository_path: Option<&str>,
+    ) -> Result<Project, AppError> {
+        self.connection.execute(
+            "UPDATE projects SET repository_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![repository_path, now(), id],
+        )?;
+        self.get_project(id)
+    }
+
+    // --- CODE-007: durable Ark Code sessions and immutable run attempts (ADR 0003). ---
+
+    pub fn create_code_session(
+        &self,
+        project_id: &str,
+        title: &str,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> Result<CodeSession, AppError> {
+        self.get_project(project_id)?;
+        let title = crate::code_sessions::validate_session_title(title)?;
+        validate_code_idempotency(idempotency_key, request_hash)?;
+        let run_scope = format!("project:{project_id}");
+
+        self.transaction(|| {
+            if let Some((stored_hash, session_id)) =
+                self.get_code_idempotency_receipt(&run_scope, "create_session", idempotency_key)?
+            {
+                if stored_hash != request_hash {
+                    return Err(code_idempotency_conflict());
+                }
+                return self.get_code_session(&session_id);
+            }
+
+            let id = Uuid::new_v4().to_string();
+            let timestamp = now();
+            self.connection.execute(
+                "INSERT INTO code_sessions (
+                    id, project_id, title, archived, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+                params![id, project_id, title, timestamp],
+            )?;
+            self.store_code_idempotency_receipt(
+                &run_scope,
+                "create_session",
+                idempotency_key,
+                request_hash,
+                &id,
+            )?;
+            self.get_code_session(&id)
+        })
+    }
+
+    pub fn list_code_sessions(&self, include_archived: bool) -> Result<Vec<CodeSession>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, archived, created_at, updated_at
+             FROM code_sessions
+             WHERE (?1 = 1 OR archived = 0)
+             ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![include_archived], map_code_session)?;
+        collect_rows(rows)
+    }
+
+    pub fn get_code_session(&self, id: &str) -> Result<CodeSession, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, title, archived, created_at, updated_at
+                 FROM code_sessions WHERE id = ?1",
+                params![id],
+                map_code_session,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Ark Code session"))
+    }
+
+    pub fn get_code_session_detail(&self, id: &str) -> Result<CodeSessionDetail, AppError> {
+        let session = self.get_code_session(id)?;
+        let mut run_statement = self.connection.prepare(
+            "SELECT id, session_id, parent_run_id, provider_id, model_id,
+                    repository_path_snapshot, repository_identity_hash, state,
+                    max_steps, max_active_ms, max_tokens, max_cost_microunits,
+                    steps_used, active_elapsed_ms, reserved_tokens, actual_tokens,
+                    actual_cost_microunits, cancel_requested_at, terminal_reason,
+                    recovery_outcome, created_at, updated_at, completed_at
+             FROM code_agent_runs WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let runs = collect_rows(run_statement.query_map(params![id], map_code_agent_run)?)?;
+
+        let mut event_statement = self.connection.prepare(
+            "SELECT events.run_id, events.sequence, events.schema_version, events.kind,
+                    events.state, events.summary, events.created_at
+             FROM code_run_events AS events
+             INNER JOIN code_agent_runs AS runs ON runs.id = events.run_id
+             WHERE runs.session_id = ?1
+             ORDER BY runs.created_at ASC, events.sequence ASC",
+        )?;
+        let events = collect_rows(event_statement.query_map(params![id], map_code_run_event)?)?;
+        Ok(CodeSessionDetail {
+            session,
+            runs,
+            events,
+        })
+    }
+
+    pub fn create_code_agent_run(&self, input: &NewCodeRun<'_>) -> Result<CodeAgentRun, AppError> {
+        crate::code_sessions::validate_run_budgets(
+            input.max_steps,
+            input.max_active_ms,
+            input.max_tokens,
+        )?;
+        validate_code_idempotency(input.idempotency_key, input.request_hash)?;
+        if input.repository_identity_hash.len() != 64 {
+            return Err(AppError::invalid_input(
+                "Repository identity hash must be a SHA-256 value.",
+            ));
+        }
+        let max_steps = i64::from(input.max_steps);
+        let max_active_ms = i64::try_from(input.max_active_ms)
+            .map_err(|_| AppError::invalid_input("Ark Code active time limit is too large."))?;
+        let max_tokens = i64::try_from(input.max_tokens)
+            .map_err(|_| AppError::invalid_input("Ark Code token budget is too large."))?;
+        let max_cost_microunits = input
+            .max_cost_microunits
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| AppError::invalid_input("Ark Code cost budget is too large."))?;
+
+        self.transaction(|| {
+            let session = self.get_code_session(input.session_id)?;
+            if session.archived {
+                return Err(AppError::new(
+                    "code_session_archived",
+                    "Unarchive this Ark Code session before starting another run.",
+                ));
+            }
+            if let Some((stored_hash, run_id)) = self.get_code_idempotency_receipt(
+                input.session_id,
+                "create_run",
+                input.idempotency_key,
+            )? {
+                if stored_hash != input.request_hash {
+                    return Err(code_idempotency_conflict());
+                }
+                return self.get_code_agent_run(&run_id);
+            }
+            if let Some(parent_run_id) = input.parent_run_id {
+                let parent = self.get_code_agent_run(parent_run_id)?;
+                if parent.session_id != input.session_id || !parent.state.is_terminal() {
+                    return Err(AppError::new(
+                        "invalid_parent_code_run",
+                        "An Ark Code retry must reference a terminal run from the same session.",
+                    ));
+                }
+            }
+
+            let id = Uuid::new_v4().to_string();
+            let timestamp = now();
+            self.connection.execute(
+                "INSERT INTO code_agent_runs (
+                    id, session_id, parent_run_id, provider_id, model_id,
+                    repository_path_snapshot, repository_identity_hash, state,
+                    max_steps, max_active_ms, max_tokens, max_cost_microunits,
+                    next_event_sequence, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, 1, ?12, ?12
+                 )",
+                params![
+                    id,
+                    input.session_id,
+                    input.parent_run_id,
+                    input.provider_id,
+                    input.model_id,
+                    input.repository_path_snapshot,
+                    input.repository_identity_hash,
+                    max_steps,
+                    max_active_ms,
+                    max_tokens,
+                    max_cost_microunits,
+                    timestamp,
+                ],
+            )?;
+            self.connection.execute(
+                "INSERT INTO code_run_events (
+                    run_id, sequence, schema_version, kind, state, summary, created_at
+                 ) VALUES (?1, 0, ?2, 'run_queued', 'queued', 'Run queued', ?3)",
+                params![
+                    id,
+                    i64::from(crate::code_sessions::CODE_RUN_EVENT_SCHEMA_VERSION),
+                    timestamp
+                ],
+            )?;
+            self.connection.execute(
+                "UPDATE code_sessions SET updated_at = ?1 WHERE id = ?2",
+                params![timestamp, input.session_id],
+            )?;
+            self.store_code_idempotency_receipt(
+                input.session_id,
+                "create_run",
+                input.idempotency_key,
+                input.request_hash,
+                &id,
+            )?;
+            self.get_code_agent_run(&id)
+        })
+    }
+
+    pub fn get_code_agent_run(&self, id: &str) -> Result<CodeAgentRun, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, parent_run_id, provider_id, model_id,
+                        repository_path_snapshot, repository_identity_hash, state,
+                        max_steps, max_active_ms, max_tokens, max_cost_microunits,
+                        steps_used, active_elapsed_ms, reserved_tokens, actual_tokens,
+                        actual_cost_microunits, cancel_requested_at, terminal_reason,
+                        recovery_outcome, created_at, updated_at, completed_at
+                 FROM code_agent_runs WHERE id = ?1",
+                params![id],
+                map_code_agent_run,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Ark Code run"))
+    }
+
+    fn get_code_idempotency_receipt(
+        &self,
+        run_scope: &str,
+        operation: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<(String, String)>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT request_hash, response_entity_id
+                 FROM code_idempotency_receipts
+                 WHERE run_scope = ?1 AND operation = ?2 AND idempotency_key = ?3",
+                params![run_scope, operation, idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn store_code_idempotency_receipt(
+        &self,
+        run_scope: &str,
+        operation: &str,
+        idempotency_key: &str,
+        request_hash: &str,
+        response_entity_id: &str,
+    ) -> Result<(), AppError> {
+        self.connection.execute(
+            "INSERT INTO code_idempotency_receipts (
+                run_scope, operation, idempotency_key, request_hash, response_entity_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                run_scope,
+                operation,
+                idempotency_key,
+                request_hash,
+                response_entity_id,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
     /// FTR-003: archiving a project is non-destructive and doesn't touch its conversations —
     /// unlike deletion, there is nothing to preview. Undo is calling this again with `false`,
     /// matching the established convention from conversation archive/pin.
@@ -1340,9 +1688,18 @@ impl Database {
             params![id],
             |row| row.get(0),
         )?;
+        let attachment_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM attachments
+             INNER JOIN conversations ON conversations.id = attachments.conversation_id
+             WHERE conversations.project_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
         Ok(ProjectDeletionPreview {
             project,
             conversation_count,
+            attachment_count,
         })
     }
 
@@ -1378,10 +1735,7 @@ impl Database {
         response_style: Option<&str>,
         tone: Option<&str>,
     ) -> Result<Persona, AppError> {
-        let trimmed_name = name.trim();
-        if trimmed_name.is_empty() {
-            return Err(AppError::invalid_input("Persona name cannot be empty."));
-        }
+        let trimmed_name = crate::personas::validate_persona_name(name)?;
         let persona_id = Uuid::new_v4().to_string();
         let version_id = Uuid::new_v4().to_string();
         let timestamp = now();
@@ -1458,10 +1812,7 @@ impl Database {
         response_style: Option<&str>,
         tone: Option<&str>,
     ) -> Result<Persona, AppError> {
-        let trimmed_name = name.trim();
-        if trimmed_name.is_empty() {
-            return Err(AppError::invalid_input("Persona name cannot be empty."));
-        }
+        let trimmed_name = crate::personas::validate_persona_name(name)?;
         let current = self.get_persona(id)?;
         let timestamp = now();
 
@@ -1506,6 +1857,58 @@ impl Database {
             })?;
         }
         self.get_persona(id)
+    }
+
+    /// Inserts a fully validated portable persona as one atomic unit. IDs are regenerated so an
+    /// export can be imported alongside its source; immutable version content and timestamps are
+    /// retained. Callers must use `personas::import_persona_json`, which validates the artifact
+    /// before reaching this persistence-only method.
+    pub(crate) fn import_persona(&self, export: &PersonaExport) -> Result<Persona, AppError> {
+        let persona_id = Uuid::new_v4().to_string();
+        let version_ids = export
+            .versions
+            .iter()
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let current_version_id = version_ids
+            .last()
+            .expect("validated persona imports always contain a version");
+        self.transaction(|| {
+            self.connection.execute(
+                "INSERT INTO personas (
+                    id, name, current_version_id, archived_at, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    persona_id,
+                    export.persona.name.trim(),
+                    current_version_id,
+                    export.persona.archived_at,
+                    export.persona.created_at,
+                    export.persona.updated_at
+                ],
+            )?;
+            for (version, version_id) in export.versions.iter().zip(version_ids.iter()) {
+                self.connection.execute(
+                    "INSERT INTO persona_versions (
+                        id, persona_id, version_number, instructions, default_temperature,
+                        default_max_tokens, response_style, tone, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        version_id,
+                        persona_id,
+                        version.version_number,
+                        version.instructions,
+                        version.default_temperature,
+                        version.default_max_tokens,
+                        version.response_style,
+                        version.tone,
+                        version.created_at
+                    ],
+                )?;
+            }
+            Ok(())
+        })?;
+        self.get_persona(&persona_id)
     }
 
     /// FTR-003: every version ever created for this persona, newest first — the visible proof
@@ -2101,6 +2504,35 @@ impl Database {
         collect_rows(rows)
     }
 
+    /// FTR-005: returns every node in a conversation, compactly, so the dedicated explorer can
+    /// show all divergence points at once. Active-path membership comes from the same recursive
+    /// query used by branch switching, keeping the explorer's highlighted path authoritative.
+    pub fn get_branch_topology(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<BranchTopologyNode>, AppError> {
+        self.get_conversation(conversation_id)?;
+        let active_ids = self.get_active_message_ids(conversation_id)?;
+        Ok(self
+            .get_all_conversation_messages(conversation_id)?
+            .into_iter()
+            .map(|message| BranchTopologyNode {
+                is_active: active_ids.contains(&message.id),
+                message_id: message.id,
+                parent_message_id: message.parent_message_id,
+                revision_of_message_id: message.revision_of_message_id,
+                path_index: message.path_index,
+                role: message.role,
+                created_at: message.created_at,
+                status: message.status,
+                content_preview: message_preview(&message.content),
+                branch_name: message.branch_name,
+                provider_id: message.provider_id,
+                model_id: message.model_id,
+            })
+            .collect())
+    }
+
     fn find_branch_leaf(&self, start_message_id: &str) -> Result<String, AppError> {
         self.connection
             .query_row(
@@ -2517,6 +2949,109 @@ impl Database {
             .ok_or_else(|| AppError::not_found("Provider"))
     }
 
+    /// FTR-007: creates an opt-in provider. Ark never seeds a cloud provider and only accepts
+    /// the curated OpenAI adapter or the existing advanced OpenAI-compatible adapter here.
+    pub fn create_remote_provider(
+        &self,
+        changes: CreateRemoteProviderChanges<'_>,
+    ) -> Result<ProviderConfig, AppError> {
+        let name = changes.name.trim();
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(AppError::invalid_input(
+                "Provider name must be between 1 and 100 characters and contain no control characters.",
+            ));
+        }
+        if !matches!(
+            changes.provider_type,
+            OPENAI_PROVIDER_TYPE | LOCAL_INFERENCE_HOST_PROVIDER_TYPE
+        ) {
+            return Err(AppError::invalid_input("Unsupported remote provider type."));
+        }
+
+        let base_url = changes.base_url.trim();
+        if changes.provider_type == OPENAI_PROVIDER_TYPE
+            && (base_url != OPENAI_PROVIDER_BASE_URL || changes.allow_insecure_remote)
+        {
+            return Err(AppError::invalid_input(
+                "The curated OpenAI provider uses Ark's fixed HTTPS API endpoint.",
+            ));
+        }
+        let class = crate::security::enforce_destination_policy(
+            base_url,
+            true,
+            changes.acknowledge_remote_risk,
+            changes.allow_insecure_remote,
+        )?;
+
+        let duplicate: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM providers WHERE lower(name) = lower(?1))",
+            params![name],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            return Err(AppError::new(
+                "provider_name_conflict",
+                "A provider with that name already exists.",
+            ));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO providers (
+                id, name, provider_type, base_url, api_key_ref, default_model_id,
+                default_temperature, default_max_tokens, is_local, allow_insecure_remote,
+                is_enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, 1, ?9, ?9)",
+            params![
+                id,
+                name,
+                changes.provider_type,
+                base_url,
+                DEFAULT_TEMPERATURE,
+                DEFAULT_MAX_TOKENS,
+                class.is_trusted_local() as i64,
+                changes.allow_insecure_remote as i64,
+                timestamp,
+            ],
+        )?;
+        self.get_provider(&id)
+    }
+
+    /// FTR-007: atomically removes a user-created provider and active/default references. Message
+    /// provenance intentionally retains its historical provider/model identifiers.
+    pub fn delete_user_provider(&self, provider_id: &str) -> Result<(), AppError> {
+        let provider = self.get_provider(provider_id)?;
+        if !provider.is_user_managed {
+            return Err(AppError::new(
+                "provider_delete_forbidden",
+                "Built-in provider entries cannot be deleted.",
+            ));
+        }
+
+        self.transaction(|| {
+            self.connection.execute(
+                "UPDATE conversations
+                 SET provider_id = NULL, model_id = NULL, updated_at = ?1
+                 WHERE provider_id = ?2",
+                params![now(), provider_id],
+            )?;
+            self.connection.execute(
+                "UPDATE projects
+                 SET default_provider_id = NULL, default_model_id = NULL, updated_at = ?1
+                 WHERE default_provider_id = ?2",
+                params![now(), provider_id],
+            )?;
+            let deleted = self
+                .connection
+                .execute("DELETE FROM providers WHERE id = ?1", params![provider_id])?;
+            if deleted != 1 {
+                return Err(AppError::not_found("Provider"));
+            }
+            Ok(())
+        })
+    }
+
     /// SEC-001: `acknowledge_remote_risk` must be `true` for the save to succeed when the URL
     /// classifies as [`crate::security::DestinationClass::Public`] — see
     /// [`crate::security::enforce_destination_policy`]. Loopback/private-LAN destinations
@@ -2532,7 +3067,17 @@ impl Database {
             ));
         }
 
+        let provider = self.get_provider(provider_id)?;
         let trimmed_url = changes.base_url.trim();
+        if provider.provider_type == OPENAI_PROVIDER_TYPE
+            && (trimmed_url != OPENAI_PROVIDER_BASE_URL
+                || !changes.convert_to_remote_provider
+                || changes.allow_insecure_remote)
+        {
+            return Err(AppError::invalid_input(
+                "The curated OpenAI provider uses Ark's fixed HTTPS API endpoint and remote provider class.",
+            ));
+        }
         let class = crate::security::enforce_destination_policy(
             trimmed_url,
             changes.convert_to_remote_provider,
@@ -2591,8 +3136,8 @@ impl Database {
     pub fn list_models(&self, provider_id: &str) -> Result<Vec<ModelInfo>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, provider_id, name, display_name, context_window, supports_streaming,
-                supports_tools, supports_vision, supports_embeddings, is_available, last_seen_at,
-                metadata_json, created_at, updated_at
+                supports_tools, tool_calling_mode, supports_vision, supports_embeddings,
+                is_available, last_seen_at, metadata_json, created_at, updated_at
              FROM models
              WHERE provider_id = ?1
              ORDER BY name ASC",
@@ -2605,8 +3150,8 @@ impl Database {
     pub fn list_all_models(&self) -> Result<Vec<ModelInfo>, AppError> {
         let mut statement = self.connection.prepare(
             "SELECT id, provider_id, name, display_name, context_window, supports_streaming,
-                supports_tools, supports_vision, supports_embeddings, is_available, last_seen_at,
-                metadata_json, created_at, updated_at
+                supports_tools, tool_calling_mode, supports_vision, supports_embeddings,
+                is_available, last_seen_at, metadata_json, created_at, updated_at
              FROM models
              ORDER BY provider_id ASC, name ASC",
         )?;
@@ -2620,6 +3165,14 @@ impl Database {
     /// error partway through must not leave every model marked unavailable while only some of
     /// the refreshed rows landed.
     pub fn upsert_models(&self, provider_id: &str, models: &[ModelInfo]) -> Result<(), AppError> {
+        if models
+            .iter()
+            .any(|model| model.supports_tools != model.tool_calling_mode.supports_native())
+        {
+            return Err(AppError::invalid_input(
+                "Model tool capability metadata is inconsistent.",
+            ));
+        }
         self.transaction(|| {
             let timestamp = now();
             self.connection.execute(
@@ -2631,15 +3184,16 @@ impl Database {
                 self.connection.execute(
                     "INSERT INTO models (
                         id, provider_id, name, display_name, context_window, supports_streaming,
-                        supports_tools, supports_vision, supports_embeddings, is_available,
-                        last_seen_at, metadata_json, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                        supports_tools, tool_calling_mode, supports_vision, supports_embeddings,
+                        is_available, last_seen_at, metadata_json, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         display_name = excluded.display_name,
                         context_window = excluded.context_window,
                         supports_streaming = excluded.supports_streaming,
                         supports_tools = excluded.supports_tools,
+                        tool_calling_mode = excluded.tool_calling_mode,
                         supports_vision = excluded.supports_vision,
                         supports_embeddings = excluded.supports_embeddings,
                         is_available = excluded.is_available,
@@ -2654,6 +3208,7 @@ impl Database {
                         model.context_window,
                         model.supports_streaming as i64,
                         model.supports_tools as i64,
+                        model.tool_calling_mode.as_str(),
                         model.supports_vision as i64,
                         model.supports_embeddings as i64,
                         model.is_available as i64,
@@ -2691,6 +3246,178 @@ impl Database {
         Ok(())
     }
 
+    /// FTR-010: returns the original result for a mutating companion API request. The caller
+    /// verifies method/path/body fingerprint equality before replaying it.
+    pub fn get_companion_api_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<CompanionApiIdempotencyRecord>, AppError> {
+        let row: Option<(String, String, String, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT method, path, request_hash, response_status, response_json
+                 FROM companion_api_idempotency
+                 WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(
+            |(method, path, request_hash, response_status, response_json)| {
+                let response_status = u16::try_from(response_status).map_err(|_| {
+                    AppError::new(
+                        "database_corrupt",
+                        "A companion API idempotency record has an invalid response status.",
+                    )
+                })?;
+                Ok(CompanionApiIdempotencyRecord {
+                    method,
+                    path,
+                    request_hash,
+                    response_status,
+                    response_json,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    /// Executes a companion-API mutation and stores its success response in the same SQLite
+    /// transaction. Matching retries return the original value without invoking `operation`;
+    /// reuse for a different method/path/body/status fails closed.
+    pub fn execute_companion_api_idempotent<T, F>(
+        &self,
+        request: &CompanionApiIdempotencyRequest<'_>,
+        operation: F,
+    ) -> Result<CompanionApiIdempotentResult<T>, AppError>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce(&Database) -> Result<T, AppError>,
+    {
+        self.transaction(|| {
+            if let Some(existing) = self.get_companion_api_idempotency(request.idempotency_key)? {
+                if existing.method != request.method
+                    || existing.path != request.path
+                    || existing.request_hash != request.request_hash
+                    || existing.response_status != request.response_status
+                {
+                    return Err(AppError::new(
+                        "idempotency_conflict",
+                        "This idempotency key was already used for a different request.",
+                    ));
+                }
+                let value = serde_json::from_str(&existing.response_json).map_err(|_| {
+                    AppError::new(
+                        "database_corrupt",
+                        "A stored companion API replay response is invalid.",
+                    )
+                })?;
+                return Ok(CompanionApiIdempotentResult {
+                    value,
+                    replayed: true,
+                });
+            }
+
+            let value = operation(self)?;
+            let response_json = serde_json::to_string(&value).map_err(|_| {
+                AppError::new(
+                    "serialization_failed",
+                    "Could not serialize companion API response.",
+                )
+            })?;
+            self.store_companion_api_idempotency(&NewCompanionApiIdempotencyRecord {
+                idempotency_key: request.idempotency_key,
+                method: request.method,
+                path: request.path,
+                request_hash: request.request_hash,
+                response_status: request.response_status,
+                response_json: &response_json,
+            })?;
+            Ok(CompanionApiIdempotentResult {
+                value,
+                replayed: false,
+            })
+        })
+    }
+
+    /// Stores one successful mutation result in the same SQLite transaction as the mutation.
+    /// A hard record cap prevents a client-controlled idempotency key stream from growing the
+    /// workspace database without bound.
+    pub fn store_companion_api_idempotency(
+        &self,
+        record: &NewCompanionApiIdempotencyRecord<'_>,
+    ) -> Result<(), AppError> {
+        if record.idempotency_key.is_empty() || record.idempotency_key.len() > 128 {
+            return Err(AppError::invalid_input(
+                "Idempotency key must contain between 1 and 128 characters.",
+            ));
+        }
+        if record.method.is_empty()
+            || record.method.len() > 16
+            || record.path.is_empty()
+            || record.path.len() > 512
+        {
+            return Err(AppError::invalid_input(
+                "Idempotency method or path is invalid.",
+            ));
+        }
+        if record.request_hash.len() != 64
+            || !record
+                .request_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AppError::invalid_input(
+                "Idempotency request hash must be a SHA-256 hex digest.",
+            ));
+        }
+        if !(200..=299).contains(&record.response_status) {
+            return Err(AppError::invalid_input(
+                "Only successful companion API responses can be stored for replay.",
+            ));
+        }
+        if record.response_json.len() > MAX_COMPANION_API_RESPONSE_BYTES {
+            return Err(AppError::invalid_input(
+                "Companion API replay response exceeds the storage limit.",
+            ));
+        }
+
+        self.connection.execute(
+            "INSERT INTO companion_api_idempotency (
+                idempotency_key, method, path, request_hash,
+                response_status, response_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                record.idempotency_key,
+                record.method,
+                record.path,
+                record.request_hash.to_ascii_lowercase(),
+                i64::from(record.response_status),
+                record.response_json,
+                now(),
+            ],
+        )?;
+        self.connection.execute(
+            "DELETE FROM companion_api_idempotency
+             WHERE idempotency_key IN (
+                 SELECT idempotency_key
+                 FROM companion_api_idempotency
+                 ORDER BY id DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![MAX_COMPANION_API_IDEMPOTENCY_RECORDS],
+        )?;
+        Ok(())
+    }
+
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
         self.connection
             .query_row(
@@ -2709,6 +3436,12 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![key, value, now()],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<(), AppError> {
+        self.connection
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -3013,16 +3746,17 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         id: row.get(0)?,
         name: row.get(1)?,
-        instructions: row.get(2)?,
-        default_provider_id: row.get(3)?,
-        default_model_id: row.get(4)?,
-        default_temperature: row.get(5)?,
-        default_max_tokens: row.get(6)?,
-        response_style: row.get(7)?,
-        tone: row.get(8)?,
-        archived_at: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        repository_path: row.get(2)?,
+        instructions: row.get(3)?,
+        default_provider_id: row.get(4)?,
+        default_model_id: row.get(5)?,
+        default_temperature: row.get(6)?,
+        default_max_tokens: row.get(7)?,
+        response_style: row.get(8)?,
+        tone: row.get(9)?,
+        archived_at: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -3074,6 +3808,105 @@ fn map_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationNote> {
         content: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
+    })
+}
+
+fn validate_code_idempotency(idempotency_key: &str, request_hash: &str) -> Result<(), AppError> {
+    if idempotency_key.is_empty() || idempotency_key.len() > 128 {
+        return Err(AppError::invalid_input(
+            "Ark Code idempotency key must be between 1 and 128 characters.",
+        ));
+    }
+    if request_hash.len() != 64 || !request_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::invalid_input(
+            "Ark Code request hash must be a SHA-256 value.",
+        ));
+    }
+    Ok(())
+}
+
+fn code_idempotency_conflict() -> AppError {
+    AppError::new(
+        "idempotency_conflict",
+        "This Ark Code idempotency key was already used for a different request.",
+    )
+}
+
+fn code_sql_value_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
+}
+
+fn code_run_state_from_str(value: &str) -> rusqlite::Result<CodeRunState> {
+    CodeRunState::try_from(value)
+        .map_err(|_| code_sql_value_error(format!("unknown code run state: {value}")))
+}
+
+fn code_recovery_outcome_from_str(value: &str) -> rusqlite::Result<CodeRecoveryOutcome> {
+    CodeRecoveryOutcome::try_from(value)
+        .map_err(|_| code_sql_value_error(format!("unknown code recovery outcome: {value}")))
+}
+
+fn map_code_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
+    Ok(CodeSession {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        archived: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn map_code_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeAgentRun> {
+    let state: String = row.get(7)?;
+    let recovery_outcome: Option<String> = row.get(19)?;
+    Ok(CodeAgentRun {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        parent_run_id: row.get(2)?,
+        provider_id: row.get(3)?,
+        model_id: row.get(4)?,
+        repository_path_snapshot: row.get(5)?,
+        repository_identity_hash: row.get(6)?,
+        state: code_run_state_from_str(&state)?,
+        max_steps: row.get::<_, i64>(8)? as u32,
+        max_active_ms: row.get::<_, i64>(9)? as u64,
+        max_tokens: row.get::<_, i64>(10)? as u64,
+        max_cost_microunits: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
+        steps_used: row.get::<_, i64>(12)? as u32,
+        active_elapsed_ms: row.get::<_, i64>(13)? as u64,
+        reserved_tokens: row.get::<_, i64>(14)? as u64,
+        actual_tokens: row.get::<_, i64>(15)? as u64,
+        actual_cost_microunits: row.get::<_, Option<i64>>(16)?.map(|value| value as u64),
+        cancel_requested_at: row.get(17)?,
+        terminal_reason: row.get(18)?,
+        recovery_outcome: recovery_outcome
+            .as_deref()
+            .map(code_recovery_outcome_from_str)
+            .transpose()?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+        completed_at: row.get(22)?,
+    })
+}
+
+fn map_code_run_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeRunEvent> {
+    let state: String = row.get(4)?;
+    Ok(CodeRunEvent {
+        run_id: row.get(0)?,
+        sequence: row.get::<_, i64>(1)? as u64,
+        schema_version: row.get::<_, i64>(2)? as u32,
+        kind: row.get(3)?,
+        state: code_run_state_from_str(&state)?,
+        summary: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -3158,6 +3991,7 @@ fn map_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
 }
 
 fn map_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConfig> {
+    let id: String = row.get(0)?;
     let provider_type: String = row.get(2)?;
     let base_url: Option<String> = row.get(3)?;
     let class = base_url
@@ -3176,7 +4010,8 @@ fn map_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConfig> {
     // actually implement for this type.
     let capabilities = crate::providers::ProviderCapabilities::for_provider_type(&provider_type);
     Ok(ProviderConfig {
-        id: row.get(0)?,
+        is_user_managed: !crate::config::is_seeded_provider_id(&id),
+        id,
         name: row.get(1)?,
         provider_type,
         base_url,
@@ -3195,6 +4030,11 @@ fn map_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConfig> {
 }
 
 fn map_model(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelInfo> {
+    let tool_calling_mode = match row.get::<_, String>(7)?.as_str() {
+        "native" => ToolCallingMode::Native,
+        "prompted" => ToolCallingMode::Prompted,
+        _ => ToolCallingMode::Unsupported,
+    };
     Ok(ModelInfo {
         id: row.get(0)?,
         provider_id: row.get(1)?,
@@ -3203,13 +4043,14 @@ fn map_model(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelInfo> {
         context_window: row.get(4)?,
         supports_streaming: row.get::<_, i64>(5)? != 0,
         supports_tools: row.get::<_, i64>(6)? != 0,
-        supports_vision: row.get::<_, i64>(7)? != 0,
-        supports_embeddings: row.get::<_, i64>(8)? != 0,
-        is_available: row.get::<_, i64>(9)? != 0,
-        last_seen_at: row.get(10)?,
-        metadata_json: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        tool_calling_mode,
+        supports_vision: row.get::<_, i64>(8)? != 0,
+        supports_embeddings: row.get::<_, i64>(9)? != 0,
+        is_available: row.get::<_, i64>(10)? != 0,
+        last_seen_at: row.get(11)?,
+        metadata_json: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -3242,6 +4083,57 @@ mod tests {
             .into_iter()
             .map(|conversation| conversation.id)
             .collect()
+    }
+
+    #[test]
+    fn companion_api_idempotency_result_is_transactional_and_survives_reopen() {
+        let (db, path) = test_db();
+        let response_json = r#"{"id":"conversation-1"}"#;
+        db.transaction(|| {
+            db.store_companion_api_idempotency(&NewCompanionApiIdempotencyRecord {
+                idempotency_key: "request-1",
+                method: "POST",
+                path: "/v1/conversations",
+                request_hash: &"a".repeat(64),
+                response_status: 201,
+                response_json,
+            })
+        })
+        .expect("store idempotency result");
+
+        drop(db);
+        let reopened = Database::open(&path).expect("reopen database");
+        let record = reopened
+            .get_companion_api_idempotency("request-1")
+            .expect("read idempotency result")
+            .expect("result exists");
+        assert_eq!(record.method, "POST");
+        assert_eq!(record.path, "/v1/conversations");
+        assert_eq!(record.request_hash, "a".repeat(64));
+        assert_eq!(record.response_status, 201);
+        assert_eq!(record.response_json, response_json);
+
+        let rollback: Result<(), AppError> = reopened.transaction(|| {
+            reopened.store_companion_api_idempotency(&NewCompanionApiIdempotencyRecord {
+                idempotency_key: "rolled-back",
+                method: "PATCH",
+                path: "/v1/conversations/conversation-1",
+                request_hash: &"b".repeat(64),
+                response_status: 200,
+                response_json,
+            })?;
+            Err(AppError::new("test_rollback", "roll back"))
+        });
+        assert!(rollback.is_err());
+        assert!(reopened
+            .get_companion_api_idempotency("rolled-back")
+            .expect("query rolled back result")
+            .is_none());
+
+        drop(reopened);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     // ── ARC-004: WAL mode, busy timeout, and read-replica concurrency ───────
@@ -4609,12 +5501,41 @@ mod tests {
 
         let project = db.create_project("Research").expect("project created");
         assert_eq!(project.name, "Research");
+        assert_eq!(project.repository_path, None);
         assert_eq!(project.instructions, None);
         assert_eq!(project.default_provider_id, None);
         assert_eq!(project.default_model_id, None);
         assert_eq!(project.default_temperature, None);
         assert_eq!(project.default_max_tokens, None);
         assert_eq!(project.archived_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_repository_binding_persists_switches_and_clears_independently() {
+        let (db, path) = test_db();
+        let project = db.create_project("Code").expect("project created");
+
+        let bound = db
+            .set_project_repository(&project.id, Some("/canonical/first"))
+            .expect("repository bound");
+        assert_eq!(bound.repository_path.as_deref(), Some("/canonical/first"));
+
+        let switched = db
+            .set_project_repository(&project.id, Some("/canonical/second"))
+            .expect("repository switched");
+        assert_eq!(
+            switched.repository_path.as_deref(),
+            Some("/canonical/second")
+        );
+
+        let cleared = db
+            .set_project_repository(&project.id, None)
+            .expect("repository removed");
+        assert_eq!(cleared.repository_path, None);
+        assert_eq!(cleared.name, "Code");
 
         drop(db);
         let _ = fs::remove_file(path);
@@ -4746,11 +5667,15 @@ mod tests {
             .expect("conversation created");
         db.set_conversation_project(&conversation.id, Some(&project.id))
             .expect("assigned");
+        let attachment = db
+            .create_attachment(&conversation.id, "evidence.txt", "retained evidence")
+            .expect("attachment created");
 
         let preview = db
             .preview_project_deletion(&project.id)
             .expect("preview computed");
         assert_eq!(preview.conversation_count, 1);
+        assert_eq!(preview.attachment_count, 1);
         assert_eq!(preview.project.id, project.id);
 
         db.delete_project(&project.id).expect("project deleted");
@@ -4759,6 +5684,12 @@ mod tests {
             .get_conversation(&conversation.id)
             .expect("conversation still exists — deletion must not cascade");
         assert_eq!(refetched.project_id, None);
+        assert_eq!(
+            db.get_attachment(&attachment.id)
+                .expect("attachment is retained with its conversation")
+                .sha256,
+            attachment.sha256
+        );
 
         let missing = db.get_project(&project.id).expect_err("project is gone");
         assert_eq!(missing.code, "not_found");
@@ -5934,6 +6865,19 @@ mod tests {
             .any(|alternative| alternative.message_id == second_assistant.id
                 && alternative.is_active));
 
+        let topology = db
+            .get_branch_topology(&conversation.id)
+            .expect("whole topology loads");
+        assert_eq!(topology.len(), 3);
+        assert!(topology
+            .iter()
+            .any(|node| node.message_id == second_assistant.id && node.is_active));
+        assert!(topology.iter().any(|node| {
+            node.message_id == first_assistant.id
+                && !node.is_active
+                && node.parent_message_id.as_deref() == Some(user.id.as_str())
+        }));
+
         let active = db
             .switch_active_branch(&conversation.id, &first_assistant.id)
             .expect("branch switched");
@@ -5941,7 +6885,26 @@ mod tests {
             active.last().map(|message| message.id.as_str()),
             Some(first_assistant.id.as_str())
         );
+        let switched_topology = db
+            .get_branch_topology(&conversation.id)
+            .expect("topology refreshes after switching");
+        assert!(switched_topology
+            .iter()
+            .any(|node| node.message_id == first_assistant.id && node.is_active));
+        assert!(switched_topology
+            .iter()
+            .any(|node| node.message_id == second_assistant.id && !node.is_active));
 
+        drop(db);
+        let db = Database::open(&path).expect("database reopens after a simulated restart");
+        assert_eq!(
+            db.get_conversation(&conversation.id)
+                .expect("conversation survives restart")
+                .current_message_id
+                .as_deref(),
+            Some(first_assistant.id.as_str()),
+            "the selected branch must survive restart"
+        );
         drop(db);
         let _ = fs::remove_file(path);
     }
@@ -6000,6 +6963,16 @@ mod tests {
                 .iter()
                 .find(|alternative| alternative.message_id == assistant.id)
                 .and_then(|alternative| alternative.branch_name.as_deref()),
+            Some("Concise")
+        );
+
+        drop(db);
+        let db = Database::open(&path).expect("database reopens after a simulated restart");
+        assert_eq!(
+            db.get_message(&assistant.id)
+                .expect("branch name survives restart")
+                .branch_name
+                .as_deref(),
             Some("Concise")
         );
 
@@ -6264,6 +7237,7 @@ mod tests {
             context_window: None,
             supports_streaming: true,
             supports_tools: false,
+            tool_calling_mode: ToolCallingMode::Unsupported,
             supports_vision: false,
             supports_embeddings: false,
             is_available: true,
@@ -6273,9 +7247,12 @@ mod tests {
             updated_at: timestamp.clone(),
         };
 
+        let mut native_model = model("m1", "llama3.2:latest");
+        native_model.supports_tools = true;
+        native_model.tool_calling_mode = ToolCallingMode::Native;
         db.upsert_models(
             DEFAULT_PROVIDER_ID,
-            &[model("m1", "llama3.2:latest"), model("m2", "llama3.2:8b")],
+            &[native_model, model("m2", "llama3.2:8b")],
         )
         .expect("initial upsert succeeds");
 
@@ -6286,7 +7263,10 @@ mod tests {
         // Refresh with only one of the two models present — the other must be marked
         // unavailable (not deleted, per the existing "mark stale then re-upsert" design) as
         // one atomic operation.
-        db.upsert_models(DEFAULT_PROVIDER_ID, &[model("m1", "llama3.2:latest")])
+        let mut native_model = model("m1", "llama3.2:latest");
+        native_model.supports_tools = true;
+        native_model.tool_calling_mode = ToolCallingMode::Native;
+        db.upsert_models(DEFAULT_PROVIDER_ID, &[native_model])
             .expect("second upsert succeeds");
 
         let listed = db.list_models(DEFAULT_PROVIDER_ID).expect("list models");
@@ -6304,6 +7284,8 @@ mod tests {
             m1.is_available,
             "the re-upserted model must be marked available"
         );
+        assert!(m1.supports_tools);
+        assert_eq!(m1.tool_calling_mode, ToolCallingMode::Native);
         assert!(
             !m2.is_available,
             "the model absent from the refresh batch must be marked unavailable"
@@ -6325,6 +7307,7 @@ mod tests {
             context_window: None,
             supports_streaming: true,
             supports_tools: false,
+            tool_calling_mode: ToolCallingMode::Unsupported,
             supports_vision: false,
             supports_embeddings: false,
             is_available: true,
@@ -6575,6 +7558,103 @@ mod tests {
     }
 
     #[test]
+    fn migration_0016_preserves_legacy_native_tool_support() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let connection = Connection::open(&path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..15] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, now()],
+                )
+                .unwrap_or_else(|error| {
+                    panic!("migration {} is recorded: {error}", migration.version)
+                });
+        }
+        connection
+            .execute(
+                "INSERT INTO providers (
+                    id, name, provider_type, base_url, default_temperature, default_max_tokens,
+                    is_local, is_enabled, created_at, updated_at
+                 ) VALUES (?1, 'Legacy provider', 'ollama', 'http://localhost:11434',
+                    0.7, 2048, 1, 1, ?2, ?2)",
+                params![DEFAULT_PROVIDER_ID, now()],
+            )
+            .expect("legacy provider is seeded");
+        connection
+            .execute(
+                "INSERT INTO models (
+                    id, provider_id, name, supports_streaming, supports_tools,
+                    supports_vision, supports_embeddings, is_available, created_at, updated_at
+                 ) VALUES ('legacy-native', ?1, 'legacy-native', 1, 1, 0, 0, 1, ?2, ?2)",
+                params![DEFAULT_PROVIDER_ID, now()],
+            )
+            .expect("legacy model is seeded before migration 16");
+        drop(connection);
+
+        let db = Database::open(&path).expect("migration 16 applies");
+        let model = db
+            .list_models(DEFAULT_PROVIDER_ID)
+            .expect("models remain readable")
+            .into_iter()
+            .find(|model| model.id == "legacy-native")
+            .expect("legacy model survives");
+        assert!(model.supports_tools);
+        assert_eq!(model.tool_calling_mode, ToolCallingMode::Native);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
+    #[test]
+    fn migration_0017_preserves_projects_and_starts_repository_unbound() {
+        let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
+        let connection = Connection::open(&path).expect("raw connection opens");
+        for migration in &MIGRATIONS[..16] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("migration {} applies: {error}", migration.version));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, now()],
+                )
+                .unwrap_or_else(|error| {
+                    panic!("migration {} is recorded: {error}", migration.version)
+                });
+        }
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, created_at, updated_at)
+                 VALUES ('legacy-project', 'Legacy project', ?1, ?1)",
+                params![now()],
+            )
+            .expect("legacy project seeded");
+        drop(connection);
+
+        let db = Database::open(&path).expect("migration 17 applies");
+        let project = db
+            .get_project("legacy-project")
+            .expect("legacy project remains readable");
+        assert_eq!(project.name, "Legacy project");
+        assert_eq!(project.repository_path, None);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
+    #[test]
     fn update_provider_enforces_sec_001_destination_policy() {
         let (db, path) = test_db();
         fn changes(
@@ -6640,6 +7720,102 @@ mod tests {
             )
             .expect_err("invalid scheme is never acceptable");
         assert_eq!(error.code, "invalid_input");
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn user_remote_provider_creation_and_deletion_are_opt_in_and_transactional() {
+        let (db, path) = test_db();
+        let missing_ack = db
+            .create_remote_provider(CreateRemoteProviderChanges {
+                name: "OpenAI",
+                provider_type: OPENAI_PROVIDER_TYPE,
+                base_url: OPENAI_PROVIDER_BASE_URL,
+                acknowledge_remote_risk: false,
+                allow_insecure_remote: false,
+            })
+            .expect_err("remote creation must require disclosure acknowledgment");
+        assert_eq!(missing_ack.code, "destination_requires_confirmation");
+
+        let provider = db
+            .create_remote_provider(CreateRemoteProviderChanges {
+                name: "OpenAI",
+                provider_type: OPENAI_PROVIDER_TYPE,
+                base_url: OPENAI_PROVIDER_BASE_URL,
+                acknowledge_remote_risk: true,
+                allow_insecure_remote: false,
+            })
+            .expect("remote provider created");
+        assert!(provider.is_user_managed);
+        assert!(!provider.is_local);
+        assert_eq!(provider.destination_class, "public");
+        assert!(provider.capabilities.requires_auth);
+
+        let conversation = db
+            .create_conversation(Some("Remote chat".to_string()))
+            .expect("conversation created");
+        db.connection
+            .execute(
+                "UPDATE conversations SET provider_id = ?1, model_id = 'gpt-test' WHERE id = ?2",
+                params![provider.id, conversation.id],
+            )
+            .expect("conversation provider set");
+        let project = db
+            .create_project("Remote project")
+            .expect("project created");
+        db.update_project(
+            &project.id,
+            crate::projects::UpdateProjectChanges {
+                name: &project.name,
+                instructions: None,
+                default_provider_id: Some(&provider.id),
+                default_model_id: Some("gpt-test"),
+                default_temperature: None,
+                default_max_tokens: None,
+                response_style: None,
+                tone: None,
+            },
+        )
+        .expect("project provider set");
+        let message = db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "assistant",
+                "Historical answer",
+                "complete",
+                Some(&provider.id),
+                Some("gpt-test"),
+            )
+            .expect("historical message created");
+
+        db.delete_user_provider(&provider.id)
+            .expect("user provider deleted");
+        assert_eq!(
+            db.get_provider(&provider.id)
+                .expect_err("provider removed")
+                .code,
+            "not_found"
+        );
+        let conversation = db
+            .get_conversation(&conversation.id)
+            .expect("conversation retained");
+        assert_eq!(conversation.provider_id, None);
+        assert_eq!(conversation.model_id, None);
+        let project = db.get_project(&project.id).expect("project retained");
+        assert_eq!(project.default_provider_id, None);
+        assert_eq!(project.default_model_id, None);
+        let message = db.get_message(&message.id).expect("message retained");
+        assert_eq!(message.provider_id.as_deref(), Some(provider.id.as_str()));
+        assert_eq!(message.model_id.as_deref(), Some("gpt-test"));
+
+        let protected = db
+            .delete_user_provider(DEFAULT_PROVIDER_ID)
+            .expect_err("seeded provider must be protected");
+        assert_eq!(protected.code, "provider_delete_forbidden");
 
         drop(db);
         let _ = fs::remove_file(path);
@@ -7348,5 +8524,106 @@ mod tests {
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
         let _ = find_backup_sibling(&path).map(fs::remove_file);
+    }
+
+    #[test]
+    fn code_session_and_queued_run_are_atomic_idempotent_and_sequenced() {
+        let (db, path) = test_db();
+        let project = db
+            .create_project("Ark Code project")
+            .expect("project created");
+        let session_hash = "a".repeat(64);
+        let session = db
+            .create_code_session(
+                &project.id,
+                "Investigate parser",
+                "create-session-1",
+                &session_hash,
+            )
+            .expect("session created");
+        let replayed = db
+            .create_code_session(
+                &project.id,
+                "Investigate parser",
+                "create-session-1",
+                &session_hash,
+            )
+            .expect("same request replays");
+        assert_eq!(replayed.id, session.id);
+        let conflict = db
+            .create_code_session(
+                &project.id,
+                "Different request",
+                "create-session-1",
+                &"b".repeat(64),
+            )
+            .expect_err("changed request cannot reuse key");
+        assert_eq!(conflict.code, "idempotency_conflict");
+
+        let run_hash = "c".repeat(64);
+        let repository_hash = "d".repeat(64);
+        let new_run = NewCodeRun {
+            session_id: &session.id,
+            parent_run_id: None,
+            provider_id: DEFAULT_PROVIDER_ID,
+            model_id: "test-model",
+            repository_path_snapshot: "C:\\repository",
+            repository_identity_hash: &repository_hash,
+            max_steps: 12,
+            max_active_ms: 600_000,
+            max_tokens: 32_768,
+            max_cost_microunits: None,
+            idempotency_key: "create-run-1",
+            request_hash: &run_hash,
+        };
+        let run = db
+            .create_code_agent_run(&new_run)
+            .expect("queued run created");
+        assert_eq!(run.state, CodeRunState::Queued);
+        let replayed_run = db
+            .create_code_agent_run(&new_run)
+            .expect("queued run replayed");
+        assert_eq!(replayed_run.id, run.id);
+
+        let detail = db
+            .get_code_session_detail(&session.id)
+            .expect("session detail loaded");
+        assert_eq!(detail.runs.len(), 1);
+        assert_eq!(detail.events.len(), 1);
+        assert_eq!(detail.events[0].sequence, 0);
+        assert_eq!(detail.events[0].schema_version, 1);
+        assert_eq!(detail.events[0].state, CodeRunState::Queued);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn code_session_rows_follow_project_ownership_without_touching_other_projects() {
+        let (db, path) = test_db();
+        let first = db.create_project("First").expect("first project created");
+        let second = db.create_project("Second").expect("second project created");
+        db.create_code_session(&first.id, "First session", "first-session", &"1".repeat(64))
+            .expect("first session created");
+        let retained = db
+            .create_code_session(
+                &second.id,
+                "Second session",
+                "second-session",
+                &"2".repeat(64),
+            )
+            .expect("second session created");
+
+        db.delete_project(&first.id).expect("first project deleted");
+        let sessions = db.list_code_sessions(false).expect("sessions listed");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, retained.id);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 }

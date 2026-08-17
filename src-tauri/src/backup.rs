@@ -68,6 +68,16 @@ fn manifest_path(backup_path: &Path) -> PathBuf {
     backup_path.with_file_name(file_name)
 }
 
+fn validated_backup_path(raw_path: &str) -> Result<PathBuf, AppError> {
+    crate::validation::validate_existing_file_path(raw_path, "Backup file").map_err(|error| {
+        if error.code == "file_not_found" {
+            AppError::new("backup_not_found", error.message)
+        } else {
+            error
+        }
+    })
+}
+
 fn sha256_file(path: &Path) -> Result<(u64, String), AppError> {
     let mut file = fs::File::open(path).map_err(|error| {
         AppError::new(
@@ -98,9 +108,8 @@ fn sha256_file(path: &Path) -> Result<(u64, String), AppError> {
 /// hash-manifested `.ark-backup-manifest.json` sidecar. `destination_dir` must not already
 /// contain an `ark.sqlite3` — this never overwrites an existing backup.
 pub fn create_backup(state: &AppState, destination_dir: String) -> Result<BackupResult, AppError> {
-    let destination_dir = PathBuf::from(crate::validation::validate_workspace_path(
-        &destination_dir,
-    )?);
+    let destination_dir =
+        crate::validation::validate_directory_target_path(&destination_dir, "Backup destination")?;
     let backup_path = destination_dir.join(DATABASE_FILE_NAME);
 
     // Exclusivity only — this never disconnects or swaps the live connections (unlike SEC-006's
@@ -144,13 +153,7 @@ pub fn create_backup(state: &AppState, destination_dir: String) -> Result<Backup
 /// Read-only: opens `backup_path`, checks its integrity, and reports what it contains, without
 /// modifying anything — the live workspace is never touched by this function.
 pub fn preview_restore(state: &AppState, backup_path: String) -> Result<RestorePreview, AppError> {
-    let backup_path = PathBuf::from(crate::validation::validate_workspace_path(&backup_path)?);
-    if !backup_path.is_file() {
-        return Err(AppError::new(
-            "backup_not_found",
-            format!("{} is not a file.", backup_path.display()),
-        ));
-    }
+    let backup_path = validated_backup_path(&backup_path)?;
 
     let key = restore_key_for(state)?;
     let connection = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -213,8 +216,9 @@ pub fn restore_backup(
     backup_path: String,
     target_root: String,
 ) -> Result<(), AppError> {
-    let backup_path = PathBuf::from(crate::validation::validate_workspace_path(&backup_path)?);
-    let target_root = PathBuf::from(crate::validation::validate_workspace_path(&target_root)?);
+    let backup_path = validated_backup_path(&backup_path)?;
+    let target_root =
+        crate::validation::validate_directory_target_path(&target_root, "Restore destination")?;
     let target_database_path = target_root.join(DATABASE_FILE_NAME);
     if target_database_path.exists() {
         return Err(AppError::new(
@@ -364,6 +368,8 @@ mod tests {
             pending_streams: Mutex::new(HashMap::new()),
             active_imports: Mutex::new(HashMap::new()),
             active_ollama_pulls: Mutex::new(HashMap::new()),
+            active_provider_refreshes: Mutex::new(HashMap::new()),
+            active_managed_model_downloads: Mutex::new(HashMap::new()),
             storage_maintenance: AtomicBool::new(false),
             sidecar: Arc::new(Mutex::new(SidecarState::new())),
             observability_log: Arc::new(Mutex::new(crate::observability::DiagnosticsLog::new())),

@@ -9,8 +9,16 @@
 
 use crate::attachments::Attachment;
 use crate::chat::{
-    BranchAlternative, Conversation, ConversationMessagePage, ConversationPage, Message,
-    SendChatResult, StreamEvent,
+    BranchAlternative, BranchTopologyNode, Conversation, ConversationMessagePage, ConversationPage,
+    Message, SendChatResult, StreamEvent,
+};
+use crate::code_sessions::{
+    CodeAgentRun, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+};
+use crate::code_tools::{
+    RepositoryDirectoryListing, RepositoryEntry, RepositoryEntryKind, RepositoryFileRead,
+    RepositoryGitDiff, RepositoryGitStatus, RepositoryMap, RepositorySearchMatch,
+    RepositorySearchResult,
 };
 use crate::commands::ImportProgressEvent;
 use crate::companion_api::{CompanionApiStatus, CompanionApiTokenReveal};
@@ -22,6 +30,10 @@ use crate::errors::AppError;
 use crate::import_export::{
     ImportConversationPreview, ImportConversationResult, ImportProviderMapping,
     WorkspaceImportPreview, WorkspaceImportPreviewEntry, WorkspaceImportResult,
+};
+use crate::managed_models::{
+    HardwareFitRisk, ManagedModelCatalogEntry, ManagedModelCompatibility,
+    ManagedModelDownloadProgress, ManagedModelOperation, ManagedModelPreflight, ManagedModelStatus,
 };
 use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
 use crate::projects::{Project, ProjectDeletionPreview};
@@ -151,6 +163,7 @@ fn sample_provider_config() -> ProviderConfig {
         allow_insecure_remote: false,
         destination_class: "loopback".to_string(),
         capabilities: crate::providers::ProviderCapabilities::for_provider_type("ollama"),
+        is_user_managed: false,
         is_enabled: true,
         created_at: "2026-08-13T00:00:00Z".to_string(),
         updated_at: "2026-08-13T00:00:00Z".to_string(),
@@ -166,6 +179,7 @@ fn sample_model_info() -> ModelInfo {
         context_window: None,
         supports_streaming: true,
         supports_tools: false,
+        tool_calling_mode: crate::providers::ToolCallingMode::Unsupported,
         supports_vision: false,
         supports_embeddings: false,
         is_available: true,
@@ -180,6 +194,7 @@ fn sample_project() -> Project {
     Project {
         id: "project-1".to_string(),
         name: "Research".to_string(),
+        repository_path: Some("/example/repository".to_string()),
         instructions: Some("Cite sources.".to_string()),
         default_provider_id: Some("provider-1".to_string()),
         default_model_id: Some("model-1".to_string()),
@@ -251,6 +266,7 @@ fn project_deletion_preview_matches_contract() {
         &ProjectDeletionPreview {
             project: sample_project(),
             conversation_count: 3,
+            attachment_count: 5,
         },
     );
 }
@@ -390,6 +406,138 @@ fn tool_status_matches_contract() {
     );
 }
 
+fn sample_repository_entry() -> RepositoryEntry {
+    RepositoryEntry {
+        path: "src/lib.rs".to_string(),
+        kind: RepositoryEntryKind::File,
+        byte_size: Some(42),
+        context_eligible: true,
+    }
+}
+
+#[test]
+fn ark_code_repository_dtos_match_contract() {
+    assert_matches_contract("RepositoryEntry", &sample_repository_entry());
+    assert_matches_contract(
+        "RepositoryDirectoryListing",
+        &RepositoryDirectoryListing {
+            path: ".".to_string(),
+            entries: vec![sample_repository_entry()],
+            truncated: false,
+        },
+    );
+    assert_matches_contract(
+        "RepositoryFileRead",
+        &RepositoryFileRead {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            total_lines: 1,
+            content: "fn main() {}".to_string(),
+            sha256: "a".repeat(64),
+            truncated: false,
+            next_start_line: None,
+        },
+    );
+    let search_match = RepositorySearchMatch {
+        path: "src/lib.rs".to_string(),
+        line_number: 1,
+        line: "fn main() {}".to_string(),
+    };
+    assert_matches_contract("RepositorySearchMatch", &search_match);
+    assert_matches_contract(
+        "RepositorySearchResult",
+        &RepositorySearchResult {
+            matches: vec![search_match],
+            files_scanned: 1,
+            bytes_scanned: 12,
+            skipped_files: 0,
+            truncated: false,
+        },
+    );
+    assert_matches_contract(
+        "RepositoryMap",
+        &RepositoryMap {
+            entries: vec![sample_repository_entry()],
+            inspected_files: 1,
+            skipped_files: 0,
+            truncated: false,
+        },
+    );
+    assert_matches_contract(
+        "RepositoryGitStatus",
+        &RepositoryGitStatus {
+            clean: true,
+            porcelain: String::new(),
+        },
+    );
+    assert_matches_contract(
+        "RepositoryGitDiff",
+        &RepositoryGitDiff {
+            working_tree: String::new(),
+            staged: String::new(),
+        },
+    );
+}
+
+#[test]
+fn ark_code_session_dtos_match_contract() {
+    let timestamp = "2026-08-17T00:00:00Z".to_string();
+    let session = CodeSession {
+        id: "code-session-1".to_string(),
+        project_id: "project-1".to_string(),
+        title: "Investigate parser".to_string(),
+        archived: false,
+        created_at: timestamp.clone(),
+        updated_at: timestamp.clone(),
+    };
+    let run = CodeAgentRun {
+        id: "code-run-1".to_string(),
+        session_id: session.id.clone(),
+        parent_run_id: None,
+        provider_id: "ollama".to_string(),
+        model_id: "qwen".to_string(),
+        repository_path_snapshot: "C:\\repository".to_string(),
+        repository_identity_hash: "a".repeat(64),
+        state: CodeRunState::Queued,
+        max_steps: 12,
+        max_active_ms: 600_000,
+        max_tokens: 32_768,
+        max_cost_microunits: None,
+        steps_used: 0,
+        active_elapsed_ms: 0,
+        reserved_tokens: 0,
+        actual_tokens: 0,
+        actual_cost_microunits: None,
+        cancel_requested_at: None,
+        terminal_reason: None,
+        recovery_outcome: None,
+        created_at: timestamp.clone(),
+        updated_at: timestamp.clone(),
+        completed_at: None,
+    };
+    let event = CodeRunEvent {
+        run_id: run.id.clone(),
+        sequence: 0,
+        schema_version: 1,
+        kind: "run_queued".to_string(),
+        state: CodeRunState::Queued,
+        summary: "Run queued".to_string(),
+        created_at: timestamp,
+    };
+    assert_matches_contract("CodeSession", &session);
+    assert_matches_contract("CodeAgentRun", &run);
+    assert_matches_contract("CodeRunEvent", &event);
+    assert_matches_contract(
+        "CodeSessionDetail",
+        &CodeSessionDetail {
+            session,
+            runs: vec![run],
+            events: vec![event],
+        },
+    );
+}
+
 #[test]
 fn conversation_note_matches_contract() {
     assert_matches_contract(
@@ -468,6 +616,27 @@ fn branch_alternative_matches_contract() {
             is_active: true,
             has_descendants: false,
             branch_name: None,
+        },
+    );
+}
+
+#[test]
+fn branch_topology_node_matches_contract() {
+    assert_matches_contract(
+        "BranchTopologyNode",
+        &BranchTopologyNode {
+            message_id: "message-1".to_string(),
+            parent_message_id: None,
+            revision_of_message_id: None,
+            path_index: 0,
+            role: "assistant".to_string(),
+            created_at: "2026-08-13T00:00:00Z".to_string(),
+            status: "complete".to_string(),
+            content_preview: "Hello".to_string(),
+            is_active: true,
+            branch_name: None,
+            provider_id: Some("provider-1".to_string()),
+            model_id: Some("model-1".to_string()),
         },
     );
 }
@@ -562,11 +731,13 @@ fn app_bootstrap_matches_contract() {
             models: vec![sample_model_info()],
             projects: vec![sample_project()],
             personas: vec![sample_persona()],
+            application_instructions: Some("Be helpful across this workspace.".to_string()),
             workspace_path: "C:\\workspace\\ark.sqlite3".to_string(),
             workspace: sample_workspace_info(),
             device_settings: crate::device_settings::DeviceSettings {
                 theme: "dark".to_string(),
                 built_in_model_path: None,
+                managed_model_directory: None,
                 crash_capture_enabled: false,
                 completion_notifications_enabled: false,
                 perf_metrics_enabled: false,
@@ -583,6 +754,7 @@ fn device_settings_matches_contract() {
         &crate::device_settings::DeviceSettings {
             theme: "dark".to_string(),
             built_in_model_path: Some("model.gguf".to_string()),
+            managed_model_directory: None,
             crash_capture_enabled: true,
             completion_notifications_enabled: true,
             perf_metrics_enabled: true,
@@ -838,6 +1010,80 @@ fn built_in_runtime_status_matches_contract() {
     );
 }
 
+fn sample_managed_model() -> ManagedModelCatalogEntry {
+    ManagedModelCatalogEntry {
+        id: "model-1".to_string(),
+        display_name: "Model 1".to_string(),
+        publisher: "Publisher".to_string(),
+        description: "A reviewed model.".to_string(),
+        source_repository: "https://example.test/repository".to_string(),
+        source_commit: "commit".to_string(),
+        download_url: "https://example.test/model.gguf".to_string(),
+        allowed_download_host_suffixes: vec!["example.test".to_string()],
+        file_name: "model.gguf".to_string(),
+        size_bytes: 1024,
+        sha256: "a".repeat(64),
+        license: "Apache-2.0".to_string(),
+        license_url: "https://example.test/license".to_string(),
+        quantization: "Q4_0".to_string(),
+        context_window: 32768,
+        architecture: "qwen2".to_string(),
+        parameter_count: "0.49B".to_string(),
+        minimum_available_memory_bytes: 2048,
+        recommended_available_memory_bytes: 4096,
+        compatibility: ManagedModelCompatibility {
+            runtime: "llama.cpp".to_string(),
+            runtime_version: "b9859".to_string(),
+            format: "GGUF".to_string(),
+            platforms: vec!["win32-x64".to_string()],
+        },
+    }
+}
+
+#[test]
+fn managed_model_dtos_match_contract() {
+    let model = sample_managed_model();
+    assert_matches_contract("ManagedModelCompatibility", &model.compatibility);
+    assert_matches_contract("ManagedModelCatalogEntry", &model);
+    assert_matches_contract(
+        "ManagedModelStatus",
+        &ManagedModelStatus {
+            model: model.clone(),
+            storage_directory: "C:\\Models".to_string(),
+            model_path: "C:\\Models\\model.gguf".to_string(),
+            installed: false,
+            verified: false,
+            partial_bytes: 0,
+        },
+    );
+    assert_matches_contract(
+        "ManagedModelPreflight",
+        &ManagedModelPreflight {
+            model_id: model.id.clone(),
+            operation: ManagedModelOperation::Download,
+            risk: HardwareFitRisk::Safe,
+            available_memory_bytes: 8192,
+            minimum_available_memory_bytes: 2048,
+            recommended_available_memory_bytes: 4096,
+            available_disk_bytes: 8192,
+            required_disk_bytes: 2048,
+            advisories: Vec::new(),
+            advanced_override_allowed: false,
+        },
+    );
+    assert_matches_contract(
+        "ManagedModelDownloadProgress",
+        &ManagedModelDownloadProgress {
+            schema_version: 1,
+            model_id: model.id,
+            status: "downloading".to_string(),
+            completed_bytes: 512,
+            total_bytes: 1024,
+            resumed: true,
+        },
+    );
+}
+
 #[test]
 fn app_error_matches_contract_as_app_error_shape() {
     assert_matches_contract(
@@ -919,6 +1165,7 @@ fn sample_workspace_import_preview_entry() -> WorkspaceImportPreviewEntry {
         conversation_id: "conversation-1".to_string(),
         title: "Example conversation".to_string(),
         message_count: 4,
+        attachment_count: 2,
         duplicate_of_local_id: None,
     }
 }

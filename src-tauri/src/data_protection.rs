@@ -822,6 +822,8 @@ mod tests {
             pending_streams: Mutex::new(HashMap::new()),
             active_imports: Mutex::new(HashMap::new()),
             active_ollama_pulls: Mutex::new(HashMap::new()),
+            active_provider_refreshes: Mutex::new(HashMap::new()),
+            active_managed_model_downloads: Mutex::new(HashMap::new()),
             storage_maintenance: AtomicBool::new(false),
             sidecar: Arc::new(Mutex::new(SidecarState::new())),
             observability_log: Arc::new(Mutex::new(crate::observability::DiagnosticsLog::new())),

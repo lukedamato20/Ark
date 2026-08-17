@@ -4,6 +4,7 @@ import {
   Download,
   FileJson,
   FileText,
+  GitBranch,
   Globe,
   Loader2,
   MoreVertical,
@@ -19,6 +20,7 @@ import {
 import * as React from "react";
 import { cn } from "../../lib/cn";
 import { CONNECTION_METADATA } from "../../lib/destinationClass";
+import { buildRemoteRequestDisclosure } from "../../lib/providerDisclosure";
 import { downloadText, safeFilename } from "../../lib/download";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
@@ -27,6 +29,7 @@ import { useArkClient } from "../../lib/useArkClient";
 import { useToolApproval } from "../../lib/useToolApproval";
 import type {
   Attachment,
+  BranchTopologyNode,
   Conversation,
   ConversationNote,
   Message,
@@ -139,6 +142,10 @@ export function ChatView({
   const [model, setModel] = React.useState("");
   const [editingMessageId, setEditingMessageId] = React.useState<string | null>(null);
   const [activeImport, setActiveImport] = React.useState<ActiveImport | null>(null);
+  const [branchExplorerOpen, setBranchExplorerOpen] = React.useState(false);
+  const [branchTopology, setBranchTopology] = React.useState<BranchTopologyNode[]>([]);
+  const [branchTopologyLoading, setBranchTopologyLoading] = React.useState(false);
+  const [branchSwitchingId, setBranchSwitchingId] = React.useState<string | null>(null);
   const [stagedAttachments, setStagedAttachments] = React.useState<Attachment[]>([]);
   const [sentAttachmentsByMessageId, setSentAttachmentsByMessageId] = React.useState<Record<string, Attachment[]>>({});
   const [attaching, setAttaching] = React.useState(false);
@@ -162,6 +169,12 @@ export function ChatView({
   React.useEffect(() => {
     if (focusComposerSignal > 0) composerRef.current?.focus();
   }, [focusComposerSignal]);
+
+  React.useEffect(() => {
+    setBranchExplorerOpen(false);
+    setBranchTopology([]);
+    setBranchSwitchingId(null);
+  }, [conversation?.id]);
 
   // CMP-001: loads every attachment for the conversation on switch — staged ones (`messageId`
   // still `null`) restore the compose-in-progress state (see `handleAttachFiles`'s doc comment
@@ -256,6 +269,12 @@ export function ChatView({
   const health = providerHealth[provider?.id ?? ""] ?? null;
   const providerModels = models.filter((item) => item.providerId === (provider?.id ?? ""));
   const selectedModelAvailable = providerModels.some((item) => item.name === model && item.isAvailable);
+  const remoteRequestDisclosure = buildRemoteRequestDisclosure(
+    provider,
+    model,
+    stagedAttachments.length,
+    webSearchEnabled,
+  );
   const activeAssistant = React.useMemo(
     () => [...messages].reverse().find((m) => m.role === "assistant" && m.status === "streaming"),
     [messages],
@@ -641,6 +660,36 @@ export function ChatView({
     [client],
   );
 
+  async function openBranchExplorer() {
+    if (!conversation) return;
+    setBranchExplorerOpen(true);
+    setBranchTopologyLoading(true);
+    try {
+      setBranchTopology(await client.getConversationBranchTopology(conversation.id));
+    } catch (error) {
+      setBranchExplorerOpen(false);
+      onError(getErrorMessage(error));
+    } finally {
+      setBranchTopologyLoading(false);
+    }
+  }
+
+  async function switchFromBranchExplorer(messageId: string) {
+    if (!conversation || activeAssistant) return;
+    setBranchSwitchingId(messageId);
+    try {
+      const nextMessages = await client.switchActiveBranch(conversation.id, messageId);
+      onMessagesChange(nextMessages);
+      setBranchTopology(await client.getConversationBranchTopology(conversation.id));
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBranchSwitchingId(null);
+    }
+  }
+
+  const closeBranchExplorer = React.useCallback(() => setBranchExplorerOpen(false), []);
+
   const handleKeepPartial = React.useCallback(
     async (message: Message) => {
       if (!conversation) {
@@ -855,6 +904,17 @@ export function ChatView({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={branchExplorerOpen}
+            aria-label="Open branch explorer"
+            onClick={() => void openBranchExplorer()}
+            disabled={!conversation}
+            className="flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <GitBranch className="h-4 w-4" aria-hidden="true" />
+          </button>
           <ProviderModelDropdown
             providers={providers}
             models={models}
@@ -930,6 +990,19 @@ export function ChatView({
           </div>
         )}
       </div>
+
+      {branchExplorerOpen && conversation && (
+        <BranchExplorerDialog
+          conversationTitle={conversation.title}
+          nodes={branchTopology}
+          providers={providers}
+          loading={branchTopologyLoading}
+          switchingId={branchSwitchingId}
+          canSwitch={!activeAssistant}
+          onSwitch={switchFromBranchExplorer}
+          onClose={closeBranchExplorer}
+        />
+      )}
 
       {isLoading ? (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -1027,6 +1100,24 @@ export function ChatView({
                 ))}
               </div>
             )}
+            {remoteRequestDisclosure && (
+              <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs">
+                <div className="font-medium text-amber-800 dark:text-amber-200">Remote request disclosure</div>
+                <div className="mt-1 grid gap-0.5 text-muted-foreground">
+                  <span>
+                    Endpoint:{" "}
+                    <span className="break-all font-mono text-foreground">{remoteRequestDisclosure.endpoint}</span>
+                  </span>
+                  <span>
+                    Route: <span className="font-mono text-foreground">{remoteRequestDisclosure.route}</span>
+                  </span>
+                  <span>
+                    Model: <span className="font-mono text-foreground">{remoteRequestDisclosure.model}</span>
+                  </span>
+                  <span>Leaving this device: {remoteRequestDisclosure.contextItems.join(", ")}.</span>
+                </div>
+              </div>
+            )}
             <Textarea
               ref={composerRef}
               value={draft}
@@ -1103,6 +1194,195 @@ export function ChatView({
         </div>
       </footer>
     </main>
+  );
+}
+
+function BranchExplorerDialog({
+  conversationTitle,
+  nodes,
+  providers,
+  loading,
+  switchingId,
+  canSwitch,
+  onSwitch,
+  onClose,
+}: {
+  conversationTitle: string;
+  nodes: BranchTopologyNode[];
+  providers: ProviderConfig[];
+  loading: boolean;
+  switchingId: string | null;
+  canSwitch: boolean;
+  onSwitch: (messageId: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const dialogRef = React.useRef<HTMLElement | null>(null);
+  const ordered = React.useMemo(() => {
+    const byId = new Map(nodes.map((node) => [node.messageId, node]));
+    const children = new Map<string | null, BranchTopologyNode[]>();
+    for (const node of nodes) {
+      const parentKey = node.parentMessageId && byId.has(node.parentMessageId) ? node.parentMessageId : null;
+      const bucket = children.get(parentKey) ?? [];
+      bucket.push(node);
+      children.set(parentKey, bucket);
+    }
+    for (const bucket of children.values()) {
+      bucket.sort((left, right) => left.pathIndex - right.pathIndex || left.createdAt.localeCompare(right.createdAt));
+    }
+
+    const result: { node: BranchTopologyNode; depth: number; siblingCount: number }[] = [];
+    const stack = [...(children.get(null) ?? [])]
+      .reverse()
+      .map((node) => ({ node, depth: 0, siblingCount: (children.get(null) ?? []).length }));
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) break;
+      result.push(current);
+      const nodeChildren = children.get(current.node.messageId) ?? [];
+      for (let index = nodeChildren.length - 1; index >= 0; index -= 1) {
+        stack.push({ node: nodeChildren[index], depth: current.depth + 1, siblingCount: nodeChildren.length });
+      }
+    }
+
+    const descendantCounts = new Map<string, number>();
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const node = result[index].node;
+      const count = descendantCounts.get(node.messageId) ?? 0;
+      if (node.parentMessageId) {
+        descendantCounts.set(node.parentMessageId, (descendantCounts.get(node.parentMessageId) ?? 0) + count + 1);
+      }
+    }
+    return result.map((entry) => ({ ...entry, descendantCount: descendantCounts.get(entry.node.messageId) ?? 0 }));
+  }, [nodes]);
+
+  React.useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-background/75 p-3 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="branch-explorer-title"
+        className="flex max-h-[min(48rem,calc(100vh-1.5rem))] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-xl"
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-border p-4">
+          <div className="min-w-0">
+            <h2 id="branch-explorer-title" className="text-sm font-semibold">
+              Branch explorer
+            </h2>
+            <p className="mt-1 truncate text-xs text-muted-foreground">{conversationTitle}</p>
+          </div>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} autoFocus>
+            <X className="h-4 w-4" />
+            Close
+          </Button>
+        </header>
+        <div className="flex items-center gap-3 border-b border-border px-4 py-2 text-xs text-muted-foreground">
+          <span>{nodes.length} messages</span>
+          <span>{nodes.filter((node) => node.isActive).length} on current path</span>
+          <span>{ordered.filter((entry) => entry.siblingCount > 1).length} branch alternatives</span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading branch topology…
+            </div>
+          ) : ordered.length === 0 ? (
+            <p className="py-12 text-center text-sm text-muted-foreground">No messages in this conversation.</p>
+          ) : (
+            <ol className="grid gap-1.5">
+              {ordered.map(({ node, depth, siblingCount, descendantCount }) => {
+                const provider = providers.find((item) => item.id === node.providerId);
+                const label =
+                  node.branchName ||
+                  (node.role === "assistant" ? `Response ${node.pathIndex}` : `User ${node.pathIndex}`);
+                return (
+                  <li key={node.messageId} style={{ paddingLeft: Math.min(depth * 12, 96) }}>
+                    <div
+                      className={cn(
+                        "grid gap-1 rounded-md border p-2 text-xs",
+                        node.isActive ? "border-primary/40 bg-primary/5" : "border-border bg-card",
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium text-foreground">{label}</span>
+                        <span className="text-muted-foreground">{node.role}</span>
+                        {node.isActive && <span className="text-primary">Current path</span>}
+                        {siblingCount > 1 && <span className="text-amber-600 dark:text-amber-400">Divergence</span>}
+                        <span className="ml-auto text-muted-foreground">{node.status}</span>
+                      </div>
+                      <p className="line-clamp-2 whitespace-pre-wrap break-words text-muted-foreground">
+                        {node.contentPreview}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                        {node.role === "assistant" && (
+                          <span>{provider?.name ?? node.providerId ?? "Unknown provider"}</span>
+                        )}
+                        {node.modelId && <span>{node.modelId}</span>}
+                        {descendantCount > 0 && <span>{descendantCount} downstream</span>}
+                        {node.role === "assistant" && !node.isActive && (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            className="ml-auto"
+                            disabled={!canSwitch || switchingId !== null}
+                            onClick={() => void onSwitch(node.messageId)}
+                          >
+                            {switchingId === node.messageId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                            Switch
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 

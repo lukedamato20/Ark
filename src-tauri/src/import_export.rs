@@ -161,12 +161,65 @@ pub fn export_conversation_markdown(
         .as_deref()
         .and_then(|provider_id| db.get_provider(provider_id).ok());
 
-    Ok(conversation_to_markdown(
+    let mut markdown = conversation_to_markdown(
         &conversation,
         &active_messages,
         provider.as_ref(),
         all_messages.len() > active_messages.len(),
-    ))
+    );
+    append_attachments_markdown(db, conversation_id, &mut markdown)?;
+    Ok(markdown)
+}
+
+fn build_attachment_exports(
+    db: &Database,
+    conversation_id: &str,
+) -> Result<Vec<crate::export::AttachmentExport>, AppError> {
+    db.list_conversation_attachments(conversation_id)?
+        .into_iter()
+        .map(|attachment| {
+            let content = db.get_attachment_content(&attachment.id)?;
+            Ok(crate::export::AttachmentExport {
+                schema_version: crate::export::ATTACHMENT_EXPORT_SCHEMA_VERSION,
+                attachment,
+                content,
+            })
+        })
+        .collect()
+}
+
+fn append_attachments_markdown(
+    db: &Database,
+    conversation_id: &str,
+    markdown: &mut String,
+) -> Result<(), AppError> {
+    let attachments = build_attachment_exports(db, conversation_id)?;
+    if attachments.is_empty() {
+        return Ok(());
+    }
+    markdown.push_str("\n\n## Attachments\n");
+    for (index, export) in attachments.iter().enumerate() {
+        let attachment = &export.attachment;
+        let file_name = attachment.file_name.replace('`', "\\`");
+        markdown.push_str(&format!(
+            "\n### Attachment {}\n\n- File: `{file_name}`\n- Bytes: {}\n- SHA-256: `{}`\n",
+            index + 1,
+            attachment.byte_size,
+            attachment.sha256
+        ));
+        if let Some(message_id) = attachment.message_id.as_deref() {
+            markdown.push_str(&format!("- Source message: `{message_id}`\n"));
+        } else {
+            markdown.push_str("- Source message: staged / not sent\n");
+        }
+        markdown.push_str("\nContent:\n\n");
+        for line in export.content.lines() {
+            markdown.push_str("    ");
+            markdown.push_str(line);
+            markdown.push('\n');
+        }
+    }
+    Ok(())
 }
 
 fn build_conversation_export(
@@ -186,12 +239,14 @@ fn build_conversation_export(
             provider.api_key_ref = None;
             provider
         });
+    let attachments = build_attachment_exports(db, conversation_id)?;
     Ok(ConversationExport {
         schema_version: CONVERSATION_EXPORT_SCHEMA_VERSION,
         exported_at: now(),
         messages: db.get_all_conversation_messages(conversation_id)?,
         conversation,
         provider,
+        attachments,
     })
 }
 
@@ -219,7 +274,11 @@ pub fn export_workspace_json(db: &Database, project_id: Option<&str>) -> Result<
             conversation_id: conversation.id.clone(),
             title: conversation.title.clone(),
             message_count: export.messages.len(),
-            sha256: crate::export::conversation_messages_fingerprint(&export.messages),
+            attachment_count: export.attachments.len(),
+            sha256: crate::export::conversation_content_fingerprint(
+                &export.messages,
+                &export.attachments,
+            ),
         });
         conversation_exports.push(export);
     }
@@ -229,6 +288,7 @@ pub fn export_workspace_json(db: &Database, project_id: Option<&str>) -> Result<
             schema_version: crate::export::WORKSPACE_EXPORT_SCHEMA_VERSION,
             exported_at: now(),
             scope: project_id.map_or_else(|| "workspace".to_string(), |id| format!("project:{id}")),
+            entity_versions: Some(crate::export::WorkspaceEntityVersions::current()),
             entries,
         },
         conversations: conversation_exports,
@@ -273,6 +333,7 @@ pub fn export_workspace_markdown(
             provider.as_ref(),
             all_messages.len() > active_messages.len(),
         ));
+        append_attachments_markdown(db, &conversation.id, &mut document)?;
         document.push_str("\n\n---\n\n");
     }
     Ok(document)
@@ -284,6 +345,7 @@ pub struct WorkspaceImportPreviewEntry {
     pub conversation_id: String,
     pub title: String,
     pub message_count: usize,
+    pub attachment_count: usize,
     /// FTR-008: set when a local conversation's message content already hashes identically to
     /// this entry — the only "duplicate" signal actually implemented. The frontend uses this to
     /// default the entry's "include" choice to unchecked (skip); nothing here attempts a
@@ -328,10 +390,13 @@ pub fn preview_workspace_import(
     let mut local_fingerprints: HashMap<String, String> = HashMap::new();
     for conversation in db.list_all_conversations(None)? {
         let messages = db.get_all_conversation_messages(&conversation.id)?;
-        local_fingerprints.insert(
-            crate::export::conversation_messages_fingerprint(&messages),
-            conversation.id,
-        );
+        let fingerprint = if export.manifest.schema_version >= 2 {
+            let attachments = build_attachment_exports(db, &conversation.id)?;
+            crate::export::conversation_content_fingerprint(&messages, &attachments)
+        } else {
+            crate::export::conversation_messages_fingerprint(&messages)
+        };
+        local_fingerprints.insert(fingerprint, conversation.id);
     }
 
     let mut source_provider_ids = HashSet::new();
@@ -359,6 +424,7 @@ pub fn preview_workspace_import(
             conversation_id: entry.conversation_id.clone(),
             title: entry.title.clone(),
             message_count: entry.message_count,
+            attachment_count: entry.attachment_count,
             duplicate_of_local_id: local_fingerprints.get(&entry.sha256).cloned(),
         })
         .collect();
@@ -553,6 +619,26 @@ where
             on_progress(index + 1, export.messages.len())?;
         }
 
+        for attachment_export in &export.attachments {
+            let imported_attachment = db.create_attachment(
+                &imported.id,
+                &attachment_export.attachment.file_name,
+                &attachment_export.content,
+            )?;
+            if let Some(source_message_id) = attachment_export.attachment.message_id.as_deref() {
+                let imported_message_id = id_map.get(source_message_id).ok_or_else(|| {
+                    AppError::invalid_input(
+                        "Conversation export attachment references a message that was not imported.",
+                    )
+                })?;
+                db.link_attachments_to_message(
+                    &imported.id,
+                    imported_message_id,
+                    std::slice::from_ref(&imported_attachment.id),
+                )?;
+            }
+        }
+
         if is_cancelled() {
             return Err(AppError::new("import_cancelled", "Import was cancelled."));
         }
@@ -634,11 +720,24 @@ mod tests {
             "llama3.2:latest",
         )
         .expect("set current message");
+        db.set_message_branch_name(&assistant.id, Some("Detailed"))
+            .expect("branch named");
+        let attachment = db
+            .create_attachment(&conversation.id, "evidence.txt", "portable attachment body")
+            .expect("attachment created");
+        db.link_attachments_to_message(
+            &conversation.id,
+            &user.id,
+            std::slice::from_ref(&attachment.id),
+        )
+        .expect("attachment linked");
 
         let markdown =
             export_conversation_markdown(&db, &conversation.id).expect("markdown export succeeds");
         assert!(markdown.contains("Hello 世界"));
         assert!(markdown.contains("Hi there! 🌍"));
+        assert!(markdown.contains("evidence.txt"));
+        assert!(markdown.contains("portable attachment body"));
 
         let json = export_conversation_json(&db, &conversation.id).expect("json export succeeds");
         let imported = import_conversation_json(&db, &json).expect("import succeeds");
@@ -654,9 +753,210 @@ mod tests {
         assert_eq!(imported_messages.len(), 2);
         assert_eq!(imported_messages[0].content, "Hello 世界");
         assert_eq!(imported_messages[1].content, "Hi there! 🌍");
+        assert_eq!(
+            imported_messages[1].branch_name.as_deref(),
+            Some("Detailed")
+        );
+        assert_eq!(
+            db.get_conversation(&imported.conversation.id)
+                .expect("imported conversation reloads")
+                .current_message_id,
+            Some(imported_messages[1].id.clone()),
+            "the selected branch must survive export/import with its remapped local ID"
+        );
+        let imported_attachments = db
+            .list_conversation_attachments(&imported.conversation.id)
+            .expect("imported attachments");
+        assert_eq!(imported_attachments.len(), 1);
+        assert_eq!(imported_attachments[0].file_name, "evidence.txt");
+        assert_eq!(
+            imported_attachments[0].message_id.as_deref(),
+            Some(imported_messages[0].id.as_str()),
+            "linked attachment must follow the remapped message ID"
+        );
+        assert_eq!(
+            db.get_attachment_content(&imported_attachments[0].id)
+                .expect("imported attachment content"),
+            "portable attachment body"
+        );
 
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn workspace_v2_round_trip_hashes_attachments_and_tolerates_unknown_fields() {
+        let (source_db, source_path) = test_db();
+        let conversation = source_db
+            .create_conversation(Some("Workspace portable".to_string()))
+            .expect("conversation created");
+        let message = source_db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "Read the evidence.",
+                "complete",
+                Some(DEFAULT_PROVIDER_ID),
+                Some("model"),
+            )
+            .expect("message created");
+        let attachment = source_db
+            .create_attachment(&conversation.id, "evidence.txt", "attachment evidence")
+            .expect("attachment created");
+        source_db
+            .link_attachments_to_message(
+                &conversation.id,
+                &message.id,
+                std::slice::from_ref(&attachment.id),
+            )
+            .expect("attachment linked");
+
+        let json = export_workspace_json(&source_db, None).expect("workspace export");
+        let bundle: crate::export::WorkspaceExport =
+            serde_json::from_str(&json).expect("workspace JSON");
+        assert_eq!(
+            bundle.manifest.schema_version,
+            crate::export::WORKSPACE_EXPORT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            bundle.manifest.entity_versions,
+            Some(crate::export::WorkspaceEntityVersions::current())
+        );
+        assert_eq!(bundle.manifest.entries[0].attachment_count, 1);
+        assert_eq!(bundle.conversations[0].attachments.len(), 1);
+
+        let preview = preview_workspace_import(&source_db, &json).expect("preview");
+        assert_eq!(preview.entries[0].attachment_count, 1);
+        assert_eq!(
+            preview.entries[0].duplicate_of_local_id.as_deref(),
+            Some(conversation.id.as_str())
+        );
+
+        let (destination_db, destination_path) = test_db();
+        let include = HashSet::from([conversation.id.clone()]);
+        let result =
+            import_workspace_json(&destination_db, &json, &include).expect("workspace import");
+        assert_eq!(result.imported_count, 1);
+        let imported = destination_db
+            .list_all_conversations(None)
+            .expect("destination conversations")
+            .into_iter()
+            .next()
+            .expect("imported conversation");
+        let imported_attachments = destination_db
+            .list_conversation_attachments(&imported.id)
+            .expect("destination attachments");
+        assert_eq!(imported_attachments.len(), 1);
+        assert_eq!(
+            destination_db
+                .get_attachment_content(&imported_attachments[0].id)
+                .expect("destination content"),
+            "attachment evidence"
+        );
+
+        let reexport = export_workspace_json(&destination_db, None).expect("destination re-export");
+        let reexport: crate::export::WorkspaceExport =
+            serde_json::from_str(&reexport).expect("re-export JSON");
+        assert_eq!(
+            reexport.manifest.entries[0].sha256, bundle.manifest.entries[0].sha256,
+            "content hash must survive ID/timestamp remapping"
+        );
+
+        let mut additive: serde_json::Value = serde_json::from_str(&json).expect("JSON value");
+        additive["futureBundleField"] = serde_json::json!({ "ignored": true });
+        additive["manifest"]["futureManifestField"] = serde_json::json!(42);
+        additive["manifest"]["entityVersions"]["futureEntity"] = serde_json::json!(1);
+        additive["conversations"][0]["futureConversationExportField"] = serde_json::json!(true);
+        additive["conversations"][0]["conversation"]["futureConversationField"] =
+            serde_json::json!(true);
+        additive["conversations"][0]["messages"][0]["futureMessageField"] = serde_json::json!(true);
+        additive["conversations"][0]["attachments"][0]["futureAttachmentExportField"] =
+            serde_json::json!(true);
+        additive["conversations"][0]["attachments"][0]["attachment"]["futureAttachmentField"] =
+            serde_json::json!(true);
+        preview_workspace_import(
+            &destination_db,
+            &serde_json::to_string(&additive).expect("additive JSON"),
+        )
+        .expect("unknown additive fields are tolerated within schema v2");
+
+        let mut tampered: serde_json::Value = serde_json::from_str(&json).expect("JSON value");
+        tampered["conversations"][0]["attachments"][0]["content"] =
+            serde_json::json!("tampered content");
+        let error = preview_workspace_import(
+            &destination_db,
+            &serde_json::to_string(&tampered).expect("tampered JSON"),
+        )
+        .expect_err("attachment tampering must fail before import");
+        assert_eq!(error.code, "invalid_input");
+
+        drop(source_db);
+        drop(destination_db);
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(destination_path);
+    }
+
+    #[test]
+    fn workspace_v1_without_attachments_or_new_provider_fields_remains_importable() {
+        let (source_db, source_path) = test_db();
+        let conversation = source_db
+            .create_conversation(Some("Legacy workspace".to_string()))
+            .expect("conversation created");
+        source_db
+            .append_message(
+                &conversation.id,
+                None,
+                None,
+                "user",
+                "Legacy message",
+                "complete",
+                Some(DEFAULT_PROVIDER_ID),
+                Some("model"),
+            )
+            .expect("message created");
+        let current_json = export_workspace_json(&source_db, None).expect("current export");
+        let current: crate::export::WorkspaceExport =
+            serde_json::from_str(&current_json).expect("current JSON");
+        let legacy_hash =
+            crate::export::conversation_messages_fingerprint(&current.conversations[0].messages);
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&current_json).expect("legacy mutation source");
+        legacy["manifest"]["schemaVersion"] = serde_json::json!(1);
+        legacy["manifest"]
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("entityVersions");
+        legacy["manifest"]["entries"][0]
+            .as_object_mut()
+            .expect("entry object")
+            .remove("attachmentCount");
+        legacy["manifest"]["entries"][0]["sha256"] = serde_json::json!(legacy_hash);
+        legacy["conversations"][0]["schemaVersion"] = serde_json::json!(1);
+        legacy["conversations"][0]
+            .as_object_mut()
+            .expect("conversation export object")
+            .remove("attachments");
+        legacy["conversations"][0]["provider"]
+            .as_object_mut()
+            .expect("provider object")
+            .remove("isUserManaged");
+        let legacy_json = serde_json::to_string(&legacy).expect("legacy JSON");
+
+        let (destination_db, destination_path) = test_db();
+        let preview = preview_workspace_import(&destination_db, &legacy_json)
+            .expect("schema-v1 preview remains supported");
+        assert_eq!(preview.entries[0].attachment_count, 0);
+        let include = HashSet::from([conversation.id]);
+        let imported = import_workspace_json(&destination_db, &legacy_json, &include)
+            .expect("schema-v1 import remains supported");
+        assert_eq!(imported.imported_count, 1);
+
+        drop(source_db);
+        drop(destination_db);
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(destination_path);
     }
 
     #[test]

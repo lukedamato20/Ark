@@ -60,6 +60,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
       embeddings: false,
       tools: false,
     },
+    isUserManaged: false,
     isEnabled: true,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -72,6 +73,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     contextWindow: 4096,
     supportsStreaming: true,
     supportsTools: false,
+    toolCallingMode: "unsupported",
     supportsVision: false,
     supportsEmbeddings: false,
     isAvailable: true,
@@ -124,6 +126,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     models: [model],
     projects: [],
     personas: [],
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -197,6 +200,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
       embeddings: false,
       tools: false,
     },
+    isUserManaged: false,
     isEnabled: true,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -207,6 +211,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
     models: [],
     projects: [],
     personas: [],
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -295,6 +300,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     models: [],
     projects: [],
     personas: [],
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -406,6 +412,7 @@ export function createLongConversationFixtureClient(): ArkClient {
       embeddings: false,
       tools: false,
     },
+    isUserManaged: false,
     isEnabled: true,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -418,6 +425,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     contextWindow: 4096,
     supportsStreaming: true,
     supportsTools: false,
+    toolCallingMode: "unsupported",
     supportsVision: false,
     supportsEmbeddings: false,
     isAvailable: true,
@@ -506,6 +514,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     models: [model],
     projects: [],
     personas: [],
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -550,6 +559,23 @@ export function createLongConversationFixtureClient(): ArkClient {
           branchName: branchNames[sibling.id] ?? sibling.branchName ?? null,
         }));
     },
+    getConversationBranchTopology: async () => {
+      const activeIds = new Set(computeActivePath().map((item) => item.id));
+      return allMessages.map((item) => ({
+        messageId: item.id,
+        parentMessageId: item.parentMessageId ?? null,
+        revisionOfMessageId: item.revisionOfMessageId ?? null,
+        pathIndex: item.pathIndex,
+        role: item.role,
+        createdAt: item.createdAt,
+        status: item.status,
+        contentPreview: item.content.slice(0, 140),
+        isActive: activeIds.has(item.id),
+        branchName: branchNames[item.id] ?? item.branchName ?? null,
+        providerId: item.providerId ?? null,
+        modelId: item.modelId ?? null,
+      }));
+    },
     switchActiveBranch: async (_conversationId, messageId) => {
       const target = allMessages.find((item) => item.id === messageId);
       if (!target?.parentMessageId) throw new Error("fixture: cannot switch to a root message");
@@ -575,6 +601,7 @@ export function createLongConversationFixtureClient(): ArkClient {
       provider,
     }),
     updateDeviceSettings: async (settings) => settings,
+    updateApplicationInstructions: async (instructions) => instructions,
     // FTR-004: every other fixture's updateConversationSettings is unimplemented — this is the
     // only way to exercise the conversation-settings panel's save flow live.
     updateConversationSettings: async (input) => ({
@@ -721,6 +748,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       embeddings: false,
       tools: false,
     },
+    isUserManaged: false,
     isEnabled: true,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -733,6 +761,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     contextWindow: 4096,
     supportsStreaming: true,
     supportsTools: false,
+    toolCallingMode: "unsupported",
     supportsVision: false,
     supportsEmbeddings: false,
     isAvailable: true,
@@ -983,6 +1012,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     models: [model],
     projects,
     personas,
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -1077,6 +1107,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       const created: Project = {
         id: `fixture-project-${projects.length}`,
         name,
+        repositoryPath: null,
         instructions: null,
         defaultProviderId: null,
         defaultModelId: null,
@@ -1103,6 +1134,13 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       project.updatedAt = new Date().toISOString();
       return { ...project };
     },
+    setProjectRepository: async (id, repositoryPath) => {
+      const project = projects.find((item) => item.id === id);
+      if (!project) throw new Error(`fixture: project ${id} not found`);
+      project.repositoryPath = repositoryPath;
+      project.updatedAt = new Date().toISOString();
+      return { ...project };
+    },
     setProjectArchived: async (id, archived) => {
       const project = projects.find((item) => item.id === id);
       if (!project) throw new Error(`fixture: project ${id} not found`);
@@ -1113,7 +1151,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       const project = projects.find((item) => item.id === id);
       if (!project) throw new Error(`fixture: project ${id} not found`);
       const conversationCount = conversations.filter((item) => item.projectId === id).length;
-      return { project: { ...project }, conversationCount };
+      return { project: { ...project }, conversationCount, attachmentCount: 0 };
     },
     deleteProject: async (id) => {
       const index = projects.findIndex((item) => item.id === id);
@@ -1197,6 +1235,40 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       return { ...persona };
     },
     listPersonaVersions: async (id) => [...(personaVersions[id] ?? [])],
+    exportPersonaJson: async (id) => {
+      const persona = personas.find((item) => item.id === id);
+      if (!persona) throw new Error(`fixture: persona ${id} not found`);
+      return JSON.stringify(
+        {
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          persona,
+          versions: personaVersions[id] ?? [],
+        },
+        null,
+        2,
+      );
+    },
+    importPersonaJson: async (json) => {
+      const parsed = JSON.parse(json) as {
+        schemaVersion: number;
+        persona: Persona;
+        versions: PersonaVersionSummary[];
+      };
+      if (parsed.schemaVersion !== 1 || parsed.versions.length === 0) {
+        throw new Error("Invalid persona export.");
+      }
+      const created: Persona = {
+        ...parsed.persona,
+        id: `fixture-persona-imported-${personas.length}`,
+      };
+      personas.push(created);
+      personaVersions[created.id] = parsed.versions.map((version) => ({
+        ...version,
+        id: `${created.id}-v${version.versionNumber}`,
+      }));
+      return { ...created };
+    },
     setPersonaArchived: async (id, archived) => {
       const persona = personas.find((item) => item.id === id);
       if (!persona) throw new Error(`fixture: persona ${id} not found`);
@@ -1226,13 +1298,14 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     exportWorkspaceJson: async (projectId) => {
       const scoped = projectId ? conversations.filter((item) => item.projectId === projectId) : conversations;
       const manifest = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         exportedAt: new Date().toISOString(),
         scope: projectId ? `project:${projectId}` : "workspace",
         entries: scoped.map((item) => ({
           conversationId: item.id,
           title: item.title,
           messageCount: 0,
+          attachmentCount: 0,
           sha256: `fixture-hash-${item.id}`,
         })),
       };
@@ -1252,7 +1325,10 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     },
     previewWorkspaceImport: async (json) => {
       const parsed = JSON.parse(json) as {
-        manifest: { scope: string; entries: { conversationId: string; title: string; messageCount: number }[] };
+        manifest: {
+          scope: string;
+          entries: { conversationId: string; title: string; messageCount: number; attachmentCount?: number }[];
+        };
       };
       return {
         scope: parsed.manifest.scope,
@@ -1260,6 +1336,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
           conversationId: entry.conversationId,
           title: entry.title,
           messageCount: entry.messageCount,
+          attachmentCount: entry.attachmentCount ?? 0,
           duplicateOfLocalId: conversations.some((item) => item.id === entry.conversationId)
             ? entry.conversationId
             : null,
@@ -1516,10 +1593,10 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
 
 /**
  * FTR-006 browser fixture: a reachable Ollama provider with two installed models carrying
- * realistic `/api/tags` `details` metadata (family/parameter size/quantization) — every other
- * fixture's pull/delete/cancel are unimplemented, so this is the only way to exercise the
- * Ollama model-management panel (metadata display, pull progress, cancellation, delete-with-
- * disk-footprint confirmation) live.
+ * realistic `/api/tags` plus bounded `/api/show` metadata — every other fixture's
+ * pull/delete/cancel are unimplemented, so this is the only way to exercise the Ollama
+ * model-management panel (metadata display, pull progress, cancellation, delete-with-disk-
+ * footprint confirmation) live.
  */
 export function createOllamaModelsFixtureClient(): ArkClient {
   const timestamp = "2026-08-15T06:00:00Z";
@@ -1550,11 +1627,12 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       modelDelete: true,
       modelUnload: false,
       requiresAuth: false,
-      reportsContextWindow: false,
+      reportsContextWindow: true,
       vision: false,
       embeddings: false,
       tools: false,
     },
+    isUserManaged: false,
     isEnabled: true,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -1565,9 +1643,10 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       providerId: provider.id,
       name: "llama3.2:8b",
       displayName: "llama3.2:8b",
-      contextWindow: null,
+      contextWindow: 131_072,
       supportsStreaming: true,
       supportsTools: false,
+      toolCallingMode: "unsupported",
       supportsVision: false,
       supportsEmbeddings: false,
       isAvailable: true,
@@ -1575,6 +1654,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       metadataJson: JSON.stringify({
         size: 4_700_000_000,
         details: { family: "llama", parameter_size: "8B", quantization_level: "Q4_0" },
+        arkShow: { contextWindow: 131_072, licenseSummary: "Llama 3.2 Community License" },
       }),
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -1584,9 +1664,10 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       providerId: provider.id,
       name: "mistral:7b",
       displayName: "mistral:7b",
-      contextWindow: null,
+      contextWindow: 32_768,
       supportsStreaming: true,
       supportsTools: false,
+      toolCallingMode: "unsupported",
       supportsVision: false,
       supportsEmbeddings: false,
       isAvailable: true,
@@ -1594,6 +1675,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
       metadataJson: JSON.stringify({
         size: 4_100_000_000,
         details: { family: "mistral", parameter_size: "7B", quantization_level: "Q4_K_M" },
+        arkShow: { contextWindow: 32_768, licenseSummary: "Apache-2.0" },
       }),
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -1607,6 +1689,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
     models: installedModels,
     projects: [],
     personas: [],
+    applicationInstructions: null,
     workspacePath: "C:\\Ark",
     workspace: {
       rootPath: "C:\\Ark",
@@ -1683,6 +1766,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
           contextWindow: null,
           supportsStreaming: true,
           supportsTools: false,
+          toolCallingMode: "unsupported",
           supportsVision: false,
           supportsEmbeddings: false,
           isAvailable: true,

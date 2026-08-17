@@ -63,7 +63,9 @@ export interface ArkController {
   changeConversationPersona: (id: string, personaId: string | null) => Promise<void>;
   setShowArchived: (showArchived: boolean) => void;
   refreshProviderModels: (providerId: string) => Promise<void>;
+  cancelProviderRefresh: (providerId: string) => Promise<void>;
   saveProvider: (provider: ProviderConfig) => void;
+  removeProvider: (id: string) => void;
   /** FTR-003: the project CRUD/archive mutations themselves go straight from the settings UI
    * through `useArkClient()`, matching `saveProvider`'s existing pattern — these two just sync
    * an already-server-confirmed result into the store. */
@@ -72,8 +74,10 @@ export interface ArkController {
   /** FTR-003: mirrors `saveProject`/`removeProject` exactly. */
   savePersona: (persona: Persona) => void;
   removePersona: (id: string) => void;
+  changeApplicationInstructions: (instructions: string | null) => Promise<void>;
   changeTheme: (theme: ThemeMode) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
+  changeManagedModelDirectory: (path: string | null) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
   changeCompletionNotificationsEnabled: (enabled: boolean) => Promise<void>;
   changePerfMetricsEnabled: (enabled: boolean) => Promise<void>;
@@ -347,7 +351,10 @@ export function useArkController(): ArkController {
           applyRefreshedModels(result);
         }
       } catch (error) {
-        if (isLatestRequest(sequence, providerRefreshSequenceRef.current.get(providerId) ?? 0)) {
+        if (
+          normalizeError(error).code !== "provider_refresh_cancelled" &&
+          isLatestRequest(sequence, providerRefreshSequenceRef.current.get(providerId) ?? 0)
+        ) {
           setError(getErrorMessage(error));
         }
       } finally {
@@ -355,6 +362,18 @@ export function useArkController(): ArkController {
       }
     },
     [applyRefreshedModels, client, setError],
+  );
+
+  const cancelProviderRefresh = React.useCallback(
+    async (providerId: string) => {
+      if (!providerId || !inFlightProviderRefreshesRef.current.has(providerId)) return;
+      try {
+        await client.cancelProviderRefresh(providerId);
+      } catch (error) {
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError],
   );
 
   const bootstrap = React.useCallback(async () => {
@@ -384,9 +403,11 @@ export function useArkController(): ArkController {
       stores.settings.set({
         workspacePath: data.workspacePath,
         workspace: data.workspace,
+        applicationInstructions: data.applicationInstructions,
         theme: data.deviceSettings.theme,
         builtInStatus: sidecarStatus,
         builtInModelPath: data.deviceSettings.builtInModelPath ?? null,
+        managedModelDirectory: data.deviceSettings.managedModelDirectory ?? null,
         crashCaptureEnabled: data.deviceSettings.crashCaptureEnabled,
         completionNotificationsEnabled: data.deviceSettings.completionNotificationsEnabled,
         perfMetricsEnabled: data.deviceSettings.perfMetricsEnabled,
@@ -630,6 +651,36 @@ export function useArkController(): ArkController {
     [stores],
   );
 
+  const removeProvider = React.useCallback(
+    (id: string) => {
+      stores.providers.set((current) => {
+        const health = { ...current.health };
+        delete health[id];
+        return {
+          ...current,
+          providers: removeEntity(current.providers, id),
+          models: entityCollection(entityList(current.models).filter((model) => model.providerId !== id)),
+          health,
+        };
+      });
+      patchStore(stores.catalog, {
+        conversations: entityCollection(
+          entityList(stores.catalog.getSnapshot().conversations).map((conversation) =>
+            conversation.providerId === id ? { ...conversation, providerId: null, modelId: null } : conversation,
+          ),
+        ),
+      });
+      patchStore(stores.projects, {
+        projects: entityCollection(
+          entityList(stores.projects.getSnapshot().projects).map((project) =>
+            project.defaultProviderId === id ? { ...project, defaultProviderId: null, defaultModelId: null } : project,
+          ),
+        ),
+      });
+    },
+    [stores],
+  );
+
   const saveProject = React.useCallback(
     (project: Project) =>
       patchStore(stores.projects, { projects: upsertEntity(stores.projects.getSnapshot().projects, project) }),
@@ -666,6 +717,23 @@ export function useArkController(): ArkController {
     [stores],
   );
 
+  const changeApplicationInstructions = React.useCallback(
+    async (instructions: string | null) => {
+      const previous = stores.settings.getSnapshot().applicationInstructions;
+      patchStore(stores.settings, { applicationInstructions: instructions });
+      try {
+        const saved = await client.updateApplicationInstructions(instructions);
+        patchStore(stores.settings, { applicationInstructions: saved });
+      } catch (error) {
+        if (stores.settings.getSnapshot().applicationInstructions === instructions) {
+          patchStore(stores.settings, { applicationInstructions: previous });
+        }
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
   const changeTheme = React.useCallback(
     async (theme: ThemeMode) => {
       const settings = stores.settings.getSnapshot();
@@ -675,6 +743,7 @@ export function useArkController(): ArkController {
         client.updateDeviceSettings({
           theme,
           builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
           perfMetricsEnabled: settings.perfMetricsEnabled,
@@ -705,6 +774,7 @@ export function useArkController(): ArkController {
         client.updateDeviceSettings({
           theme: settings.theme,
           builtInModelPath: path,
+          managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
           perfMetricsEnabled: settings.perfMetricsEnabled,
@@ -729,6 +799,42 @@ export function useArkController(): ArkController {
     [client, setError, stores],
   );
 
+  const changeManagedModelDirectory = React.useCallback(
+    async (path: string | null) => {
+      const settings = stores.settings.getSnapshot();
+      const sequence = ++settingsMutationSequenceRef.current;
+      patchStore(stores.settings, { managedModelDirectory: path });
+      const operation = settingsWriteQueueRef.current.then(() =>
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: path,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
+        }),
+      );
+      settingsWriteQueueRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        const saved = await operation;
+        patchStore(stores.settings, { managedModelDirectory: saved.managedModelDirectory ?? null });
+      } catch (error) {
+        if (
+          sequence === settingsMutationSequenceRef.current &&
+          stores.settings.getSnapshot().managedModelDirectory === path
+        ) {
+          patchStore(stores.settings, { managedModelDirectory: settings.managedModelDirectory });
+        }
+        setError(getErrorMessage(error));
+        throw error;
+      }
+    },
+    [client, setError, stores],
+  );
+
   const changeCrashCaptureEnabled = React.useCallback(
     async (enabled: boolean) => {
       const settings = stores.settings.getSnapshot();
@@ -738,6 +844,7 @@ export function useArkController(): ArkController {
         client.updateDeviceSettings({
           theme: settings.theme,
           builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: enabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
           perfMetricsEnabled: settings.perfMetricsEnabled,
@@ -782,6 +889,7 @@ export function useArkController(): ArkController {
         client.updateDeviceSettings({
           theme: settings.theme,
           builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: enabled,
           perfMetricsEnabled: settings.perfMetricsEnabled,
@@ -818,6 +926,7 @@ export function useArkController(): ArkController {
         client.updateDeviceSettings({
           theme: settings.theme,
           builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
           completionNotificationsEnabled: settings.completionNotificationsEnabled,
           perfMetricsEnabled: enabled,
@@ -1047,13 +1156,17 @@ export function useArkController(): ArkController {
       changeConversationPersona,
       setShowArchived,
       refreshProviderModels,
+      cancelProviderRefresh,
       saveProvider,
+      removeProvider,
       saveProject,
       removeProject,
       savePersona,
       removePersona,
+      changeApplicationInstructions,
       changeTheme,
       changeBuiltInModelPath,
+      changeManagedModelDirectory,
       changeCrashCaptureEnabled,
       changeCompletionNotificationsEnabled,
       changePerfMetricsEnabled,
@@ -1071,7 +1184,9 @@ export function useArkController(): ArkController {
     }),
     [
       bootstrap,
+      changeApplicationInstructions,
       changeBuiltInModelPath,
+      changeManagedModelDirectory,
       changeConversationArchived,
       changeConversationPinned,
       changeConversationProject,
@@ -1087,6 +1202,7 @@ export function useArkController(): ArkController {
       loadOlderMessages,
       openSearch,
       refreshProviderModels,
+      cancelProviderRefresh,
       removeProject,
       removePersona,
       renameConversation,
@@ -1094,6 +1210,7 @@ export function useArkController(): ArkController {
       saveProject,
       savePersona,
       saveProvider,
+      removeProvider,
       searchConversations,
       selectConversation,
       setBuiltInStatus,

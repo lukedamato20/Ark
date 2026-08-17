@@ -198,16 +198,12 @@ pub fn verify_audit_chain(events: &[AuditEvent]) -> bool {
 /// SEC-009 §2: the structural enforcement point. A repository-execution-tier scope must never
 /// be usable without an active Repository binding — this is the "never reachable from Ark Chat,
 /// structurally" requirement made real as a callable check, not just a comment.
-/// `repository_bound` stands in for a real Ark Code Repository context (Phase 6.5, not yet
-/// implemented); this function is what CODE-004/CODE-005 must call before honoring any
-/// repository-execution grant.
-/// Not yet called by production code: CMP-003 (`tools.rs`) only registers `ChatSafe`-tier tools,
-/// so nothing in this build ever constructs a `RepositoryExecution` scope to check. This becomes
-/// a real, called function the moment Phase 6.5's CODE-004/CODE-005 exist — kept here now rather
-/// than deleted so that work has a tested enforcement point to call on day one, matching the
-/// "define the extensible structure before its first consumer" pattern this module already used
-/// for its own types before CMP-003 existed.
-#[allow(dead_code)]
+/// CODE-003 now provides that real binding as `Project::repository_path`; callers must derive
+/// `repository_bound` from the active Project, then resolve every filesystem argument through
+/// `repository::resolve_existing_repository_path`. This function is what CODE-004/CODE-005 must
+/// call before honoring any repository-execution grant.
+/// CODE-004 calls this for every read-only coding operation; Ark Chat's tool registry never
+/// contains a RepositoryExecution definition.
 pub fn enforce_tier_boundary(
     scope: &CapabilityScope,
     repository_bound: bool,

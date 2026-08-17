@@ -21,6 +21,28 @@ use std::path::Path;
 use sysinfo::Disks;
 use tauri::{AppHandle, Emitter};
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteProviderKind {
+    OpenAi,
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRemoteProviderRequest {
+    pub name: String,
+    pub kind: RemoteProviderKind,
+    /// Ignored for the curated OpenAI adapter, whose official endpoint is fixed by Ark.
+    pub base_url: Option<String>,
+    /// FTR-007/SEC-001: remote disclosure must be explicitly accepted before creation.
+    #[serde(default)]
+    pub acknowledge_remote_risk: bool,
+    /// Development-only escape hatch for advanced OpenAI-compatible endpoints.
+    #[serde(default)]
+    pub allow_insecure_remote: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProviderRequest {
@@ -40,6 +62,71 @@ pub struct UpdateProviderRequest {
     /// Explicit development-mode exception for HTTP outside loopback.
     #[serde(default)]
     pub allow_insecure_remote: bool,
+}
+
+pub fn create_remote_provider(
+    state: &AppState,
+    request: CreateRemoteProviderRequest,
+) -> Result<ProviderConfig, AppError> {
+    let (provider_type, base_url) = match request.kind {
+        RemoteProviderKind::OpenAi => {
+            if request.base_url.as_deref().is_some_and(|value| {
+                !value.trim().is_empty() && value.trim() != crate::config::OPENAI_PROVIDER_BASE_URL
+            }) {
+                return Err(AppError::invalid_input(
+                    "The curated OpenAI provider uses Ark's fixed official API endpoint.",
+                ));
+            }
+            if request.allow_insecure_remote {
+                return Err(AppError::invalid_input(
+                    "The curated OpenAI provider cannot enable insecure HTTP.",
+                ));
+            }
+            (
+                crate::config::OPENAI_PROVIDER_TYPE,
+                crate::config::OPENAI_PROVIDER_BASE_URL,
+            )
+        }
+        RemoteProviderKind::OpenAiCompatible => (
+            crate::config::LOCAL_INFERENCE_HOST_PROVIDER_TYPE,
+            request.base_url.as_deref().ok_or_else(|| {
+                AppError::invalid_input("An OpenAI-compatible provider requires a base URL.")
+            })?,
+        ),
+    };
+
+    crate::commands::lock_db(state)?.create_remote_provider(
+        crate::db::CreateRemoteProviderChanges {
+            name: &request.name,
+            provider_type,
+            base_url,
+            acknowledge_remote_risk: request.acknowledge_remote_risk,
+            allow_insecure_remote: request.allow_insecure_remote,
+        },
+    )
+}
+
+pub async fn delete_provider(
+    state: &AppState,
+    provider_id: String,
+    confirmed: bool,
+) -> Result<(), AppError> {
+    if !confirmed {
+        return Err(AppError::new(
+            "provider_delete_confirmation_required",
+            "Confirm provider deletion before continuing.",
+        ));
+    }
+    let provider_id =
+        crate::validation::validate_entity_id(&provider_id, "Provider ID")?.to_string();
+    let provider = crate::commands::lock_db(state)?.get_provider(&provider_id)?;
+    if !provider.is_user_managed {
+        return Err(AppError::new(
+            "provider_delete_forbidden",
+            "Built-in provider entries cannot be deleted.",
+        ));
+    }
+    crate::secret_store::delete_user_provider_and_secret(state, provider).await
 }
 
 #[derive(Debug, Serialize)]
@@ -70,9 +157,8 @@ pub struct BuiltInRuntimeStatus {
     pub running: bool,
     pub port: Option<u16>,
     pub model_path: Option<String>,
-    /// COR-012: whether the `llama-server` binary is actually present on disk. Ark does not
-    /// bundle this binary by default (see `scripts/setup-llama.ps1`/`.sh`) — the UI must not
-    /// claim the built-in runtime needs "no external software" when this is `false`.
+    /// COR-012/FTR-006: whether `llama-server` is actually present. Development builds obtain it
+    /// through the verified setup script; qualified packages bundle the same verified resource.
     pub binary_installed: bool,
     pub binary_verified: bool,
     pub runtime_provenance: Option<crate::supply_chain::RuntimeProvenance>,
@@ -89,6 +175,13 @@ pub fn update_provider(
         crate::validation::validate_entity_id(&request.provider_id, "Provider ID")?.to_string();
     let temperature = crate::validation::validate_temperature(request.temperature)?;
     let max_tokens = crate::validation::validate_max_tokens(request.max_tokens)?;
+
+    let existing = crate::commands::lock_db(state)?.get_provider(&request.provider_id)?;
+    if existing.provider_type == crate::config::OPENAI_PROVIDER_TYPE {
+        request.base_url = crate::config::OPENAI_PROVIDER_BASE_URL.to_string();
+        request.convert_to_remote_provider = true;
+        request.allow_insecure_remote = false;
+    }
 
     crate::commands::lock_db(state)?.update_provider(
         &request.provider_id,
@@ -117,32 +210,62 @@ pub async fn refresh_models(
         db.get_provider(&provider_id)?
     };
 
-    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider);
+    let bearer_token = crate::secret_store::resolve_bearer_token(state, &provider)?;
     let runtime = ProviderRegistry::create_with_bearer_token(provider.clone(), bearer_token)?;
-    let health = runtime.health().await;
-
-    if !health.is_reachable {
-        crate::perf_metrics::record_if_enabled(
-            app,
-            state,
-            "perf.provider_refresh",
-            Some(&provider_id),
-            &[("duration_ms", started.elapsed().as_millis().to_string())],
-        );
-        return Ok(RefreshModelsResult {
-            health,
-            models: Vec::new(),
-            provider,
-        });
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (abort_handle, abort_registration) = futures_util::future::AbortHandle::new_pair();
+    {
+        let mut active = state.active_provider_refreshes.lock().map_err(|_| {
+            AppError::new("state_error", "Could not access active provider refreshes.")
+        })?;
+        if let Some((_previous_id, previous)) =
+            active.insert(provider_id.clone(), (request_id.clone(), abort_handle))
+        {
+            previous.abort();
+        }
     }
 
-    let models = runtime.list_models(&now()).await?;
+    let operation = async {
+        let health = runtime.health().await;
+        if !health.is_reachable {
+            return Ok(RefreshModelsResult {
+                health,
+                models: Vec::new(),
+                provider: provider.clone(),
+            });
+        }
 
-    let provider = {
-        let db = crate::commands::lock_db(state)?;
-        db.upsert_models(&provider_id, &models)?;
-        db.get_provider(&provider_id)?
+        let models = runtime.list_models(&now()).await?;
+        let refreshed_provider = {
+            let db = crate::commands::lock_db(state)?;
+            db.upsert_models(&provider_id, &models)?;
+            db.get_provider(&provider_id)?
+        };
+        Ok(RefreshModelsResult {
+            health,
+            models,
+            provider: refreshed_provider,
+        })
     };
+    let result = match futures_util::future::Abortable::new(operation, abort_registration).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::new(
+            "provider_refresh_cancelled",
+            "Provider refresh was cancelled.",
+        )),
+    };
+
+    {
+        let mut active = state.active_provider_refreshes.lock().map_err(|_| {
+            AppError::new("state_error", "Could not access active provider refreshes.")
+        })?;
+        if active
+            .get(&provider_id)
+            .is_some_and(|(active_request_id, _)| active_request_id == &request_id)
+        {
+            active.remove(&provider_id);
+        }
+    }
 
     crate::perf_metrics::record_if_enabled(
         app,
@@ -152,11 +275,20 @@ pub async fn refresh_models(
         &[("duration_ms", started.elapsed().as_millis().to_string())],
     );
 
-    Ok(RefreshModelsResult {
-        health,
-        models,
-        provider,
-    })
+    result
+}
+
+pub fn cancel_provider_refresh(state: &AppState, provider_id: String) -> Result<(), AppError> {
+    let provider_id =
+        crate::validation::validate_entity_id(&provider_id, "Provider ID")?.to_string();
+    let active = state
+        .active_provider_refreshes
+        .lock()
+        .map_err(|_| AppError::new("state_error", "Could not access active provider refreshes."))?;
+    if let Some((_request_id, handle)) = active.get(&provider_id) {
+        handle.abort();
+    }
+    Ok(())
 }
 
 /// FTR-006: only one pull per provider can be tracked for cancellation at a time, matching the
@@ -403,13 +535,27 @@ pub async fn start_built_in_runtime(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<BuiltInRuntimeStatus, AppError> {
-    if !cfg!(debug_assertions) {
-        return Err(AppError::new(
-            "managed_runtime_release_disabled",
-            "The managed llama.cpp runtime is disabled in release builds until its upstream HTTP server can enforce authentication and restrictive browser-origin policy on every endpoint.",
-        ));
-    }
+    start_built_in_runtime_with_expected_digest(
+        model_path,
+        model_source,
+        model_license,
+        None,
+        app,
+        state,
+    )
+    .await
+}
 
+/// FTR-006: the managed catalog path adds an immutable expected digest. Manual imports keep the
+/// existing provenance-only flow; both paths share one process/proxy lifecycle implementation.
+pub async fn start_built_in_runtime_with_expected_digest(
+    model_path: String,
+    model_source: String,
+    model_license: String,
+    expected_sha256: Option<&str>,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<BuiltInRuntimeStatus, AppError> {
     use crate::config::BUILT_IN_PROVIDER_ID;
     use crate::sidecar::{
         generate_runtime_api_key, llama_server_binary, spawn_llama_server, wait_for_assigned_port,
@@ -418,14 +564,18 @@ pub async fn start_built_in_runtime(
 
     // COR-008: fail fast with a specific, actionable error rather than letting spawn_llama_server
     // launch and then time out 30 seconds later against a path that was never going to work.
-    if let Err(error) = crate::validation::validate_model_path(&model_path) {
-        crate::commands::lock_sidecar(state)?.mark_unavailable_model(&model_path, &error.message);
-        return Err(error);
-    }
+    let validated_model_path = match crate::validation::validate_model_path(&model_path) {
+        Ok(path) => path,
+        Err(error) => {
+            crate::commands::lock_sidecar(state)?
+                .mark_unavailable_model(&model_path, &error.message);
+            return Err(error);
+        }
+    };
     // SEC-007: the cheap check above only validates the path's shape (extension, existence,
     // not-a-directory). This reads the file itself — rejects a symlinked, truncated, or
     // non-GGUF-signed file before it reaches the launch path.
-    if let Err(error) = crate::validation::validate_gguf_file(std::path::Path::new(&model_path)) {
+    if let Err(error) = crate::validation::validate_gguf_file(&validated_model_path) {
         crate::commands::lock_sidecar(state)?.mark_unavailable_model(&model_path, &error.message);
         return Err(error);
     }
@@ -433,9 +583,11 @@ pub async fn start_built_in_runtime(
     let binary = llama_server_binary(app);
     if !binary.exists() {
         crate::commands::lock_sidecar(state)?.mark_unavailable_binary(&binary);
-        return Err(AppError::provider(
-            "Built-in runtime not installed. Run the platform setup script from the repo root.",
-        ));
+        return Err(AppError::provider(if cfg!(debug_assertions) {
+            "Built-in runtime not installed. Run the platform setup script from the repo root."
+        } else {
+            "The packaged built-in runtime is missing. Reinstall this Ark package."
+        }));
     }
     let runtime_provenance = crate::supply_chain::verify_runtime(&binary).inspect_err(|error| {
         if let Ok(mut sidecar) = crate::commands::lock_sidecar(state) {
@@ -447,10 +599,20 @@ pub async fn start_built_in_runtime(
     })?;
     let model_provenance = crate::supply_chain::verify_and_record_model(
         app,
-        Path::new(&model_path),
+        &validated_model_path,
         &model_source,
         &model_license,
     )?;
+    if expected_sha256.is_some_and(|expected| expected != model_provenance.sha256) {
+        crate::commands::lock_sidecar(state)?.mark_unavailable_model(
+            &model_path,
+            "The managed model no longer matches its reviewed catalog digest.",
+        );
+        return Err(AppError::new(
+            "managed_model_integrity_failed",
+            "The managed model no longer matches its reviewed catalog digest.",
+        ));
+    }
     let model_path = model_provenance.path.clone();
     {
         let mut sidecar = crate::commands::lock_sidecar(state)?;
@@ -612,6 +774,8 @@ mod tests {
                 pending_streams: Mutex::new(HashMap::new()),
                 active_imports: Mutex::new(HashMap::new()),
                 active_ollama_pulls: Mutex::new(HashMap::new()),
+                active_provider_refreshes: Mutex::new(HashMap::new()),
+                active_managed_model_downloads: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: std::sync::Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: std::sync::Arc::new(Mutex::new(
@@ -670,6 +834,77 @@ mod tests {
 
         assert_eq!(error.code, "destination_requires_remote_provider_class");
 
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn remote_provider_lifecycle_requires_both_risk_and_delete_confirmation() {
+        let (state, path) = test_app_state();
+        let created = create_remote_provider(
+            &state,
+            CreateRemoteProviderRequest {
+                name: "OpenAI".to_string(),
+                kind: RemoteProviderKind::OpenAi,
+                base_url: None,
+                acknowledge_remote_risk: true,
+                allow_insecure_remote: false,
+            },
+        )
+        .expect("explicitly acknowledged provider created");
+        assert!(created.is_user_managed);
+        assert_eq!(created.provider_type, crate::config::OPENAI_PROVIDER_TYPE);
+
+        let error = delete_provider(&state, created.id.clone(), false)
+            .await
+            .expect_err("backend confirmation is mandatory");
+        assert_eq!(error.code, "provider_delete_confirmation_required");
+        assert!(crate::commands::lock_db(&state)
+            .expect("database lock")
+            .get_provider(&created.id)
+            .is_ok());
+
+        delete_provider(&state, created.id.clone(), true)
+            .await
+            .expect("confirmed provider deletion succeeds");
+        assert_eq!(
+            crate::commands::lock_db(&state)
+                .expect("database lock")
+                .get_provider(&created.id)
+                .expect_err("provider removed")
+                .code,
+            "not_found"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn cancel_provider_refresh_aborts_the_registered_in_flight_future() {
+        let (state, path) = test_app_state();
+        let (handle, registration) = futures_util::future::AbortHandle::new_pair();
+        state
+            .active_provider_refreshes
+            .lock()
+            .expect("refresh lock")
+            .insert(
+                DEFAULT_PROVIDER_ID.to_string(),
+                ("request-1".to_string(), handle),
+            );
+
+        cancel_provider_refresh(&state, DEFAULT_PROVIDER_ID.to_string())
+            .expect("cancellation request succeeds");
+        let result =
+            futures_util::future::Abortable::new(std::future::pending::<()>(), registration).await;
+        assert!(
+            result.is_err(),
+            "registered provider future must be aborted"
+        );
+
+        // Repeated/late cancellation is intentionally harmless.
+        cancel_provider_refresh(&state, "no-active-refresh".to_string())
+            .expect("missing refresh is a no-op");
         drop(state);
         let _ = std::fs::remove_file(path);
     }

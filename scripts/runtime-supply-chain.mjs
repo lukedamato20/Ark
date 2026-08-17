@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   copyFile,
@@ -24,7 +24,9 @@ const manifestPath = path.join(repoRoot, "config", "native-artifacts.json");
 const installDirectory = path.join(repoRoot, "src-tauri", "binaries", "llama");
 const MAX_ARCHIVE_ENTRIES = 4_096;
 const MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_EXPANSION_RATIO = 200;
 const MAX_TOOL_OUTPUT_BYTES = 8 * 1024 * 1024;
+const ARCHIVE_INSPECTION_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function verifyArtifactBytes(bytes, artifact) {
   if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes <= 0) {
@@ -68,6 +70,25 @@ export function validateArchiveEntries(entries) {
   }
 }
 
+export function validateArchiveExpansion(archiveBytes, extractedBytes) {
+  if (!Number.isSafeInteger(archiveBytes) || archiveBytes <= 0) {
+    throw new Error("Archive size is invalid for expansion validation.");
+  }
+  if (!Number.isSafeInteger(extractedBytes) || extractedBytes < 0) {
+    throw new Error("Extracted archive size is invalid for expansion validation.");
+  }
+  const limit =
+    archiveBytes > Math.floor(MAX_EXTRACTED_BYTES / MAX_ARCHIVE_EXPANSION_RATIO)
+      ? MAX_EXTRACTED_BYTES
+      : archiveBytes * MAX_ARCHIVE_EXPANSION_RATIO;
+  if (extractedBytes > limit) {
+    throw new Error(
+      `Archive expansion exceeded its ${limit}-byte safety limit (${MAX_ARCHIVE_EXPANSION_RATIO}x ratio, ${MAX_EXTRACTED_BYTES}-byte absolute ceiling).`,
+    );
+  }
+  return limit;
+}
+
 export function selectArtifact(manifest, platform = process.platform, arch = process.arch) {
   const artifact = manifest.artifacts?.find((candidate) => candidate.platform === platform && candidate.arch === arch);
   if (!artifact) throw new Error(`No reviewed llama.cpp artifact exists for ${platform}/${arch}.`);
@@ -81,6 +102,66 @@ export function selectArtifact(manifest, platform = process.platform, arch = pro
     throw new Error("Native artifact metadata failed its fail-closed URL/digest validation.");
   }
   return artifact;
+}
+
+function hostMatchesSuffix(host, suffix) {
+  return host === suffix || host.endsWith(`.${suffix}`);
+}
+
+/** FTR-006 build-time audit of the checked-in model trust root, independent of Rust's runtime
+ * validator. This deliberately verifies metadata only; model payloads are streamed and checked
+ * by the native downloader when a user explicitly installs one. */
+export function validateModelCatalog(catalog, nativeManifest, releaseCapabilities) {
+  if (catalog?.schemaVersion !== 1 || !catalog.reviewedAt || !Array.isArray(catalog.models) || catalog.models.length === 0) {
+    throw new Error("Managed model catalog schema/review metadata is invalid.");
+  }
+  const reviewedTargets = new Set(
+    nativeManifest.artifacts.map((artifact) => `${artifact.platform}-${artifact.arch}`),
+  );
+  const qualifiedTargets = new Set(
+    releaseCapabilities.artifactPlatforms.map((platform) => platform.runtimeTarget),
+  );
+  if (qualifiedTargets.size === 0 || [...qualifiedTargets].some((target) => !reviewedTargets.has(target))) {
+    throw new Error("Qualified packaged targets drift from reviewed runtime artifacts.");
+  }
+  const ids = new Set();
+  for (const model of catalog.models) {
+    if (
+      ids.has(model.id) ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(model.id) ||
+      !/^[a-f0-9]{40}$/u.test(model.sourceCommit) ||
+      !/^[a-f0-9]{64}$/u.test(model.sha256) ||
+      !Number.isSafeInteger(model.sizeBytes) ||
+      model.sizeBytes < 32 ||
+      !Number.isSafeInteger(model.contextWindow) ||
+      model.contextWindow <= 0 ||
+      path.basename(model.fileName) !== model.fileName ||
+      !model.fileName.endsWith(".gguf") ||
+      model.compatibility?.runtime !== nativeManifest.runtime.name ||
+      model.compatibility?.runtimeVersion !== nativeManifest.runtime.version
+    ) {
+      throw new Error(`Managed model '${model.id ?? "unknown"}' metadata is invalid.`);
+    }
+    ids.add(model.id);
+    const targets = new Set(model.compatibility.platforms);
+    if (targets.size !== qualifiedTargets.size || [...targets].some((target) => !qualifiedTargets.has(target))) {
+      throw new Error(`Managed model '${model.id}' platform claims drift from qualified packaged targets.`);
+    }
+    if (!Array.isArray(model.allowedDownloadHostSuffixes) || model.allowedDownloadHostSuffixes.length === 0) {
+      throw new Error(`Managed model '${model.id}' has no reviewed download hosts.`);
+    }
+    for (const rawUrl of [model.sourceRepository, model.downloadUrl, model.licenseUrl]) {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password || !rawUrl.includes(model.sourceCommit)) {
+        throw new Error(`Managed model '${model.id}' contains a floating or non-HTTPS source.`);
+      }
+    }
+    const download = new URL(model.downloadUrl);
+    if (!model.allowedDownloadHostSuffixes.some((suffix) => hostMatchesSuffix(download.hostname, suffix))) {
+      throw new Error(`Managed model '${model.id}' download host is not reviewed.`);
+    }
+  }
+  return catalog.models.length;
 }
 
 async function hashFile(filePath) {
@@ -99,6 +180,92 @@ async function hashFile(filePath) {
     await handle.close();
   }
   return { size, sha256: hash.digest("hex") };
+}
+
+async function verifyRuntimeDirectory(directory, manifest, artifact) {
+  const provenancePath = path.join(directory, "runtime-provenance.json");
+  const provenanceMetadata = await stat(provenancePath);
+  if (!provenanceMetadata.isFile() || provenanceMetadata.size > 256 * 1024) {
+    throw new Error("Installed runtime provenance is not a bounded regular file.");
+  }
+  const provenance = JSON.parse(await readFile(provenancePath, "utf8"));
+  for (const [actual, expected, label] of [
+    [provenance.schemaVersion, 1, "schema"],
+    [provenance.runtime, manifest.runtime.name, "runtime"],
+    [provenance.version, manifest.runtime.version, "version"],
+    [provenance.sourceCommit, manifest.runtime.sourceCommit, "source commit"],
+    [provenance.license, manifest.runtime.license, "license"],
+    [provenance.artifactFileName, artifact.fileName, "artifact filename"],
+    [provenance.artifactUrl, artifact.url, "artifact URL"],
+    [provenance.artifactSha256, artifact.sha256, "artifact digest"],
+    [provenance.platform, artifact.platform, "platform"],
+    [provenance.arch, artifact.arch, "architecture"],
+  ]) {
+    if (actual !== expected) throw new Error(`Installed runtime ${label} disagrees with the reviewed manifest.`);
+  }
+  if (!Array.isArray(provenance.installedFiles) || provenance.installedFiles.length === 0) {
+    throw new Error("Installed runtime provenance contains no files.");
+  }
+  const expectedFiles = new Map();
+  for (const file of provenance.installedFiles) {
+    if (
+      expectedFiles.has(file.name) ||
+      path.basename(file.name) !== file.name ||
+      !Number.isSafeInteger(file.sizeBytes) ||
+      file.sizeBytes <= 0 ||
+      !/^[a-f0-9]{64}$/u.test(file.sha256)
+    ) {
+      throw new Error("Installed runtime file provenance is invalid.");
+    }
+    expectedFiles.set(file.name, file);
+  }
+  const actualNames = (await readdir(directory))
+    .filter((name) => name !== ".gitkeep" && name !== "runtime-provenance.json")
+    .sort();
+  if (
+    actualNames.length !== expectedFiles.size ||
+    actualNames.some((name) => !expectedFiles.has(name))
+  ) {
+    throw new Error("Installed runtime contains an unreviewed, missing, or extra file.");
+  }
+  for (const name of actualNames) {
+    const filePath = path.join(directory, name);
+    const metadata = await lstat(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Installed runtime entry is not a regular file: ${name}`);
+    }
+    const actual = await hashFile(filePath);
+    const expected = expectedFiles.get(name);
+    if (actual.size !== expected.sizeBytes || actual.sha256 !== expected.sha256) {
+      throw new Error(`Installed runtime file failed verification: ${name}`);
+    }
+  }
+  const serverName = process.platform === "win32" ? "llama-server.exe" : "llama-server";
+  const executable = path.join(directory, serverName);
+  const executableRecord = expectedFiles.get(serverName);
+  if (!executableRecord || executableRecord.sha256 !== provenance.runtimeSha256) {
+    throw new Error("Installed runtime executable provenance is missing or inconsistent.");
+  }
+  const version = spawnSync(executable, ["--version"], {
+    encoding: "utf8",
+    timeout: 30_000,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  });
+  if (version.error || version.status !== 0) {
+    throw new Error(`Installed runtime executable smoke test failed: ${version.error?.message ?? version.stderr}`);
+  }
+  const output = `${version.stdout}\n${version.stderr}`;
+  if (!output.includes(`version: ${manifest.runtime.version.replace(/^b/u, "")}`) || !output.includes(manifest.runtime.sourceCommit.slice(0, 9))) {
+    throw new Error("Installed runtime executable reports an unexpected version or source commit.");
+  }
+  return provenance;
+}
+
+export async function verifyInstalledRuntime() {
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const artifact = selectArtifact(manifest);
+  return verifyRuntimeDirectory(installDirectory, manifest, artifact);
 }
 
 async function downloadVerified(url, destination, expectedSize, expectedSha256) {
@@ -139,15 +306,68 @@ function runTar(args) {
 }
 
 function inspectArchive(archivePath) {
-  const paths = runTar(["-tf", archivePath])
-    .split(/\r?\n/u)
-    .filter(Boolean);
+  const paths = runTar(["-tf", archivePath]).split(/\r?\n/u).filter(Boolean);
   const types = runTar(["-tvf", archivePath])
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => line.trimStart()[0]);
   if (types.length !== paths.length) throw new Error("Archive listing was internally inconsistent.");
   validateArchiveEntries(paths.map((entryPath, index) => ({ path: entryPath, type: types[index] })));
+}
+
+// Streams every regular archive member to stdout without writing it to disk, counting bytes and
+// terminating the archive tool as soon as the reviewed absolute/expansion-ratio ceiling is
+// crossed. This happens before the real extraction, so a valid-hash but accidentally hostile
+// reviewed artifact cannot fill the user's disk before the post-extraction walk notices.
+export function measureArchivePayload(archivePath, archiveBytes) {
+  validateArchiveExpansion(archiveBytes, 0);
+  return new Promise((resolve, reject) => {
+    const child = spawn("tar", ["-xOf", archivePath], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let extractedBytes = 0;
+    let stderrBytes = 0;
+    let stderr = "";
+    let failure = null;
+    const failAndStop = (error) => {
+      if (failure) return;
+      failure = error;
+      child.kill();
+    };
+    const timeout = setTimeout(
+      () => failAndStop(new Error("Archive expansion inspection timed out.")),
+      ARCHIVE_INSPECTION_TIMEOUT_MS,
+    );
+
+    child.stdout.on("data", (chunk) => {
+      extractedBytes += chunk.length;
+      try {
+        validateArchiveExpansion(archiveBytes, extractedBytes);
+      } catch (error) {
+        failAndStop(error);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > MAX_TOOL_OUTPUT_BYTES) {
+        failAndStop(new Error("Archive tool produced excessive diagnostic output."));
+        return;
+      }
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => failAndStop(new Error(`Could not run the system archive tool: ${error.message}`)));
+    child.on("close", (status) => {
+      clearTimeout(timeout);
+      if (failure) {
+        reject(failure);
+      } else if (status !== 0) {
+        reject(new Error(`Archive tool rejected the artifact: ${stderr.trim()}`));
+      } else {
+        resolve(extractedBytes);
+      }
+    });
+  });
 }
 
 async function walk(root, current = root, collected = []) {
@@ -205,10 +425,13 @@ export async function installRuntime() {
   const nextDirectory = path.join(path.dirname(installDirectory), `llama.install-next-${randomUUID()}`);
 
   try {
-    console.log(`Downloading reviewed ${manifest.runtime.name} ${manifest.runtime.version} artifact for ${process.platform}/${process.arch}…`);
+    console.log(
+      `Downloading reviewed ${manifest.runtime.name} ${manifest.runtime.version} artifact for ${process.platform}/${process.arch}…`,
+    );
     await downloadVerified(artifact.url, partial, artifact.sizeBytes, artifact.sha256);
     await rename(partial, archive);
     inspectArchive(archive);
+    await measureArchivePayload(archive, artifact.sizeBytes);
     await mkdir(extracted);
     runTar(["-xf", archive, "-C", extracted]);
 
@@ -228,7 +451,11 @@ export async function installRuntime() {
 
     await mkdir(nextDirectory, { recursive: false });
     try {
-      await copyFile(path.join(installDirectory, ".gitkeep"), path.join(nextDirectory, ".gitkeep"), fsConstants.COPYFILE_EXCL);
+      await copyFile(
+        path.join(installDirectory, ".gitkeep"),
+        path.join(nextDirectory, ".gitkeep"),
+        fsConstants.COPYFILE_EXCL,
+      );
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
       await writeFile(path.join(nextDirectory, ".gitkeep"), "");
@@ -274,6 +501,7 @@ export async function installRuntime() {
     await writeFile(path.join(nextDirectory, "runtime-provenance.json"), `${JSON.stringify(provenance, null, 2)}\n`, {
       flag: "wx",
     });
+    await verifyRuntimeDirectory(nextDirectory, manifest, artifact);
     await replaceInstallDirectory(nextDirectory);
     console.log(`Installed verified ${serverName}; SHA-256 ${runtimeHash.sha256}.`);
   } catch (error) {
@@ -285,12 +513,15 @@ export async function installRuntime() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  if (process.argv[2] !== "install") {
-    console.error("Usage: node scripts/runtime-supply-chain.mjs install");
+  if (!new Set(["install", "verify"]).has(process.argv[2])) {
+    console.error("Usage: node scripts/runtime-supply-chain.mjs <install|verify>");
     process.exitCode = 2;
   } else {
-    installRuntime().catch((error) => {
-      console.error(`Runtime installation failed closed: ${error.message}`);
+    const operation = process.argv[2] === "install" ? installRuntime() : verifyInstalledRuntime();
+    operation.then(() => {
+      if (process.argv[2] === "verify") console.log("Installed runtime provenance, files, and executable are verified.");
+    }).catch((error) => {
+      console.error(`Runtime ${process.argv[2]} failed closed: ${error.message}`);
       process.exitCode = 1;
     });
   }

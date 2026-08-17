@@ -42,6 +42,7 @@ impl MockChunk {
 pub struct MockResponsePlan {
     pub status_line: String,
     pub header_delay: Duration,
+    pub headers: Vec<(String, String)>,
     pub chunks: Vec<MockChunk>,
 }
 
@@ -50,12 +51,18 @@ impl MockResponsePlan {
         Self {
             status_line: status_line.into(),
             header_delay: Duration::ZERO,
+            headers: Vec::new(),
             chunks,
         }
     }
 
     pub fn with_header_delay(mut self, delay: Duration) -> Self {
         self.header_delay = delay;
+        self
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 }
@@ -106,9 +113,14 @@ pub async fn start_scripted_stream_server(
             if !plan.header_delay.is_zero() {
                 tokio::time::sleep(plan.header_delay).await;
             }
+            let custom_headers = plan
+                .headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect::<String>();
             let headers = format!(
-                "{}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-                plan.status_line
+                "{}\r\nContent-Type: application/octet-stream\r\n{}Connection: close\r\n\r\n",
+                plan.status_line, custom_headers
             );
             if socket.write_all(headers.as_bytes()).await.is_err() {
                 return;

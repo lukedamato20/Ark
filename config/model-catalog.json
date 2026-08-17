@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-08-17",
+  "models": [
+    {
+      "id": "qwen2.5-0.5b-instruct-q4_0",
+      "displayName": "Qwen2.5 0.5B Instruct",
+      "publisher": "Qwen",
+      "description": "A compact instruction model for validating Ark's local managed-model workflow on modest hardware.",
+      "sourceRepository": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/tree/2ed9be962c95f7625f4963ff51ed472e4538187a",
+      "sourceCommit": "2ed9be962c95f7625f4963ff51ed472e4538187a",
+      "downloadUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/2ed9be962c95f7625f4963ff51ed472e4538187a/qwen2.5-0.5b-instruct-q4_0.gguf",
+      "allowedDownloadHostSuffixes": ["huggingface.co", "cdn.hf.co", "xethub.hf.co"],
+      "fileName": "qwen2.5-0.5b-instruct-q4_0.gguf",
+      "sizeBytes": 428730208,
+      "sha256": "7671c0c304e6ce5a7fc577bcb12aba01e2c155cc2efd29b2213c95b18edaf6ed",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/raw/2ed9be962c95f7625f4963ff51ed472e4538187a/LICENSE",
+      "quantization": "Q4_0",
+      "contextWindow": 32768,
+      "architecture": "qwen2",
+      "parameterCount": "0.49B",
+      "minimumAvailableMemoryBytes": 2147483648,
+      "recommendedAvailableMemoryBytes": 3221225472,
+      "compatibility": {
+        "runtime": "llama.cpp",
+        "runtimeVersion": "b9859",
+        "format": "GGUF",
+        "platforms": [
+          "win32-x64",
+          "darwin-arm64",
+          "linux-x64"
+        ]
+      }
+    }
+  ]
+}

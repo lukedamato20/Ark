@@ -7,10 +7,9 @@ about each — is listed below, grouped by owner/scope.
 
 ## Scopes
 
-Ark recognizes five settings scopes in practice today (of the six the plan names —
-`device`, `workspace`, `provider`, `project`, `conversation`, `secret` — `project` doesn't apply
-yet, since Ark has no project/workspace-folder concept beyond the single workspace database
-itself):
+Ark recognizes the six settings scopes the plan names — `device`, `workspace`, `provider`,
+`project`, `conversation`, and `secret` — plus versioned personas as a reusable instruction
+source independent of projects:
 
 - **Device** — this machine, this OS user account. Never portable, never synced through the
   workspace database. Persisted at the OS's per-user application-config directory as
@@ -21,6 +20,11 @@ itself):
   it to another machine or a portable drive.
 - **Provider** — a row in the `providers` table. Configuration for one configured provider
   instance (base URL, default model, temperature, etc.).
+- **Project** — portable defaults and instructions shared by conversations assigned to one
+  project, plus an optional canonical path to that Project's Ark Code Repository. Stored in the
+  workspace database; Repository contents themselves are never copied into the Workspace.
+- **Persona** — a portable, independently assignable, versioned instruction/default source.
+  Stored in `personas`/append-only `persona_versions`.
 - **Conversation** — a row in the `conversations` table. Per-conversation overrides.
 - **Secret** — never stored directly; only an opaque reference is persisted (see
   `providers.apiKeyRef` below). The actual credential lives in Windows Credential Manager,
@@ -32,14 +36,19 @@ itself):
 |---|---|---|---|---|---|
 | Theme (`dark`/`light`) | Device | `dark` | Must be `"dark"` or `"light"` (checked both client-side before the call and server-side in `device_settings::update_device_settings`) | `device_settings.json` (`theme`), mirrored into `localStorage["ark.theme"]` as an instant-first-paint cache only — see [Theme: cache vs. source of truth](#theme-cache-vs-source-of-truth) | Settings → Appearance |
 | Built-in runtime model path | Device | `null` (not set) | Validated as an existing `.gguf` file (`validation::validate_model_path`) when actually starting the runtime; the settings write itself accepts any string | `device_settings.json` (`builtInModelPath`) | Settings → Provider → Built-in runtime |
+| Managed model directory | Device | `null` (Ark's per-user application-data `models` directory) | Optional absolute directory; existing ancestors are canonicalized and non-directory targets are rejected | `device_settings.json` (`managedModelDirectory`) | Settings → Provider → Built-in runtime → Verified model catalog |
 | Built-in model provenance | Device | absent until a model is verified | Source/license are required bounded text; canonical regular GGUF file is streamed through SHA-256 before launch | OS app-config `model-provenance.json`, atomically replaced; path/source/license/hash/size/verification time only, never model content | Settings → Provider → Built-in runtime provenance card |
 | Crash capture enabled (OPS-001) | Device | `false` (opt-in) | Boolean; no validation needed | `device_settings.json` (`crashCaptureEnabled`); `#[serde(default)]` so a pre-OPS-001 file still parses | Settings → Diagnostics bundle. See [docs/diagnostics-and-logs.md](diagnostics-and-logs.md) for the full retention/consent/revocation disclosure. |
 | Sidebar collapsed | Device (UI view state) | expanded | — | `localStorage["ark.sidebar"]` only — see [Sidebar/right-panel collapse state](#sidebarright-panel-collapse-state) | Chat, sidebar toggle button |
 | Right panel collapsed | Device (UI view state) | expanded | — | `localStorage["ark.rightPanel"]` only | Chat, right-panel toggle button |
-| Provider base URL, provider class (`is_local`), insecure-remote development exception, default model, temperature, max tokens, streaming enabled | Provider | Seeded per provider type at first launch; local class and insecure-remote exception off unless explicitly changed (see `db::seed_defaults`) | `validation::validate_temperature`/`validate_max_tokens`; URL/class/TLS policy enforced on save and again before adapter construction via `security` (SEC-001) | SQLite `providers` table (`is_local`, `allow_insecure_remote`, and generation fields) | Settings → Provider |
+| Application instructions | Workspace | `null` (no fallback) | Blank clears; otherwise trimmed and limited to 32,000 characters by `validation::validate_system_prompt` | SQLite `app_settings["generation.application_instructions"]`; travels with workspace copy/backup | Settings → AI & Behavior → Application instructions |
+| Project instructions/defaults | Project | `null` per field | Names required; instruction/number/preset bounds match their conversation equivalents | SQLite `projects` | Settings → AI & Behavior → Projects |
+| Project Repository (Ark Code) | Project | `null` (unbound) | Existing absolute directory only; canonicalized; collision-safe writability probe; rejected if it equals, contains, or is contained by Ark's storage Workspace | SQLite `projects.repository_path` (path only; no Repository content is copied) | Settings → AI & Behavior → Projects → Repository (Ark Code) |
+| Persona instructions/defaults | Persona | Instructions required; other fields `null` | Names/instructions required; edits to instruction/default content append an immutable version | SQLite `personas` + `persona_versions` | Settings → AI & Behavior → Personas |
+| Provider base URL, provider class (`is_local`), insecure-remote development exception, default model, temperature, max tokens, streaming enabled | Provider | Local providers are seeded; remote providers are never seeded and require explicit creation/acknowledgment | `validation::validate_temperature`/`validate_max_tokens`; URL/class/TLS policy enforced on create/save and again before adapter construction via `security` (SEC-001); curated OpenAI is fixed to its official HTTPS endpoint | SQLite `providers` table (`is_local`, `allow_insecure_remote`, and generation fields) | Settings → Provider |
 | Provider API key reference | Provider (secret reference only) | `null` | Must be Ark's versioned opaque `secret:v1:<UUID>` format; raw values are accepted only by the write-only IPC command and never returned | SQLite `providers.api_key_ref`; credential value remains in the OS credential store | Settings → Provider → API credential for providers whose capability declares authentication |
 | Provider capabilities (streaming, model listing/pull/delete, auth requirement, etc.) | Provider (computed, not a setting) | N/A | N/A | Not persisted — computed from `provider_type` on every read (`ProviderCapabilities::for_provider_type`, ARC-003) | Drives UI affordances (e.g. hiding the Ollama pull/delete panel) rather than being directly editable |
-| Conversation system prompt | Conversation | `null` | N/A today — no write path exists | SQLite `conversations.system_prompt` | Not yet exposed in UI — reserved for a future `FTR` item |
+| Conversation system prompt | Conversation | `null` | Blank clears; otherwise trimmed and limited to 32,000 characters | SQLite `conversations.system_prompt` | Chat header → Conversation settings |
 | Theme (legacy, pre-ARC-006) | *(removed as a write target)* | — | — | SQLite `app_settings` key `appearance.theme` — no longer written; read exactly once, as a migration seed, by `workspace_bootstrap::get_app_bootstrap` the first time `device_settings.json` doesn't exist yet. The row itself is left in place, not deleted. | — |
 
 ## Resolved ambiguity: what ARC-006 found and did
@@ -53,22 +62,18 @@ during the original architecture audit. Each is resolved here:
   duplicate, not a reserved future feature. `providers.streaming_enabled` remains as the one
   real setting (a provider-level user preference), distinct from `ProviderCapabilities.streaming`
   (a fixed protocol fact, not a preference — see the capabilities row above).
-- **`conversations.system_prompt`** — always `null`; no command ever writes it. **Kept**,
-  documented as reserved: a per-conversation custom system prompt is a clearly-intended, likely
-  near-term feature (a `FTR`-family item, not architecture), and the column's shape won't need to
-  change when that feature ships. Removing and later re-adding an identical column would be
-  churn with no benefit.
+- **`conversations.system_prompt`** — retained and now written through
+  `update_conversation_settings`; it is the most-specific reusable system-instruction tier.
 - **`providers.api_key_ref`** — now populated only by `secret_store::upsert_provider_secret`
   after the operating-system credential write succeeds. The stored value is a versioned opaque
   UUID reference, never the credential itself; application exports clear it because it is
   device-local. The UI receives masked metadata and can replace/delete the value, but no IPC
-  command returns the secret. No current provider declares `requires_auth`; the control becomes
-  visible when FTR-007 adds one rather than falsely implying today's local providers use a key.
-- **`app_settings` table** — a generic key-value table that, before this item, was used for
-  exactly one key (`appearance.theme`) and nothing else. **Kept** as the workspace-scoped
-  settings mechanism (a legitimate, general extensibility point matching the "workspace" scope
-  above), but no longer written to for theme. It is empty of any actual key today; a future
-  genuinely workspace-scoped setting (e.g. a per-workspace default provider) would use it.
+  command returns the secret. The curated OpenAI provider declares `requires_auth` and fails
+  closed before network access when its credential is missing. Deleting a user-created provider
+  also removes its credential, with compensation if the database transaction fails.
+- **`app_settings` table** — retained as the workspace-scoped settings mechanism. Theme is no
+  longer written there; FTR-003 now uses it for the portable
+  `generation.application_instructions` fallback.
 
 ## Notes
 

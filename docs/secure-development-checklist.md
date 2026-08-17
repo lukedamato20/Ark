@@ -9,10 +9,12 @@ in one place, not just the automated gate.
 
 **File paths or user-supplied paths**
 - Does it canonicalize/validate the path the same way `validation.rs`'s existing checks do
-  (reject `.`/`..` segments, reject NUL bytes, reject paths outside the intended root)?
-- If it opens or reads a file, does it check for a symlink first (`symlink_metadata`, not
-  `metadata`) the way `validate_gguf_file` does, or is there a real reason this specific path
-  doesn't need that check?
+  (absolute path; no `.`/`..` or NUL; canonical existing ancestor; expected file/directory type)?
+- Does it use the matching shared validator rather than open the IPC string directly? Existing
+  input files and output-file leaves reject symlinks via `symlink_metadata`; directory aliases are
+  resolved to and persisted as their canonical target so normal platform aliases remain usable.
+- If the operation is root-scoped (for example a future repository tool), does it compare the
+  canonical result to that intended root? Canonicalization alone does not establish authorization.
 
 **Anything that could reach the network**
 - Does the destination go through SEC-001's Rust-side classification (`security::classify_destination`)

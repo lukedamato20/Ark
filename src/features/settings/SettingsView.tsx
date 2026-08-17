@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Save,
   SlidersHorizontal,
+  Square,
   Sun,
   Trash2,
   Wrench,
@@ -42,6 +43,10 @@ import type {
   BuiltInRuntimeStatus,
   CompanionApiStatus,
   DiagnosticsBundle,
+  ManagedModelDownloadProgress,
+  ManagedModelOperation,
+  ManagedModelPreflight,
+  ManagedModelStatus,
   ModelInfo,
   OllamaPullProgress,
   Persona,
@@ -81,6 +86,8 @@ interface SettingsViewProps {
   providerHealth: Record<string, ProviderHealth>;
   projects: Project[];
   personas: Persona[];
+  applicationInstructions: string | null;
+  onApplicationInstructionsChange: (instructions: string | null) => Promise<void>;
   theme: ThemeMode;
   workspace?: WorkspaceInfo | null;
   builtInStatus: BuiltInRuntimeStatus;
@@ -88,6 +95,8 @@ interface SettingsViewProps {
   /** ARC-006: device-scoped — see docs/settings-catalog.md. */
   builtInModelPath: string | null;
   onBuiltInModelPathChange: (path: string) => void;
+  managedModelDirectory: string | null;
+  onManagedModelDirectoryChange: (path: string | null) => Promise<void>;
   /** OPS-001: opt-in, off by default — see `observability.rs`'s module doc. */
   crashCaptureEnabled: boolean;
   onCrashCaptureEnabledChange: (enabled: boolean) => void;
@@ -100,6 +109,7 @@ interface SettingsViewProps {
   onThemeChange: (theme: ThemeMode) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
+  onProviderDeleted: (id: string) => void;
   onProjectSaved: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
   onPersonaSaved: (persona: Persona) => void;
@@ -107,6 +117,7 @@ interface SettingsViewProps {
   /** FTR-009: centralized in the controller (sequenced/deduplicated per provider) — see
    * `useArkController.ts`'s `refreshProviderModels` doc comment. */
   onRefreshProviderModels: (providerId: string) => Promise<void>;
+  onCancelProviderRefresh: (providerId: string) => Promise<void>;
   onBack: () => void;
   onError: (message: string) => void;
 }
@@ -120,12 +131,16 @@ export function SettingsView({
   providerHealth,
   projects,
   personas,
+  applicationInstructions,
+  onApplicationInstructionsChange,
   theme,
   workspace,
   builtInStatus,
   onBuiltInStatusChange,
   builtInModelPath,
   onBuiltInModelPathChange,
+  managedModelDirectory,
+  onManagedModelDirectoryChange,
   crashCaptureEnabled,
   onCrashCaptureEnabledChange,
   completionNotificationsEnabled,
@@ -135,11 +150,13 @@ export function SettingsView({
   onThemeChange,
   onWorkspaceChange,
   onProviderSaved,
+  onProviderDeleted,
   onProjectSaved,
   onProjectDeleted,
   onPersonaSaved,
   onPersonaDeleted,
   onRefreshProviderModels,
+  onCancelProviderRefresh,
   onBack,
   onError,
 }: SettingsViewProps) {
@@ -151,6 +168,7 @@ export function SettingsView({
     [providers],
   );
   const [selectedProviderId, setSelectedProviderId] = React.useState(visibleProviders[0]?.id ?? "");
+  const [providerCreateOpen, setProviderCreateOpen] = React.useState(false);
   const [workspaceDraft, setWorkspaceDraft] = React.useState(workspace?.rootPath ?? "");
   const [workspaceSaving, setWorkspaceSaving] = React.useState(false);
   const [copyWorkspaceData, setCopyWorkspaceData] = React.useState(false);
@@ -288,14 +306,7 @@ export function SettingsView({
     case "ai-behavior":
       sectionContent = (
         <>
-          <Panel className="p-4">
-            <p className="text-sm text-muted-foreground">
-              A conversation&rsquo;s own settings always win. If it hasn&rsquo;t set something, Ark falls back to its
-              assigned persona, then its assigned project, then the provider&rsquo;s own default — in that order. Assign
-              a persona or project below, or open a conversation&rsquo;s own settings from the chat header to override
-              any of this for just that conversation.
-            </p>
-          </Panel>
+          <ApplicationInstructionsPanel value={applicationInstructions} onChange={onApplicationInstructionsChange} />
           <ProjectsPanel
             projects={projects}
             providers={providers}
@@ -316,7 +327,11 @@ export function SettingsView({
     case "providers":
       sectionContent = (
         <Panel className="p-4">
-          <div className="mb-4 flex items-center justify-end gap-2">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <Button size="sm" onClick={() => setProviderCreateOpen((open) => !open)}>
+              <Plus className="h-4 w-4" />
+              {providerCreateOpen ? "Cancel" : "Add remote provider"}
+            </Button>
             {visibleProviders.length > 1 && (
               <div
                 role="tablist"
@@ -345,6 +360,16 @@ export function SettingsView({
               </div>
             )}
           </div>
+          {providerCreateOpen && (
+            <RemoteProviderCreateForm
+              onCreated={(created) => {
+                onProviderSaved(created);
+                setSelectedProviderId(created.id);
+                setProviderCreateOpen(false);
+              }}
+              onError={onError}
+            />
+          )}
           <div
             role="tabpanel"
             id={provider ? `provider-tabpanel-${provider.id}` : undefined}
@@ -357,6 +382,8 @@ export function SettingsView({
                 onStatusChange={onBuiltInStatusChange}
                 modelPath={builtInModelPath}
                 onModelPathChange={onBuiltInModelPathChange}
+                managedModelDirectory={managedModelDirectory}
+                onManagedModelDirectoryChange={onManagedModelDirectoryChange}
                 onRefreshProviderModels={onRefreshProviderModels}
                 onError={onError}
               />
@@ -366,7 +393,9 @@ export function SettingsView({
                 provider={provider}
                 models={providerModels}
                 onProviderSaved={onProviderSaved}
+                onProviderDeleted={onProviderDeleted}
                 onRefreshProviderModels={onRefreshProviderModels}
+                onCancelProviderRefresh={onCancelProviderRefresh}
                 onError={onError}
                 secretStoreStatus={secretStoreStatus}
                 onSecretStoreRetry={checkSecretStore}
@@ -720,6 +749,71 @@ const MIN_PROJECT_TEMPERATURE = 0;
 const MAX_PROJECT_TEMPERATURE = 2;
 const MIN_PROJECT_MAX_TOKENS = 1;
 const MAX_PROJECT_MAX_TOKENS = 1_000_000;
+const MAX_APPLICATION_INSTRUCTIONS_CHARS = 32_000;
+
+function ApplicationInstructionsPanel({
+  value,
+  onChange,
+}: {
+  value: string | null;
+  onChange: (instructions: string | null) => Promise<void>;
+}) {
+  const [draft, setDraft] = React.useState(value ?? "");
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => setDraft(value ?? ""), [value]);
+
+  const normalized = draft.trim() || null;
+  const dirty = normalized !== value;
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onChange(normalized);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Panel className="grid gap-3 p-4">
+      <div>
+        <h3 className="text-sm font-semibold">Application instructions</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Portable fallback instructions for every conversation in this workspace. Leave empty for no workspace-wide
+          instruction.
+        </p>
+      </div>
+      <label className="grid gap-1.5 text-sm">
+        Workspace-wide fallback
+        <Textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          rows={4}
+          maxLength={MAX_APPLICATION_INSTRUCTIONS_CHARS}
+          placeholder="No application instructions"
+        />
+      </label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">
+          {draft.length.toLocaleString()} / {MAX_APPLICATION_INSTRUCTIONS_CHARS.toLocaleString()} characters
+        </span>
+        <Button disabled={!dirty || saving} onClick={() => void save()}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save instructions
+        </Button>
+      </div>
+      <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+        <div className="font-medium text-foreground">Instruction precedence, lowest to highest</div>
+        <div className="mt-1">Application → Project → Persona → Conversation → User request</div>
+        <p className="mt-1">
+          The most specific configured instruction source wins. The user request remains a separate intent channel;
+          retrieved files and tool results remain separate untrusted context and can never approve tools.
+        </p>
+      </div>
+    </Panel>
+  );
+}
 
 /**
  * UX: the Settings navigation itself — the single place that renders `SETTINGS_SECTIONS`, so a
@@ -937,6 +1031,7 @@ function ProjectEditor({
 }) {
   const client = useArkClient();
   const [name, setName] = React.useState(project.name);
+  const [repositoryPath, setRepositoryPath] = React.useState(project.repositoryPath ?? "");
   const [instructions, setInstructions] = React.useState(project.instructions ?? "");
   const [defaultProviderId, setDefaultProviderId] = React.useState(project.defaultProviderId ?? "");
   const [defaultModelId, setDefaultModelId] = React.useState(project.defaultModelId ?? "");
@@ -949,12 +1044,14 @@ function ProjectEditor({
   const [responseStyle, setResponseStyle] = React.useState(project.responseStyle ?? "");
   const [tone, setTone] = React.useState(project.tone ?? "");
   const [saving, setSaving] = React.useState(false);
+  const [savingRepository, setSavingRepository] = React.useState(false);
   const [archiving, setArchiving] = React.useState(false);
   const [deletePreview, setDeletePreview] = React.useState<ProjectDeletionPreview | null>(null);
   const [deleting, setDeleting] = React.useState(false);
 
   React.useEffect(() => {
     setName(project.name);
+    setRepositoryPath(project.repositoryPath ?? "");
     setInstructions(project.instructions ?? "");
     setDefaultProviderId(project.defaultProviderId ?? "");
     setDefaultModelId(project.defaultModelId ?? "");
@@ -1023,6 +1120,19 @@ function ProjectEditor({
     }
   }
 
+  async function saveRepository(nextPath: string | null) {
+    setSavingRepository(true);
+    try {
+      const saved = await client.setProjectRepository(project.id, nextPath);
+      setRepositoryPath(saved.repositoryPath ?? "");
+      onProjectSaved(saved);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSavingRepository(false);
+    }
+  }
+
   async function loadDeletePreview() {
     try {
       setDeletePreview(await client.previewProjectDeletion(project.id));
@@ -1048,6 +1158,46 @@ function ProjectEditor({
         Name
         <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={200} />
       </label>
+      <div className="grid gap-1.5 rounded-md border border-border bg-muted/30 p-3">
+        <label className="grid gap-1.5 text-sm">
+          Repository (Ark Code)
+          <Input
+            value={repositoryPath}
+            onChange={(event) => setRepositoryPath(event.target.value)}
+            placeholder="Absolute path to an existing code repository"
+            spellCheck={false}
+          />
+        </label>
+        <p className="text-xs text-muted-foreground">
+          This is the codebase Ark Code may access. It is separate from Ark&apos;s storage Workspace, which contains app
+          data. Binding, switching, or removing it takes effect immediately and never moves Workspace data.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={
+              savingRepository || !repositoryPath.trim() || repositoryPath.trim() === (project.repositoryPath ?? "")
+            }
+            onClick={() => void saveRepository(repositoryPath.trim())}
+          >
+            {savingRepository ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {project.repositoryPath ? "Switch Repository" : "Bind Repository"}
+          </Button>
+          {project.repositoryPath ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={savingRepository}
+              onClick={() => void saveRepository(null)}
+            >
+              Remove Repository
+            </Button>
+          ) : null}
+        </div>
+      </div>
       <label className="grid gap-1.5 text-sm">
         Instructions
         <Textarea
@@ -1160,6 +1310,8 @@ function ProjectEditor({
                 {deletePreview.conversationCount === 0
                   ? "No conversations are assigned."
                   : `${deletePreview.conversationCount} conversation(s) will be unassigned, not deleted.`}
+                {deletePreview.attachmentCount > 0 &&
+                  ` ${deletePreview.attachmentCount} attached file(s) will remain with those conversations.`}
               </span>
               <Button
                 type="button"
@@ -1203,6 +1355,8 @@ function ProjectEditor({
  * persona's entire purpose is its prompt) rather than optional, and editing them is versioned —
  * see `PersonaEditor`'s version history.
  */
+const MAX_PERSONA_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+
 function PersonasPanel({
   personas,
   onPersonaSaved,
@@ -1215,10 +1369,12 @@ function PersonasPanel({
   onError: (message: string) => void;
 }) {
   const client = useArkClient();
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [newName, setNewName] = React.useState("");
   const [newInstructions, setNewInstructions] = React.useState("");
   const [creating, setCreating] = React.useState(false);
+  const [importing, setImporting] = React.useState(false);
   const [showArchived, setShowArchived] = React.useState(false);
 
   const visiblePersonas = personas
@@ -1245,6 +1401,26 @@ function PersonasPanel({
     }
   }
 
+  async function importPersona(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > MAX_PERSONA_IMPORT_FILE_BYTES) {
+      onError(`"${file.name}" exceeds the ${MAX_PERSONA_IMPORT_FILE_BYTES / (1024 * 1024)} MB persona import limit.`);
+      return;
+    }
+    setImporting(true);
+    try {
+      const persona = await client.importPersonaJson(await file.text());
+      onPersonaSaved(persona);
+      setSelectedId(persona.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <Panel className="p-4">
       <div className="mb-4 flex items-center justify-between gap-2">
@@ -1252,15 +1428,34 @@ function PersonasPanel({
           <SlidersHorizontal className="h-4 w-4" />
           <h2 className="text-sm font-semibold">Personas</h2>
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+          >
+            {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Import
+          </Button>
           <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(event) => setShowArchived(event.target.checked)}
-            className="h-3.5 w-3.5"
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={importPersona}
           />
-          Show archived
-        </label>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(event) => setShowArchived(event.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            Show archived
+          </label>
+        </div>
       </div>
       <p className="mb-3 text-sm text-muted-foreground">
         A reusable instruction identity a conversation can be assigned to, independent of its project.
@@ -1359,6 +1554,7 @@ function PersonaEditor({
   const [deleting, setDeleting] = React.useState(false);
   const [versions, setVersions] = React.useState<PersonaVersionSummary[] | null>(null);
   const [versionsLoading, setVersionsLoading] = React.useState(false);
+  const [exporting, setExporting] = React.useState(false);
 
   React.useEffect(() => {
     setName(persona.name);
@@ -1459,6 +1655,18 @@ function PersonaEditor({
     }
   }
 
+  async function exportPersona() {
+    setExporting(true);
+    try {
+      const json = await client.exportPersonaJson(persona.id);
+      downloadText(`ark-persona-${safeFilename(persona.name)}.json`, json, "application/json;charset=utf-8");
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="mt-3 grid gap-3 rounded-md border border-border p-3">
       <label className="grid gap-1.5 text-sm">
@@ -1532,10 +1740,16 @@ function PersonaEditor({
       </label>
 
       <div>
-        <Button type="button" variant="ghost" size="sm" onClick={() => void toggleVersionHistory()}>
-          {versionsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          {versions ? "Hide version history" : "Show version history"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-1">
+          <Button type="button" variant="ghost" size="sm" onClick={() => void toggleVersionHistory()}>
+            {versionsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {versions ? "Hide version history" : "Show version history"}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => void exportPersona()} disabled={exporting}>
+            {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            Export
+          </Button>
+        </div>
         {versions && (
           <ul className="mt-1 grid gap-1 rounded-md border border-border bg-muted/30 p-2 text-xs">
             {versions.map((version) => (
@@ -1596,11 +1810,127 @@ function PersonaEditor({
   );
 }
 
+function RemoteProviderCreateForm({
+  onCreated,
+  onError,
+}: {
+  onCreated: (provider: ProviderConfig) => void;
+  onError: (message: string) => void;
+}) {
+  const client = useArkClient();
+  const [kind, setKind] = React.useState<"open_ai" | "open_ai_compatible">("open_ai");
+  const [name, setName] = React.useState("OpenAI");
+  const [baseUrl, setBaseUrl] = React.useState("");
+  const [acknowledged, setAcknowledged] = React.useState(false);
+  const [allowInsecureRemote, setAllowInsecureRemote] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const insecureHttp = kind === "open_ai_compatible" && baseUrl.trim().toLowerCase().startsWith("http://");
+  const valid =
+    name.trim().length > 0 &&
+    (kind === "open_ai" || baseUrl.trim().length > 0) &&
+    acknowledged &&
+    (!insecureHttp || allowInsecureRemote);
+
+  async function create() {
+    if (!valid) return;
+    setSaving(true);
+    try {
+      const created = await client.createRemoteProvider({
+        name: name.trim(),
+        kind,
+        baseUrl: kind === "open_ai_compatible" ? baseUrl.trim() : null,
+        acknowledgeRemoteRisk: acknowledged,
+        allowInsecureRemote,
+      });
+      onCreated(created);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 grid gap-3 rounded-md border border-border bg-muted/20 p-3">
+      <div>
+        <div className="text-sm font-medium">Add a remote provider</div>
+        <p className="text-xs text-muted-foreground">
+          Remote providers are optional and never enabled by default. Add the credential after creation; Ark stores it
+          in the operating-system credential store.
+        </p>
+      </div>
+      <label className="grid gap-1.5 text-sm">
+        Provider adapter
+        <Select
+          value={kind}
+          onChange={(event) => {
+            const next = event.target.value as "open_ai" | "open_ai_compatible";
+            setKind(next);
+            setName(next === "open_ai" ? "OpenAI" : "Compatible provider");
+            setAllowInsecureRemote(false);
+          }}
+        >
+          <option value="open_ai">OpenAI (curated)</option>
+          <option value="open_ai_compatible">OpenAI-compatible (advanced/unverified)</option>
+        </Select>
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Name
+        <Input value={name} maxLength={100} onChange={(event) => setName(event.target.value)} />
+      </label>
+      <label className="grid gap-1.5 text-sm">
+        Base URL
+        <Input
+          value={kind === "open_ai" ? "https://api.openai.com" : baseUrl}
+          onChange={(event) => setBaseUrl(event.target.value)}
+          readOnly={kind === "open_ai"}
+          placeholder="https://provider.example.com"
+        />
+      </label>
+      {kind === "open_ai_compatible" && (
+        <p className="text-xs text-amber-700 dark:text-amber-300">
+          Advanced compatible endpoints are user-supplied and unverified. Confirm their privacy, billing, model, and
+          retention policies with the operator.
+        </p>
+      )}
+      <label className="flex items-start gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={acknowledged}
+          onChange={(event) => setAcknowledged(event.target.checked)}
+          className="mt-0.5"
+        />
+        I understand that the selected model, message, active conversation history, resolved instructions, and any
+        attached or searched context sent with a request leave this device. Provider retention and charges may apply.
+      </label>
+      {insecureHttp && (
+        <label className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
+          <input
+            type="checkbox"
+            checked={allowInsecureRemote}
+            onChange={(event) => setAllowInsecureRemote(event.target.checked)}
+            className="mt-0.5"
+          />
+          Development mode: allow unencrypted HTTP. Network observers may read or alter requests.
+        </label>
+      )}
+      <div>
+        <Button onClick={() => void create()} disabled={!valid || saving}>
+          <Plus className="h-4 w-4" />
+          {saving ? "Adding…" : "Add provider"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ProviderForm({
   provider,
   models,
   onProviderSaved,
+  onProviderDeleted,
   onRefreshProviderModels,
+  onCancelProviderRefresh,
   onError,
   secretStoreStatus,
   onSecretStoreRetry,
@@ -1608,7 +1938,9 @@ function ProviderForm({
   provider: ProviderConfig;
   models: ModelInfo[];
   onProviderSaved: (provider: ProviderConfig) => void;
+  onProviderDeleted: (id: string) => void;
   onRefreshProviderModels: (providerId: string) => Promise<void>;
+  onCancelProviderRefresh: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
   secretStoreStatus: SecretStoreStatus | null;
   onSecretStoreRetry: () => Promise<void>;
@@ -1632,8 +1964,9 @@ function ProviderForm({
   const [secretBusy, setSecretBusy] = React.useState(false);
   const [secretError, setSecretError] = React.useState<string | null>(null);
   const [secretReload, setSecretReload] = React.useState(0);
+  const [deleting, setDeleting] = React.useState(false);
   const insecureHttpDestination = baseUrl.trim().toLowerCase().startsWith("http://");
-  const supportsCredential = provider.capabilities.requiresAuth || Boolean(provider.apiKeyRef);
+  const supportsCredential = provider.capabilities.requiresAuth || !provider.isLocal || Boolean(provider.apiKeyRef);
 
   React.useEffect(() => {
     setRemoteRiskMessage(null);
@@ -1751,14 +2084,42 @@ function ProviderForm({
     }
   }
 
+  async function deleteManagedProvider() {
+    const confirmed = window.confirm(
+      `Delete ${provider.name}? Its saved credential, discovered models, and active defaults will be removed. Existing message provenance will be retained.`,
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    try {
+      await client.deleteProvider(provider.id, true);
+      onProviderDeleted(provider.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="grid gap-4">
       <div className="grid gap-1.5">
         <label className="text-sm">
           Base URL
-          <Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} className="mt-1.5" />
+          <Input
+            value={baseUrl}
+            onChange={(event) => setBaseUrl(event.target.value)}
+            className="mt-1.5"
+            readOnly={provider.providerType === "openai"}
+          />
         </label>
-        {provider.providerType === "local_inference_host" && (
+        {provider.providerType === "openai" && (
+          <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+            OpenAI is an optional remote service. Ark uses the fixed official HTTPS endpoint. Requests may be billed and
+            are governed by the provider's current retention and privacy policies; Ark does not infer model context
+            limits or prices from the model-list response.
+          </div>
+        )}
+        {provider.providerType === "local_inference_host" && provider.isLocal && (
           <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
             <div className="mb-1.5 flex items-center gap-1.5 font-medium text-foreground">
               <Info className="h-3.5 w-3.5 shrink-0" />
@@ -1954,10 +2315,23 @@ function ProviderForm({
           <Save className="h-4 w-4" />
           Save provider
         </Button>
-        <Button variant="secondary" onClick={handleRefresh} disabled={refreshing}>
-          <RefreshCw className={refreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-          Refresh models
-        </Button>
+        {refreshing ? (
+          <Button variant="secondary" onClick={() => void onCancelProviderRefresh(provider.id)}>
+            <Square className="h-4 w-4" />
+            Cancel refresh
+          </Button>
+        ) : (
+          <Button variant="secondary" onClick={handleRefresh}>
+            <RefreshCw className="h-4 w-4" />
+            Refresh models
+          </Button>
+        )}
+        {provider.isUserManaged && (
+          <Button variant="destructive" onClick={() => void deleteManagedProvider()} disabled={deleting}>
+            <Trash2 className="h-4 w-4" />
+            {deleting ? "Deleting…" : "Delete provider"}
+          </Button>
+        )}
       </div>
       {/* ARC-003: capability-gated (pull support) — installed-model management itself now lives
           in its own Settings → Models section rather than nested here, since it's meaningful
@@ -1971,12 +2345,21 @@ function ProviderForm({
   );
 }
 
-/** FTR-006: the subset of Ollama's `/api/tags` `details` object Ark surfaces — everything else
- * in that object (raw format strings, families arrays) stays unparsed rather than guessed at. */
+/** FTR-006: the bounded subset of Ollama's `/api/tags` plus `/api/show` metadata Ark surfaces.
+ * The backend derives `arkShow` and never retains Ollama's potentially large full license body. */
 interface OllamaModelDetails {
   family?: string;
   parameter_size?: string;
   quantization_level?: string;
+}
+
+interface OllamaModelMetadata {
+  size?: number;
+  details?: OllamaModelDetails;
+  arkShow?: {
+    contextWindow?: number;
+    licenseSummary?: string;
+  };
 }
 
 function OllamaModelsPanel({
@@ -1997,6 +2380,8 @@ function OllamaModelsPanel({
   const [pulling, setPulling] = React.useState(false);
   const [cancelling, setCancelling] = React.useState(false);
   const [pullProgress, setPullProgress] = React.useState<OllamaPullProgress | null>(null);
+  const [pullSpeedBytesPerSecond, setPullSpeedBytesPerSecond] = React.useState<number | null>(null);
+  const pullSpeedSample = React.useRef<{ digest: string | null; completed: number; at: number } | null>(null);
   const [deletingModel, setDeletingModel] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
   const [showSuggestions, setShowSuggestions] = React.useState(false);
@@ -2018,6 +2403,23 @@ function OllamaModelsPanel({
     void client
       .onOllamaPullProgress((event) => {
         if (event.providerId === provider.id) {
+          if (event.completed != null) {
+            const now = performance.now();
+            const previous = pullSpeedSample.current;
+            const digest = event.digest ?? null;
+            if (previous && previous.digest === digest && event.completed >= previous.completed) {
+              const elapsedSeconds = (now - previous.at) / 1000;
+              setPullSpeedBytesPerSecond(
+                elapsedSeconds > 0 ? (event.completed - previous.completed) / elapsedSeconds : null,
+              );
+            } else {
+              setPullSpeedBytesPerSecond(null);
+            }
+            pullSpeedSample.current = { digest, completed: event.completed, at: now };
+          } else {
+            pullSpeedSample.current = null;
+            setPullSpeedBytesPerSecond(null);
+          }
           setPullProgress(event);
         }
       })
@@ -2039,6 +2441,8 @@ function OllamaModelsPanel({
   async function doPull(name: string) {
     setPulling(true);
     setPullProgress(null);
+    setPullSpeedBytesPerSecond(null);
+    pullSpeedSample.current = null;
     setDiskWarning(null);
     try {
       await client.pullOllamaModel(provider.id, name);
@@ -2055,6 +2459,8 @@ function OllamaModelsPanel({
       setPulling(false);
       setCancelling(false);
       setPullProgress(null);
+      setPullSpeedBytesPerSecond(null);
+      pullSpeedSample.current = null;
     }
   }
 
@@ -2140,24 +2546,17 @@ function OllamaModelsPanel({
     }
   }
 
-  function modelDetails(model: ModelInfo): OllamaModelDetails | null {
+  function modelMetadata(model: ModelInfo): OllamaModelMetadata | null {
     if (!model.metadataJson) return null;
     try {
-      const parsed = JSON.parse(model.metadataJson) as { details?: OllamaModelDetails };
-      return parsed.details ?? null;
+      return JSON.parse(model.metadataJson) as OllamaModelMetadata;
     } catch {
       return null;
     }
   }
 
-  function modelSizeLabel(model: ModelInfo): string | null {
-    if (!model.metadataJson) return null;
-    try {
-      const parsed = JSON.parse(model.metadataJson) as { size?: number };
-      return parsed.size ? formatBytes(parsed.size) : null;
-    } catch {
-      return null;
-    }
+  function modelSizeLabel(model: ModelInfo, metadata = modelMetadata(model)): string | null {
+    return metadata?.size ? formatBytes(metadata.size) : null;
   }
 
   const pullPercent =
@@ -2212,17 +2611,30 @@ function OllamaModelsPanel({
       ) : (
         <div className="mb-4 divide-y divide-border rounded-md border border-border">
           {availableModels.map((model) => {
-            const details = modelDetails(model);
-            const sizeLabel = modelSizeLabel(model);
-            const detailParts = [details?.parameter_size, details?.quantization_level, details?.family].filter(
-              (part): part is string => Boolean(part),
-            );
+            const metadata = modelMetadata(model);
+            const details = metadata?.details;
+            const sizeLabel = modelSizeLabel(model, metadata);
+            const contextWindow = model.contextWindow ?? metadata?.arkShow?.contextWindow;
+            const detailParts = [
+              details?.parameter_size,
+              details?.quantization_level,
+              details?.family,
+              contextWindow ? `${contextWindow.toLocaleString()} token context` : undefined,
+            ].filter((part): part is string => Boolean(part));
             return (
               <div key={model.id} className="flex items-center gap-3 px-3 py-2.5">
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium">{model.displayName ?? model.name}</span>
                   {detailParts.length > 0 && (
                     <span className="block text-xs text-muted-foreground">{detailParts.join(" · ")}</span>
+                  )}
+                  {metadata?.arkShow?.licenseSummary && (
+                    <span
+                      className="block truncate text-xs text-muted-foreground"
+                      title={metadata.arkShow.licenseSummary}
+                    >
+                      License: {metadata.arkShow.licenseSummary}
+                    </span>
                   )}
                 </span>
                 {sizeLabel && <span className="text-xs text-muted-foreground">{sizeLabel}</span>}
@@ -2263,6 +2675,10 @@ function OllamaModelsPanel({
           </div>
         )}
 
+        <p className="text-xs text-muted-foreground">
+          Browse Ark's curated offline suggestions, or enter any Ollama tag. Pulls are handled by your connected Ollama
+          instance.
+        </p>
         <div className="flex gap-2">
           <div className="relative flex-1">
             <input
@@ -2360,7 +2776,18 @@ function OllamaModelsPanel({
           <div className="space-y-1">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span className="truncate">{pullProgress.status}</span>
-              {pullPercent !== null && <span>{pullPercent}%</span>}
+              <span className="flex shrink-0 items-center gap-2">
+                {pullProgress.completed != null && (
+                  <span>
+                    {formatBytes(pullProgress.completed)}
+                    {pullProgress.total != null ? ` / ${formatBytes(pullProgress.total)}` : ""}
+                  </span>
+                )}
+                {pullSpeedBytesPerSecond != null && pullSpeedBytesPerSecond > 0 && (
+                  <span>{formatBytes(pullSpeedBytesPerSecond)}/s</span>
+                )}
+                {pullPercent !== null && <span>{pullPercent}%</span>}
+              </span>
             </div>
             {pullPercent !== null && (
               <div className="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -2562,6 +2989,7 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [scopeProjectId, setScopeProjectId] = React.useState("");
   const [exporting, setExporting] = React.useState<"json" | "markdown" | null>(null);
+  const [exportConfirmation, setExportConfirmation] = React.useState<"json" | "markdown" | null>(null);
 
   const [importJson, setImportJson] = React.useState<string | null>(null);
   const [preview, setPreview] = React.useState<WorkspaceImportPreview | null>(null);
@@ -2589,6 +3017,7 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
       onError(getErrorMessage(error));
     } finally {
       setExporting(null);
+      setExportConfirmation(null);
     }
   }
 
@@ -2675,11 +3104,11 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
             </Select>
           </label>
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => void handleExport("json")} disabled={exporting !== null}>
+            <Button variant="secondary" onClick={() => setExportConfirmation("json")} disabled={exporting !== null}>
               {exporting === "json" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               Export JSON
             </Button>
-            <Button variant="secondary" onClick={() => void handleExport("markdown")} disabled={exporting !== null}>
+            <Button variant="secondary" onClick={() => setExportConfirmation("markdown")} disabled={exporting !== null}>
               {exporting === "markdown" ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
@@ -2688,6 +3117,25 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
               Export Markdown
             </Button>
           </div>
+          {exportConfirmation && (
+            <div role="alert" className="grid gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
+              <div className="font-medium text-amber-800 dark:text-amber-200">Review this plaintext export</div>
+              <p className="text-muted-foreground">
+                This file contains every conversation and attachment in the selected{" "}
+                {scopeProjectId ? "project" : "workspace"}, plus provider/model provenance. Credentials and caches are
+                excluded. Anyone who can read the destination file can read this content; choose a protected location.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={() => void handleExport(exportConfirmation)}>
+                  <Download className="h-4 w-4" />
+                  Export {exportConfirmation === "json" ? "JSON" : "Markdown"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setExportConfirmation(null)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="grid gap-2 border-t border-border pt-3">
@@ -2725,7 +3173,10 @@ function DataPortabilityPanel({ projects, onError }: { projects: Project[]; onEr
                       aria-label={`Import "${entry.title}"`}
                     />
                     <span className="min-w-0 flex-1 truncate text-foreground">{entry.title}</span>
-                    <span className="shrink-0 text-muted-foreground">{entry.messageCount} msgs</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {entry.messageCount} msgs
+                      {entry.attachmentCount > 0 ? ` · ${entry.attachmentCount} files` : ""}
+                    </span>
                     {entry.duplicateOfLocalId && <Badge tone="warning">already in workspace</Badge>}
                   </li>
                 ))}
@@ -2835,7 +3286,12 @@ function CompanionApiPanel({ onError }: { onError: (message: string) => void }) 
                 {status.running && status.port && (
                   <span className="text-xs text-muted-foreground">http://127.0.0.1:{status.port}</span>
                 )}
-                <Button variant="secondary" onClick={() => void toggle()} disabled={toggling} className="ml-auto">
+                <Button
+                  variant="secondary"
+                  onClick={() => void toggle()}
+                  disabled={toggling || (!status.enabled && !status.tokenConfigured)}
+                  className="ml-auto"
+                >
                   {toggling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   {status.enabled ? "Disable" : "Enable"}
                 </Button>
@@ -2843,7 +3299,9 @@ function CompanionApiPanel({ onError }: { onError: (message: string) => void }) 
 
               <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
                 <span className="text-xs text-muted-foreground">
-                  {status.tokenConfigured ? "A bearer token is configured." : "No bearer token generated yet."}
+                  {status.tokenConfigured
+                    ? "A bearer token is configured. The API contract is at authenticated GET /v1/openapi.json."
+                    : "Generate and save a bearer token before enabling the API."}
                 </span>
                 <Button
                   variant="secondary"
@@ -3355,6 +3813,8 @@ function BuiltInRuntimeForm({
   onStatusChange,
   modelPath,
   onModelPathChange,
+  managedModelDirectory,
+  onManagedModelDirectoryChange,
   onRefreshProviderModels,
   onError,
 }: {
@@ -3365,6 +3825,8 @@ function BuiltInRuntimeForm({
    * value itself, so a keystroke doesn't trigger a backend write on every character. */
   modelPath: string | null;
   onModelPathChange: (path: string) => void;
+  managedModelDirectory: string | null;
+  onManagedModelDirectoryChange: (path: string | null) => Promise<void>;
   onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
@@ -3372,11 +3834,190 @@ function BuiltInRuntimeForm({
   const [modelPathDraft, setModelPathDraft] = React.useState(modelPath ?? "");
   const [modelSource, setModelSource] = React.useState(status.modelProvenance?.source ?? "");
   const [modelLicense, setModelLicense] = React.useState(status.modelProvenance?.license ?? "");
+  const [managedModels, setManagedModels] = React.useState<ManagedModelStatus[]>([]);
+  const [selectedModelId, setSelectedModelId] = React.useState("");
+  const [storageDraft, setStorageDraft] = React.useState(managedModelDirectory ?? "");
+  const [catalogLoading, setCatalogLoading] = React.useState(true);
+  const [storageSaving, setStorageSaving] = React.useState(false);
+  const [downloadProgress, setDownloadProgress] = React.useState<ManagedModelDownloadProgress | null>(null);
+  const [downloading, setDownloading] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = React.useState(false);
+  const [pendingPreflight, setPendingPreflight] = React.useState<ManagedModelPreflight | null>(null);
+  const [overrideReason, setOverrideReason] = React.useState("");
   const [starting, setStarting] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
 
-  async function handleStart() {
+  const refreshManagedModels = React.useCallback(async () => {
+    setCatalogLoading(true);
+    try {
+      const next = await client.listManagedModels();
+      setManagedModels(next);
+      setSelectedModelId((current) =>
+        next.some((candidate) => candidate.model.id === current) ? current : (next[0]?.model.id ?? ""),
+      );
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [client, onError]);
+
+  React.useEffect(() => {
+    void refreshManagedModels();
+  }, [refreshManagedModels]);
+
+  React.useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void client
+      .onManagedModelDownloadProgress((event) => {
+        if (!disposed) setDownloadProgress(event);
+      })
+      .then((next) => {
+        if (disposed) next();
+        else unsubscribe = next;
+      })
+      .catch((error) => {
+        if (!disposed) onError(getErrorMessage(error));
+      });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [client, onError]);
+
+  React.useEffect(() => {
+    setStorageDraft(managedModelDirectory ?? "");
+  }, [managedModelDirectory]);
+
+  const selectedModel = managedModels.find((candidate) => candidate.model.id === selectedModelId) ?? null;
+
+  function hasErrorCode(error: unknown, code: string): boolean {
+    return Boolean(
+      error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code,
+    );
+  }
+
+  async function saveStorageDirectory() {
+    setStorageSaving(true);
+    try {
+      await onManagedModelDirectoryChange(storageDraft.trim() || null);
+      setPendingPreflight(null);
+      await refreshManagedModels();
+    } catch {
+      // The controller owns rollback and user-visible error reporting for device-setting writes.
+    } finally {
+      setStorageSaving(false);
+    }
+  }
+
+  async function performManagedOperation(
+    operation: ManagedModelOperation,
+    acknowledgeWarning: boolean,
+    advancedOverride: boolean,
+  ) {
+    if (!selectedModel) return;
+    setPendingPreflight(null);
+    if (operation === "download") {
+      setDownloading(true);
+      setDownloadProgress({
+        schemaVersion: 1,
+        modelId: selectedModel.model.id,
+        status: selectedModel.partialBytes > 0 ? "resuming" : "starting",
+        completedBytes: selectedModel.partialBytes,
+        totalBytes: selectedModel.model.sizeBytes,
+        resumed: selectedModel.partialBytes > 0,
+      });
+      try {
+        const installed = await client.downloadManagedModel(
+          selectedModel.model.id,
+          acknowledgeWarning,
+          advancedOverride,
+          overrideReason.trim() || null,
+        );
+        setManagedModels((current) =>
+          current.map((candidate) => (candidate.model.id === installed.model.id ? installed : candidate)),
+        );
+      } catch (error) {
+        if (!hasErrorCode(error, "model_download_cancelled")) onError(getErrorMessage(error));
+        await refreshManagedModels();
+      } finally {
+        setDownloading(false);
+      }
+      return;
+    }
+
+    setStarting(true);
+    try {
+      const next = await client.startManagedModel(
+        selectedModel.model.id,
+        acknowledgeWarning,
+        advancedOverride,
+        overrideReason.trim() || null,
+      );
+      onStatusChange(next);
+      onModelPathChange(next.modelPath ?? selectedModel.modelPath);
+      await onRefreshProviderModels("built_in");
+    } catch (error) {
+      const startError = getErrorMessage(error);
+      try {
+        onStatusChange(await client.getBuiltInRuntimeStatus());
+        onError(startError);
+      } catch (statusError) {
+        onError(`${startError} Status reconciliation also failed: ${getErrorMessage(statusError)}`);
+      }
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function prepareManagedOperation(operation: ManagedModelOperation) {
+    if (!selectedModel) return;
+    try {
+      const preflight = await client.preflightManagedModel(selectedModel.model.id, operation);
+      setOverrideReason("");
+      if (preflight.risk === "safe") {
+        await performManagedOperation(operation, false, false);
+      } else {
+        setPendingPreflight(preflight);
+      }
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }
+
+  async function cancelDownload() {
+    if (!selectedModel) return;
+    try {
+      await client.cancelManagedModelDownload(selectedModel.model.id);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }
+
+  async function deleteManagedModel() {
+    if (!selectedModel) return;
+    if (!deleteConfirmation) {
+      setDeleteConfirmation(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await client.deleteManagedModel(selectedModel.model.id);
+      setDeleteConfirmation(false);
+      setDownloadProgress(null);
+      setPendingPreflight(null);
+      await refreshManagedModels();
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function handleManualStart() {
     const path = modelPathDraft.trim();
     if (!path || !modelSource.trim() || !modelLicense.trim()) {
       onError("Enter the GGUF path, model source, and model license before starting.");
@@ -3406,6 +4047,7 @@ function BuiltInRuntimeForm({
     try {
       await client.stopBuiltInRuntime();
       onStatusChange(await client.getBuiltInRuntimeStatus());
+      await onRefreshProviderModels("built_in");
     } catch (err) {
       onError(getErrorMessage(err));
     } finally {
@@ -3423,6 +4065,10 @@ function BuiltInRuntimeForm({
   }
 
   const modelFileName = status.modelPath?.split(/[/\\]/).pop() ?? null;
+  const displayedProgress = downloadProgress?.modelId === selectedModel?.model.id ? downloadProgress : null;
+  const progressPercent = displayedProgress
+    ? Math.min(100, Math.round((displayedProgress.completedBytes / displayedProgress.totalBytes) * 100))
+    : 0;
 
   return (
     <div className="grid gap-4">
@@ -3454,61 +4100,290 @@ function BuiltInRuntimeForm({
             <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             Runtime binary not installed
           </div>
-          <p>
-            Ark does not bundle the{" "}
-            <code className="rounded bg-background px-1 font-mono text-[11px]">llama-server</code> binary in this build.
-            Run <code className="rounded bg-background px-1 font-mono text-[11px]">scripts/setup-llama.ps1</code> (or{" "}
-            <code className="rounded bg-background px-1 font-mono text-[11px]">setup-llama.sh</code> on macOS/Linux)
-            from the repo root to download it, then reopen Settings.
-          </p>
+          {import.meta.env.DEV ? (
+            <p>
+              Run <code className="rounded bg-background px-1 font-mono text-[11px]">scripts/setup-llama.ps1</code> (or{" "}
+              <code className="rounded bg-background px-1 font-mono text-[11px]">setup-llama.sh</code> on macOS/Linux)
+              from the repo root to install the reviewed runtime, then reopen Settings.
+            </p>
+          ) : (
+            <p>
+              This Ark package is missing its verified runtime resource. Reinstall the package; Ark will not run an
+              unverified replacement.
+            </p>
+          )}
         </div>
       )}
 
       {status.binaryInstalled && !status.binaryVerified && (
         <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-xs">
-          The runtime exists but its checked-in artifact provenance or installed-file hashes did not verify. Re-run the
-          setup script; Ark will not execute it.
+          The runtime exists but its reviewed provenance or installed-file hashes did not verify.{" "}
+          {import.meta.env.DEV ? "Re-run the setup script" : "Reinstall this Ark package"}; Ark will not execute it.
         </div>
       )}
 
-      <label className="grid gap-1.5 text-sm">
-        Model file
-        <Input
-          value={modelPathDraft}
-          onChange={(e) => setModelPathDraft(e.target.value)}
-          placeholder="C:\Models\llama-3-8b-q4_K_M.gguf"
-          disabled={status.running || starting}
-        />
-        <span className="text-xs text-muted-foreground">
-          GGUF format only. Find models on Hugging Face (search "GGUF") or convert with{" "}
-          <code className="rounded bg-muted px-1 text-[11px]">llama.cpp convert</code>.
-        </span>
-      </label>
+      <section className="grid gap-3 rounded-md border border-border p-3" aria-labelledby="managed-models-title">
+        <div>
+          <div id="managed-models-title" className="font-medium">
+            Verified model catalog
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Ark downloads only publisher-pinned files whose exact size and SHA-256 are reviewed with this build.
+          </p>
+        </div>
 
-      <label className="grid gap-1.5 text-sm">
-        Model source
-        <Input
-          value={modelSource}
-          onChange={(event) => setModelSource(event.target.value)}
-          placeholder="https://huggingface.co/publisher/model"
-          maxLength={2048}
-          disabled={status.running || starting}
-        />
-        <span className="text-xs text-muted-foreground">
-          Publisher/repository URL or another precise origin record.
-        </span>
-      </label>
+        <label className="grid gap-1.5 text-sm">
+          Model storage directory
+          <div className="flex flex-wrap gap-2">
+            <Input
+              value={storageDraft}
+              onChange={(event) => setStorageDraft(event.target.value)}
+              placeholder={selectedModel?.storageDirectory ?? "Ark application data/models"}
+              disabled={storageSaving || downloading || status.running}
+              className="min-w-64 flex-1"
+            />
+            <Button
+              variant="secondary"
+              onClick={() => void saveStorageDirectory()}
+              disabled={storageSaving || downloading || status.running}
+            >
+              {storageSaving ? "Saving…" : "Save location"}
+            </Button>
+          </div>
+          <span className="text-xs text-muted-foreground">
+            Leave blank to use Ark's private application-data directory. Existing model files are never moved
+            implicitly.
+          </span>
+        </label>
 
-      <label className="grid gap-1.5 text-sm">
-        Model license
-        <Input
-          value={modelLicense}
-          onChange={(event) => setModelLicense(event.target.value)}
-          placeholder="Apache-2.0"
-          maxLength={256}
-          disabled={status.running || starting}
-        />
-      </label>
+        {catalogLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading reviewed catalog…
+          </div>
+        ) : selectedModel ? (
+          <>
+            <label className="grid gap-1.5 text-sm">
+              Managed model
+              <Select
+                value={selectedModel.model.id}
+                onChange={(event) => {
+                  setSelectedModelId(event.target.value);
+                  setPendingPreflight(null);
+                  setDeleteConfirmation(false);
+                }}
+                disabled={downloading || starting}
+              >
+                {managedModels.map((candidate) => (
+                  <option key={candidate.model.id} value={candidate.model.id}>
+                    {candidate.model.displayName} · {candidate.model.quantization} ·{" "}
+                    {formatBytes(candidate.model.sizeBytes)}
+                  </option>
+                ))}
+              </Select>
+            </label>
+
+            <div className="grid gap-2 rounded-md bg-muted/40 px-3 py-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">{selectedModel.model.displayName}</span>
+                <Badge>{selectedModel.model.license}</Badge>
+                <Badge>{selectedModel.model.quantization}</Badge>
+                <span className="text-muted-foreground">
+                  {selectedModel.installed && selectedModel.verified
+                    ? "Installed and verified"
+                    : selectedModel.partialBytes > 0
+                      ? `Partial download · ${formatBytes(selectedModel.partialBytes)}`
+                      : "Not installed"}
+                </span>
+              </div>
+              <p className="text-muted-foreground">{selectedModel.model.description}</p>
+              <div className="text-muted-foreground">
+                {selectedModel.model.publisher} · {selectedModel.model.architecture} ·{" "}
+                {selectedModel.model.parameterCount} parameters · {selectedModel.model.contextWindow.toLocaleString()}{" "}
+                token context · {selectedModel.model.compatibility.format} · {selectedModel.model.compatibility.runtime}{" "}
+                {selectedModel.model.compatibility.runtimeVersion}
+              </div>
+              <div className="break-all text-muted-foreground">
+                Source {selectedModel.model.sourceRepository} · SHA-256 {selectedModel.model.sha256}
+              </div>
+              <div className="break-all text-muted-foreground">Storage {selectedModel.modelPath}</div>
+            </div>
+
+            {displayedProgress && (downloading || displayedProgress.status === "complete") && (
+              <div className="grid gap-1.5" aria-live="polite">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{displayedProgress.status.replaceAll("_", " ")}</span>
+                  <span>
+                    {formatBytes(displayedProgress.completedBytes)} / {formatBytes(displayedProgress.totalBytes)} ·{" "}
+                    {progressPercent}%
+                  </span>
+                </div>
+                <progress
+                  value={displayedProgress.completedBytes}
+                  max={displayedProgress.totalBytes}
+                  className="h-2 w-full accent-primary"
+                />
+                {displayedProgress.resumed && (
+                  <span className="text-xs text-muted-foreground">Resumed from the retained partial download.</span>
+                )}
+              </div>
+            )}
+
+            {pendingPreflight && pendingPreflight.modelId === selectedModel.model.id && (
+              <div
+                role="alert"
+                className={cn(
+                  "grid gap-2 rounded-md border px-3 py-2.5 text-xs",
+                  pendingPreflight.risk === "blocked"
+                    ? "border-destructive/40 bg-destructive/10"
+                    : "border-amber-500/40 bg-amber-500/10",
+                )}
+              >
+                <div className="font-medium">
+                  {pendingPreflight.risk === "blocked"
+                    ? "Hardware-fit check blocked this operation"
+                    : "Hardware-fit warning"}
+                </div>
+                {pendingPreflight.advisories.map((advisory) => (
+                  <p key={advisory}>{advisory}</p>
+                ))}
+                {pendingPreflight.operation === "load" ? (
+                  <p className="text-muted-foreground">
+                    Available memory {formatBytes(pendingPreflight.availableMemoryBytes)} · conservative minimum{" "}
+                    {formatBytes(pendingPreflight.minimumAvailableMemoryBytes)} · recommended{" "}
+                    {formatBytes(pendingPreflight.recommendedAvailableMemoryBytes)}
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">
+                    Available disk {formatBytes(pendingPreflight.availableDiskBytes)} · model plus reserve{" "}
+                    {formatBytes(pendingPreflight.requiredDiskBytes)}
+                  </p>
+                )}
+                {pendingPreflight.risk === "blocked" && (
+                  <label className="grid gap-1.5">
+                    Advanced override reason
+                    <Textarea
+                      value={overrideReason}
+                      onChange={(event) => setOverrideReason(event.target.value)}
+                      placeholder="Explain the hardware knowledge that makes this safe in your environment."
+                      maxLength={512}
+                    />
+                  </label>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant={pendingPreflight.risk === "blocked" ? "destructive" : "primary"}
+                    disabled={pendingPreflight.risk === "blocked" && overrideReason.trim().length < 12}
+                    onClick={() =>
+                      void performManagedOperation(
+                        pendingPreflight.operation,
+                        pendingPreflight.risk === "warning",
+                        pendingPreflight.risk === "blocked",
+                      )
+                    }
+                  >
+                    {pendingPreflight.risk === "blocked" ? "Use advanced override" : "Acknowledge and continue"}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setPendingPreflight(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              {downloading ? (
+                <Button variant="secondary" onClick={() => void cancelDownload()}>
+                  Cancel download
+                </Button>
+              ) : !selectedModel.installed || !selectedModel.verified ? (
+                <Button onClick={() => void prepareManagedOperation("download")}>
+                  <Download className="h-4 w-4" />
+                  {selectedModel.partialBytes > 0 ? "Resume and verify" : "Download and verify"}
+                </Button>
+              ) : status.running ? (
+                <Button variant="secondary" onClick={handleStop} disabled={stopping}>
+                  {stopping ? "Stopping…" : "Unload model"}
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => void prepareManagedOperation("load")}
+                  disabled={starting || !status.binaryVerified}
+                >
+                  {starting ? "Loading…" : "Load model"}
+                </Button>
+              )}
+              {(selectedModel.installed || selectedModel.partialBytes > 0) && !status.running && (
+                <Button
+                  variant={deleteConfirmation ? "destructive" : "ghost"}
+                  onClick={() => void deleteManagedModel()}
+                  disabled={deleting || downloading}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {deleting ? "Deleting…" : deleteConfirmation ? "Confirm delete" : "Delete local files"}
+                </Button>
+              )}
+            </div>
+          </>
+        ) : (
+          <p role="alert" className="text-sm text-destructive">
+            No reviewed managed models are available in this build.
+          </p>
+        )}
+      </section>
+
+      <details className="rounded-md border border-border p-3">
+        <summary className="cursor-pointer text-sm font-medium">Advanced: load a manually obtained GGUF</summary>
+        <div className="mt-3 grid gap-3">
+          <p className="text-xs text-muted-foreground">
+            Manual files are treated as untrusted and validated before launch. Ark records their observed digest and the
+            source/license you supply, but cannot compare them to the reviewed catalog.
+          </p>
+          <label className="grid gap-1.5 text-sm">
+            Model file
+            <Input
+              value={modelPathDraft}
+              onChange={(event) => setModelPathDraft(event.target.value)}
+              placeholder="C:\\Models\\model.gguf"
+              disabled={status.running || starting}
+            />
+          </label>
+          <label className="grid gap-1.5 text-sm">
+            Model source
+            <Input
+              value={modelSource}
+              onChange={(event) => setModelSource(event.target.value)}
+              placeholder="https://publisher.example/model"
+              maxLength={2048}
+              disabled={status.running || starting}
+            />
+          </label>
+          <label className="grid gap-1.5 text-sm">
+            Model license
+            <Input
+              value={modelLicense}
+              onChange={(event) => setModelLicense(event.target.value)}
+              placeholder="Apache-2.0"
+              maxLength={256}
+              disabled={status.running || starting}
+            />
+          </label>
+          <Button
+            variant="secondary"
+            onClick={handleManualStart}
+            disabled={
+              status.running ||
+              starting ||
+              !modelPathDraft.trim() ||
+              !modelSource.trim() ||
+              !modelLicense.trim() ||
+              !status.binaryVerified
+            }
+          >
+            {starting ? "Loading…" : "Load manual model"}
+          </Button>
+        </div>
+      </details>
 
       {(status.runtimeProvenance || status.modelProvenance) && (
         <div className="grid gap-2 rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs">
@@ -3545,24 +4420,6 @@ function BuiltInRuntimeForm({
       )}
 
       <div className="flex flex-wrap gap-2">
-        {status.running ? (
-          <Button variant="secondary" onClick={handleStop} disabled={stopping}>
-            Stop runtime
-          </Button>
-        ) : (
-          <Button
-            onClick={handleStart}
-            disabled={
-              starting ||
-              !modelPathDraft.trim() ||
-              !modelSource.trim() ||
-              !modelLicense.trim() ||
-              !status.binaryVerified
-            }
-          >
-            {starting ? "Starting…" : "Start runtime"}
-          </Button>
-        )}
         <Button variant="secondary" onClick={handleRefresh} disabled={!status.running || refreshing}>
           <RefreshCw className={refreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
           Refresh models
@@ -3576,9 +4433,10 @@ function BuiltInRuntimeForm({
         </div>
         <p>
           Ark can run a local <code className="rounded bg-background px-1 font-mono text-[11px]">llama-server</code>{" "}
-          process for you, but the binary is not bundled with the app — it's downloaded once via the setup script (see
-          above if not yet installed). After that, point it at a GGUF model file and start; it works without internet.
-          For GPU acceleration, use the Ollama or Local Inference Host provider instead.
+          process for you. Development builds install the pinned binary with the verified setup script; qualified
+          release packages carry that same verified runtime as an immutable application resource. Managed catalog models
+          download once, verify locally, and then work without internet. For GPU acceleration, use the Ollama or Local
+          Inference Host provider instead.
         </p>
         <p className="mt-1">
           Artifact delivery:{" "}

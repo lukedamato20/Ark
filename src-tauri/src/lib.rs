@@ -1,6 +1,8 @@
 mod attachments;
 mod backup;
 mod chat;
+mod code_sessions;
+pub mod code_tools;
 mod commands;
 mod companion_api;
 mod config;
@@ -16,14 +18,16 @@ mod export;
 mod file_permissions;
 mod generation;
 mod import_export;
+mod managed_models;
 mod observability;
 mod perf_metrics;
 mod personas;
 mod projects;
 mod provider_management;
-mod providers;
+pub mod providers;
 mod proxy;
 mod redaction;
+pub mod repository;
 mod secret_store;
 mod security;
 mod sidecar;
@@ -36,32 +40,38 @@ mod workspace;
 mod workspace_bootstrap;
 
 use commands::{
-    attach_text_file, cancel_import, cancel_ollama_pull, cancel_stream, check_disk_space,
-    create_conversation, create_note, create_persona, create_project, create_workspace_backup,
-    delete_attachment, delete_conversation, delete_note, delete_ollama_model, delete_persona,
-    delete_project, delete_provider_secret, delete_tool_secret, disable_workspace_encryption,
-    discard_interrupted_message, edit_user_message, enable_workspace_encryption,
-    export_conversation_json, export_conversation_markdown, export_diagnostics_bundle,
-    export_workspace_json, export_workspace_markdown, get_app_bootstrap,
-    get_assistant_alternatives, get_attachment_content, get_built_in_runtime_status,
-    get_companion_api_status, get_conversation_messages, get_message, get_provider_secret_metadata,
-    get_secret_store_status, get_tool_secret_metadata, get_workspace_protection_status,
-    grant_tool_capability, import_conversation_json, import_workspace_json, keep_partial_message,
-    list_conversation_attachments, list_conversation_notes, list_conversations,
-    list_persona_versions, list_personas, list_projects, list_tool_audit_events, list_tools,
-    preview_conversation_import, preview_note_write, preview_persona_deletion,
-    preview_project_deletion, preview_web_search, preview_workspace_import,
-    preview_workspace_restore, pull_ollama_model, record_frontend_perf_metric, refresh_models,
-    regenerate_assistant_message, regenerate_companion_api_token, rename_conversation,
-    reset_workspace, restore_workspace_backup, restore_workspace_recovery_key,
-    retry_workspace_open, revoke_tool_capability, rotate_workspace_encryption, run_diagnostics,
-    save_diagnostics_bundle, search_web, send_chat_message, set_branch_name,
-    set_companion_api_enabled, set_conversation_archived, set_conversation_persona,
-    set_conversation_pinned, set_conversation_project, set_persona_archived, set_project_archived,
-    set_workspace, start_built_in_runtime, start_pending_stream, stop_built_in_runtime,
-    switch_active_branch, update_conversation_settings, update_device_settings, update_note,
-    update_persona, update_project, update_provider, upsert_provider_secret, upsert_tool_secret,
-    verify_tool_audit_trail,
+    attach_text_file, cancel_import, cancel_managed_model_download, cancel_ollama_pull,
+    cancel_provider_refresh, cancel_stream, check_disk_space, code_git_diff, code_git_status,
+    code_list_directory, code_read_file, code_repository_map, code_search, create_code_run,
+    create_code_session, create_conversation, create_note, create_persona, create_project,
+    create_remote_provider, create_workspace_backup, delete_attachment, delete_conversation,
+    delete_managed_model, delete_note, delete_ollama_model, delete_persona, delete_project,
+    delete_provider, delete_provider_secret, delete_tool_secret, disable_workspace_encryption,
+    discard_interrupted_message, download_managed_model, edit_user_message,
+    enable_workspace_encryption, export_conversation_json, export_conversation_markdown,
+    export_diagnostics_bundle, export_persona_json, export_workspace_json,
+    export_workspace_markdown, get_app_bootstrap, get_assistant_alternatives,
+    get_attachment_content, get_built_in_runtime_status, get_code_session,
+    get_companion_api_status, get_conversation_branch_topology, get_conversation_messages,
+    get_message, get_provider_secret_metadata, get_secret_store_status, get_tool_secret_metadata,
+    get_workspace_protection_status, grant_tool_capability, import_conversation_json,
+    import_persona_json, import_workspace_json, keep_partial_message, list_ark_code_tools,
+    list_code_sessions, list_conversation_attachments, list_conversation_notes, list_conversations,
+    list_managed_models, list_persona_versions, list_personas, list_projects,
+    list_tool_audit_events, list_tools, preflight_managed_model, preview_conversation_import,
+    preview_note_write, preview_persona_deletion, preview_project_deletion, preview_web_search,
+    preview_workspace_import, preview_workspace_restore, pull_ollama_model,
+    record_frontend_perf_metric, refresh_models, regenerate_assistant_message,
+    regenerate_companion_api_token, rename_conversation, reset_workspace, restore_workspace_backup,
+    restore_workspace_recovery_key, retry_workspace_open, revoke_tool_capability,
+    rotate_workspace_encryption, run_diagnostics, save_diagnostics_bundle, search_web,
+    send_chat_message, set_branch_name, set_companion_api_enabled, set_conversation_archived,
+    set_conversation_persona, set_conversation_pinned, set_conversation_project,
+    set_persona_archived, set_project_archived, set_project_repository, set_workspace,
+    start_built_in_runtime, start_managed_model, start_pending_stream, stop_built_in_runtime,
+    switch_active_branch, update_application_instructions, update_conversation_settings,
+    update_device_settings, update_note, update_persona, update_project, update_provider,
+    upsert_provider_secret, upsert_tool_secret, verify_tool_audit_trail,
 };
 use db::Database;
 use errors::AppError;
@@ -99,6 +109,14 @@ pub struct AppState {
     /// FTR-006: keyed by provider ID, matching the UI's single-pull-per-provider reality — see
     /// `provider_management::pull_ollama_model`'s own doc comment.
     pub(crate) active_ollama_pulls: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// FTR-009: request ID + abort handle per provider. A newer refresh aborts the older HTTP
+    /// future; explicit UI cancellation uses the same handle.
+    pub(crate) active_provider_refreshes:
+        Mutex<HashMap<String, (String, futures_util::future::AbortHandle)>>,
+    /// FTR-006: one cancellable managed-model download per catalog entry. The downloaded bytes
+    /// remain in a catalog-owned `.partial` file when cancelled so a later request can resume.
+    pub(crate) active_managed_model_downloads:
+        Mutex<HashMap<String, Arc<managed_models::ManagedDownloadCancellation>>>,
     /// SEC-006: gates all database commands while a copy/verify/swap protection migration owns
     /// both connections. Compare-and-swap prevents concurrent protection operations.
     pub(crate) storage_maintenance: AtomicBool,
@@ -268,10 +286,31 @@ pub fn run() {
                 pending_streams: Mutex::new(HashMap::new()),
                 active_imports: Mutex::new(HashMap::new()),
                 active_ollama_pulls: Mutex::new(HashMap::new()),
+                active_provider_refreshes: Mutex::new(HashMap::new()),
+                active_managed_model_downloads: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: Arc::new(Mutex::new(diagnostics_log)),
                 companion_api: Mutex::new(None),
+            });
+
+            // FTR-010: `enabled` is a persisted, explicit user opt-in. Restore the loopback
+            // listener after `AppState` is managed; never fail application startup if the
+            // optional integration surface cannot bind or its keychain token is unavailable.
+            let companion_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = companion_api::start_enabled_on_launch(&companion_handle).await {
+                    if let Some(state) = companion_handle.try_state::<AppState>() {
+                        if let Ok(mut log) = state.observability_log.lock() {
+                            log.record(
+                                observability::LogLevel::Warn,
+                                "companion_api",
+                                None,
+                                &format!("startup restore failed: {}", error.code),
+                            );
+                        }
+                    }
+                }
             });
 
             Ok(())
@@ -288,14 +327,28 @@ pub fn run() {
             list_projects,
             create_project,
             update_project,
+            set_project_repository,
             set_project_archived,
             preview_project_deletion,
             delete_project,
+            list_ark_code_tools,
+            code_list_directory,
+            code_read_file,
+            code_search,
+            code_repository_map,
+            code_git_status,
+            code_git_diff,
+            create_code_session,
+            list_code_sessions,
+            get_code_session,
+            create_code_run,
             set_conversation_persona,
             list_personas,
             create_persona,
             update_persona,
             list_persona_versions,
+            export_persona_json,
+            import_persona_json,
             set_persona_archived,
             preview_persona_deletion,
             delete_persona,
@@ -315,6 +368,7 @@ pub fn run() {
             delete_note,
             delete_conversation,
             get_conversation_messages,
+            get_conversation_branch_topology,
             get_message,
             get_assistant_alternatives,
             switch_active_branch,
@@ -327,8 +381,11 @@ pub fn run() {
             start_pending_stream,
             cancel_stream,
             refresh_models,
+            cancel_provider_refresh,
             record_frontend_perf_metric,
             update_provider,
+            create_remote_provider,
+            delete_provider,
             get_secret_store_status,
             upsert_provider_secret,
             get_provider_secret_metadata,
@@ -339,6 +396,7 @@ pub fn run() {
             disable_workspace_encryption,
             restore_workspace_recovery_key,
             update_device_settings,
+            update_application_instructions,
             set_workspace,
             reset_workspace,
             retry_workspace_open,
@@ -361,8 +419,14 @@ pub fn run() {
             preview_conversation_import,
             cancel_import,
             start_built_in_runtime,
+            start_managed_model,
             stop_built_in_runtime,
             get_built_in_runtime_status,
+            list_managed_models,
+            preflight_managed_model,
+            download_managed_model,
+            cancel_managed_model_download,
+            delete_managed_model,
             pull_ollama_model,
             delete_ollama_model,
             cancel_ollama_pull,

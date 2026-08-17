@@ -8,16 +8,19 @@
     {
       "id": "windows",
       "runner": "windows-latest",
+      "runtimeTarget": "win32-x64",
       "minimumVersionClaim": "Windows 10 22H2"
     },
     {
       "id": "macos",
       "runner": "macos-latest",
+      "runtimeTarget": "darwin-arm64",
       "minimumVersionClaim": "macOS 12"
     },
     {
       "id": "linux",
       "runner": "ubuntu-latest",
+      "runtimeTarget": "linux-x64",
       "minimumVersionClaim": "Ubuntu 22.04 LTS"
     }
   ],
@@ -36,23 +39,29 @@
       "delivery": "external_server_required",
       "networkClass": "loopback_lan_or_user_acknowledged"
     },
+    "openai": {
+      "visible": true,
+      "delivery": "user_configured_remote_service",
+      "networkClass": "https_remote_user_acknowledged"
+    },
     "built_in": {
       "visible": false,
       "developmentVisible": true,
-      "delivery": "release_disabled_pending_upstream_http_isolation",
-      "networkClass": "loopback_auth_incomplete_upstream"
+      "delivery": "verified_setup_required_release_ui_hidden",
+      "networkClass": "authenticated_isolating_loopback_proxy"
     }
   },
   "modelFiles": {
     "builtInFormat": "GGUF",
-    "managedDownload": false,
-    "manualAbsolutePathRequired": true
+    "managedDownload": true,
+    "manualAbsolutePathRequired": false,
+    "manualImportAvailable": true
   },
   "features": {
     "localChat": true,
     "conversationImportExport": true,
     "branchEditing": true,
-    "cloudProviders": false,
+    "cloudProviders": true,
     "accounts": false,
     "sync": false,
     "attachments": false,

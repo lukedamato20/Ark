@@ -181,6 +181,10 @@ pub fn build_diagnostics_bundle(state: &AppState) -> Result<DiagnosticsBundle, A
 /// here — the same trust boundary as any other "export to a file the user picked" command
 /// (`export_conversation_json`/`export_conversation_markdown`).
 pub fn save_diagnostics_bundle(destination_path: &str, bundle_text: &str) -> Result<(), AppError> {
+    let destination_path = crate::validation::validate_output_file_path(
+        destination_path,
+        "Diagnostics bundle destination",
+    )?;
     std::fs::write(destination_path, bundle_text).map_err(|error| {
         AppError::new(
             "diagnostics_bundle_save_failed",

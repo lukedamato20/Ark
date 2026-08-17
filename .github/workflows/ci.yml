@@ -124,7 +124,7 @@ jobs:
         run: cargo audit --file src-tauri/Cargo.lock
 
   build-check:
-    name: Tauri build check (non-bundled) — ${{ matrix.os }}
+    name: Packaged Tauri + verified runtime — ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -159,8 +159,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        run: pnpm build
+      - name: Install pinned runtime resource (size/hash/archive checks)
+        run: node scripts/runtime-supply-chain.mjs install
 
-      - name: Compile Tauri backend (no bundling — see COR-012 for the packaged-bundle blocker)
-        run: cargo build --manifest-path src-tauri/Cargo.toml
+      - name: Verify runtime provenance, installed files, and executable
+        run: node scripts/runtime-supply-chain.mjs verify
+
+      - name: Build packaged Tauri application with verified runtime
+        run: pnpm tauri build

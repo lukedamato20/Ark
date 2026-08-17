@@ -2,11 +2,12 @@
 //! boundary from the frontend before they reach a provider request, a filesystem operation,
 //! or a persisted config. URL/destination validation lives in [`crate::security`] since it is
 //! itself a Rust trust-boundary concern tied to SEC-001; this module covers numeric generation
-//! parameters, opaque entity IDs, and filesystem paths. Every validator returns a stable [`AppError`] with code
-//! `"invalid_input"` and a safe, user-facing message — no technical internals leak.
+//! parameters, opaque entity IDs, and filesystem paths. Validators return stable, safe
+//! [`AppError`] values without leaking technical internals; malformed values use `invalid_input`,
+//! while a required existing file uses `file_not_found` so its domain command can map that state.
 
 use crate::errors::AppError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const MAX_ENTITY_ID_BYTES: usize = 128;
 
@@ -43,6 +44,255 @@ fn reject_ambiguous_path(path: &Path, label: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+fn validate_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, AppError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_input(format!("{label} cannot be empty.")));
+    }
+    if trimmed.contains('\0') {
+        return Err(AppError::invalid_input(format!(
+            "{label} must not contain a null byte."
+        )));
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(AppError::invalid_input(format!(
+            "{label} must be absolute."
+        )));
+    }
+    reject_ambiguous_path(&path, label)?;
+    Ok(path)
+}
+
+fn normalize_canonical_path(canonical: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let display = canonical.to_string_lossy();
+        if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = display.strip_prefix(r"\\?\") {
+            let bytes = rest.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+            {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    canonical
+}
+
+pub(crate) fn canonicalize_for_use(path: &Path, label: &str) -> Result<PathBuf, AppError> {
+    let canonical = std::fs::canonicalize(path).map_err(|_| {
+        AppError::invalid_input(format!("{label} could not be canonicalized safely."))
+    })?;
+    // `std::fs::canonicalize` uses Windows verbatim (`\\?\`) paths. They are correct for
+    // Win32 file APIs but are not accepted by SQLite's `file:` URI parser and are needlessly
+    // exposed in UI. Preserve identity while converting ordinary drive/UNC forms back to their
+    // interoperable spelling.
+    Ok(normalize_canonical_path(canonical))
+}
+
+/// Compares filesystem identity when paths exist, with a lexical fallback that still normalizes
+/// Windows verbatim (`\\?\`) spelling. The fallback matters after a managed file has been
+/// removed but its matching provenance record still needs to be cleared.
+pub(crate) fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    let normalized = |path: &Path| {
+        canonicalize_for_use(path, "Path identity")
+            .unwrap_or_else(|_| normalize_canonical_path(path.to_path_buf()))
+    };
+    normalized(left) == normalized(right)
+}
+
+/// SEC-007 target policy: reject a symlink at the user-selected leaf, but resolve any symlinked
+/// ancestor into one canonical location. The latter is required for normal platform aliases such
+/// as macOS `/var` -> `/private/var`; rejecting every linked ancestor would make legitimate save
+/// locations unusable. Missing path suffixes are appended only after the closest existing
+/// ancestor has been canonicalized and confirmed to be a directory.
+fn canonicalize_target_path(
+    path: &Path,
+    label: &str,
+    reject_leaf_symlink: bool,
+) -> Result<PathBuf, AppError> {
+    let mut existing_ancestor = None;
+    for candidate in path.ancestors() {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                if reject_leaf_symlink && candidate == path && metadata.file_type().is_symlink() {
+                    return Err(AppError::invalid_input(format!(
+                        "{label} must not be a symbolic link."
+                    )));
+                }
+                existing_ancestor = Some((candidate, metadata));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(AppError::invalid_input(format!(
+                    "{label} could not be inspected safely."
+                )));
+            }
+        }
+    }
+    let (existing_ancestor, _) = existing_ancestor.ok_or_else(|| {
+        AppError::invalid_input(format!(
+            "{label} is not rooted in an accessible filesystem location."
+        ))
+    })?;
+    let canonical_ancestor = canonicalize_for_use(existing_ancestor, label)?;
+    if existing_ancestor != path {
+        let canonical_metadata = std::fs::metadata(&canonical_ancestor).map_err(|_| {
+            AppError::invalid_input(format!("{label} could not be inspected safely."))
+        })?;
+        if !canonical_metadata.is_dir() {
+            return Err(AppError::invalid_input(format!(
+                "{label} has a parent path that is not a directory."
+            )));
+        }
+    }
+    let missing_suffix = path.strip_prefix(existing_ancestor).map_err(|_| {
+        AppError::invalid_input(format!("{label} could not be canonicalized safely."))
+    })?;
+    Ok(canonical_ancestor.join(missing_suffix))
+}
+
+/// Validates a user-selected directory that may be created by the operation. Existing targets
+/// must already be real directories; missing targets are accepted only when their closest
+/// existing ancestor resolves to a real directory. The returned path is canonicalized.
+pub fn validate_directory_target_path(raw_path: &str, label: &str) -> Result<PathBuf, AppError> {
+    let path = validate_absolute_path(raw_path, label)?;
+    let canonical_path = canonicalize_target_path(&path, label, false)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&canonical_path) {
+        if !metadata.is_dir() {
+            return Err(AppError::invalid_input(format!(
+                "{label} must point to a directory."
+            )));
+        }
+    }
+    Ok(canonical_path)
+}
+
+/// Validates a user-selected directory that must already exist. Unlike a workspace target, a
+/// Repository is never created implicitly from a typo; the canonical directory the user selected
+/// is what gets persisted and later used for containment checks.
+pub fn validate_existing_directory_path(raw_path: &str, label: &str) -> Result<PathBuf, AppError> {
+    let path = validate_absolute_path(raw_path, label)?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::new("directory_not_found", format!("{label} was not found."))
+        } else {
+            AppError::invalid_input(format!("{label} could not be inspected safely."))
+        }
+    })?;
+    if !metadata.is_dir() {
+        return Err(AppError::invalid_input(format!(
+            "{label} must point to a directory."
+        )));
+    }
+    canonicalize_for_use(&path, label)
+}
+
+/// COR-007's collision-safe write probe, generalized for both the storage Workspace and an Ark
+/// Code Repository. Callers supply a UUID-based name and their own error namespace; `create_new`
+/// makes an existing user file untouchable even under an adversarial collision.
+pub(crate) fn probe_writable_directory(
+    root: &Path,
+    probe_name: &str,
+    label: &str,
+    error_prefix: &str,
+) -> Result<(), AppError> {
+    let probe = root.join(probe_name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return AppError::new(
+                    format!("{error_prefix}_missing"),
+                    format!("The {label} folder disappeared while Ark was checking it."),
+                );
+            }
+            let classified = AppError::from(error);
+            let code = match classified.code.as_str() {
+                "io_error" => format!("{error_prefix}_error"),
+                "workspace_read_only" => format!("{error_prefix}_read_only"),
+                _ => classified.code.clone(),
+            };
+            AppError::new(
+                code,
+                format!("The {label} folder is not writable: {}", classified.message),
+            )
+        })?;
+    if let Err(error) = crate::file_permissions::harden_file(&probe) {
+        let cleanup_error = std::fs::remove_file(&probe).err();
+        let cleanup_detail = cleanup_error
+            .map(|cleanup| format!(" Probe cleanup also failed: {cleanup}"))
+            .unwrap_or_default();
+        return Err(AppError::new(
+            format!("{error_prefix}_error"),
+            format!(
+                "Ark could not secure its temporary {label} write probe: {}.{cleanup_detail}",
+                error.message
+            ),
+        ));
+    }
+    std::fs::remove_file(&probe).map_err(|error| {
+        AppError::new(
+            format!("{error_prefix}_cleanup_failed"),
+            format!(
+                "The {label} folder is writable, but Ark could not remove its probe '{}': {error}",
+                probe.display()
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Validates and canonicalizes a file that must already exist. Returning the canonical path makes
+/// the checked object authoritative for subsequent reads instead of reverting to the unchecked
+/// spelling supplied across IPC.
+pub fn validate_existing_file_path(raw_path: &str, label: &str) -> Result<PathBuf, AppError> {
+    let path = validate_absolute_path(raw_path, label)?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::new("file_not_found", format!("{label} was not found."))
+        } else {
+            AppError::invalid_input(format!("{label} could not be inspected safely."))
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::invalid_input(format!(
+            "{label} must not be a symbolic link."
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(AppError::invalid_input(format!(
+            "{label} must point to a regular file."
+        )));
+    }
+    canonicalize_for_use(&path, label)
+}
+
+/// Validates a user-selected output file. The file may not exist yet, but its existing ancestor
+/// chain is canonicalized; an existing target must be a regular file and not a symlink.
+pub fn validate_output_file_path(raw_path: &str, label: &str) -> Result<PathBuf, AppError> {
+    let path = validate_absolute_path(raw_path, label)?;
+    let canonical_path = canonicalize_target_path(&path, label, true)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if !metadata.is_file() {
+            return Err(AppError::invalid_input(format!(
+                "{label} must point to a regular file."
+            )));
+        }
+    }
+    Ok(canonical_path)
 }
 
 /// Practical range shared by Ollama and OpenAI-compatible APIs; values outside this are
@@ -324,40 +574,15 @@ pub fn validate_branch_name(value: Option<String>) -> Result<Option<String>, App
 /// with a NUL is not a valid Rust `&str`-derived filesystem path assumption on any supported
 /// platform), which could make the path Ark *validates* differ from the path Ark actually
 /// *uses*.
-pub fn validate_workspace_path(raw_path: &str) -> Result<&str, AppError> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::invalid_input("Workspace path cannot be empty."));
-    }
-    if trimmed.contains('\0') {
-        return Err(AppError::invalid_input(
-            "Workspace path must not contain a null byte.",
-        ));
-    }
-    if !Path::new(trimmed).is_absolute() {
-        return Err(AppError::invalid_input("Workspace path must be absolute."));
-    }
-    reject_ambiguous_path(Path::new(trimmed), "Workspace path")?;
-
-    Ok(trimmed)
+pub fn validate_workspace_path(raw_path: &str) -> Result<PathBuf, AppError> {
+    validate_directory_target_path(raw_path, "Workspace path")
 }
 
 /// Validates a built-in-runtime model file path before it is passed to `llama-server` as a
 /// CLI argument. Existence/type/extension checks turn "the process failed to start for an
 /// opaque reason 30 seconds later" into an immediate, specific error.
-pub fn validate_model_path(raw_path: &str) -> Result<&str, AppError> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::invalid_input("Model file path cannot be empty."));
-    }
-    if trimmed.contains('\0') {
-        return Err(AppError::invalid_input(
-            "Model file path must not contain a null byte.",
-        ));
-    }
-
-    let path = Path::new(trimmed);
-    reject_ambiguous_path(path, "Model file path")?;
+pub fn validate_model_path(raw_path: &str) -> Result<PathBuf, AppError> {
+    let path = validate_absolute_path(raw_path, "Model file path")?;
     let has_gguf_extension = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -369,18 +594,19 @@ pub fn validate_model_path(raw_path: &str) -> Result<&str, AppError> {
         ));
     }
 
-    if !path.exists() {
-        return Err(AppError::invalid_input(
-            "Model file was not found at the given path.",
-        ));
-    }
-    if !path.is_file() {
-        return Err(AppError::invalid_input(
-            "Model file path must point to a file, not a directory.",
-        ));
-    }
-
-    Ok(trimmed)
+    validate_existing_file_path(
+        path.to_str().ok_or_else(|| {
+            AppError::invalid_input("Model file path must contain valid Unicode.")
+        })?,
+        "Model file path",
+    )
+    .map_err(|error| {
+        if error.code == "file_not_found" {
+            AppError::invalid_input(error.message)
+        } else {
+            error
+        }
+    })
 }
 
 /// The GGUF format's fixed 4-byte magic number at file offset 0.
@@ -545,23 +771,24 @@ mod tests {
 
     #[test]
     fn workspace_path_rejects_ambiguous_traversal_segments() {
-        #[cfg(windows)]
-        assert!(validate_workspace_path("C:\\Users\\me\\..\\other").is_err());
-        #[cfg(not(windows))]
-        assert!(validate_workspace_path("/home/me/../other").is_err());
+        let ambiguous = std::env::temp_dir()
+            .join("ark-child")
+            .join("..")
+            .join("other");
+        assert!(validate_workspace_path(ambiguous.to_str().expect("utf8 path")).is_err());
     }
 
     #[test]
     fn workspace_path_accepts_absolute_paths_and_trims_whitespace() {
-        #[cfg(windows)]
-        let accepted = validate_workspace_path("  C:\\Users\\me\\ArkWorkspace  ").unwrap();
-        #[cfg(windows)]
-        assert_eq!(accepted, "C:\\Users\\me\\ArkWorkspace");
-
-        #[cfg(not(windows))]
-        let accepted = validate_workspace_path("  /home/me/ark-workspace  ").unwrap();
-        #[cfg(not(windows))]
-        assert_eq!(accepted, "/home/me/ark-workspace");
+        let path =
+            std::env::temp_dir().join(format!("ark-workspace-target-{}", uuid::Uuid::new_v4()));
+        let accepted = validate_workspace_path(&format!("  {}  ", path.display())).unwrap();
+        assert_eq!(
+            accepted,
+            canonicalize_for_use(&std::env::temp_dir(), "Temp directory")
+                .expect("canonical temp directory")
+                .join(path.file_name().expect("target name"))
+        );
     }
 
     #[test]
@@ -580,7 +807,9 @@ mod tests {
         // Extension check passes for both cases; existence is checked after, so a
         // non-existent path with the right extension fails on the existence check
         // specifically, not the extension check — proving the two checks are independent.
-        let error = validate_model_path("/definitely/does/not/exist/model.GGUF").unwrap_err();
+        let path =
+            std::env::temp_dir().join(format!("ark-missing-model-{}.GGUF", uuid::Uuid::new_v4()));
+        let error = validate_model_path(path.to_str().expect("utf8 path")).unwrap_err();
         assert!(
             error.message.contains("not found"),
             "must fail on existence, not extension, for a valid extension"
@@ -589,7 +818,9 @@ mod tests {
 
     #[test]
     fn model_path_rejects_a_nonexistent_file() {
-        let error = validate_model_path("/definitely/does/not/exist/model.gguf").unwrap_err();
+        let path =
+            std::env::temp_dir().join(format!("ark-missing-model-{}.gguf", uuid::Uuid::new_v4()));
+        let error = validate_model_path(path.to_str().expect("utf8 path")).unwrap_err();
         assert_eq!(error.code, "invalid_input");
         assert!(error.message.contains("not found"));
     }
@@ -606,7 +837,7 @@ mod tests {
 
         let path_str = fake_dir_with_extension.to_str().expect("valid utf8 path");
         let error = validate_model_path(path_str).unwrap_err();
-        assert!(error.message.contains("not a directory"));
+        assert!(error.message.contains("regular file"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -620,9 +851,102 @@ mod tests {
 
         let path_str = path.to_str().expect("valid utf8 path");
         let accepted = validate_model_path(path_str).expect("valid existing .gguf file must pass");
-        assert_eq!(accepted, path_str);
+        assert_eq!(
+            accepted,
+            canonicalize_for_use(&path, "Model path").expect("canonical fixture path")
+        );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shared_file_path_policy_type_checks_inputs_and_outputs() {
+        let root = std::env::temp_dir().join(format!("ark-path-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create fixture root");
+        let input = root.join("input.sqlite3");
+        std::fs::write(&input, b"fixture").expect("write input fixture");
+
+        assert_eq!(
+            validate_existing_file_path(input.to_str().expect("utf8 path"), "Input file")
+                .expect("regular input passes"),
+            canonicalize_for_use(&input, "Input file").expect("canonical input")
+        );
+        assert!(
+            validate_existing_file_path(root.to_str().expect("utf8 path"), "Input file").is_err()
+        );
+
+        let output = root.join("nested").join("output.txt");
+        assert!(
+            validate_output_file_path(output.to_str().expect("utf8 path"), "Output file").is_ok()
+        );
+        assert!(
+            validate_output_file_path(root.to_str().expect("utf8 path"), "Output file").is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_paths_use_windows_spelling_accepted_by_sqlite_file_uris() {
+        let root =
+            std::env::temp_dir().join(format!("ark-canonical-windows-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create fixture root");
+
+        let canonical =
+            validate_directory_target_path(root.to_str().expect("utf8 path"), "Workspace path")
+                .expect("canonical path");
+
+        assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_identity_treats_verbatim_and_normal_drive_spellings_as_equal() {
+        assert!(paths_refer_to_same_location(
+            Path::new(r"\\?\C:\Ark\models\managed.gguf"),
+            Path::new(r"C:\Ark\models\managed.gguf"),
+        ));
+        assert!(!paths_refer_to_same_location(
+            Path::new(r"\\?\C:\Ark\models\other.gguf"),
+            Path::new(r"C:\Ark\models\managed.gguf"),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_file_path_policy_rejects_symlinked_leaves_and_canonicalizes_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("ark-path-policy-link-{}", uuid::Uuid::new_v4()));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("create real directory");
+        let real_file = real.join("model.gguf");
+        std::fs::write(&real_file, b"GGUF fixture").expect("write real file");
+
+        let file_link = root.join("model.gguf");
+        symlink(&real_file, &file_link).expect("create file symlink");
+        let file_error =
+            validate_existing_file_path(file_link.to_str().expect("utf8 path"), "Model file")
+                .expect_err("symlinked file must be rejected");
+        assert!(file_error.message.contains("symbolic link"));
+
+        let directory_link = root.join("linked-directory");
+        symlink(&real, &directory_link).expect("create directory symlink");
+        let target = directory_link.join("new-workspace");
+        let canonical_target =
+            validate_directory_target_path(target.to_str().expect("utf8 path"), "Workspace path")
+                .expect("a linked ancestor is resolved to its canonical location");
+        assert_eq!(
+            canonical_target,
+            canonicalize_for_use(&real, "Real directory")
+                .expect("canonical real directory")
+                .join("new-workspace")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn gguf_temp_path(name: &str) -> std::path::PathBuf {

@@ -8,6 +8,7 @@ import type {
   AuditEvent,
   BackupResult,
   BranchAlternative,
+  BranchTopologyNode,
   BuiltInRuntimeStatus,
   Conversation,
   ConversationMessagePage,
@@ -19,10 +20,17 @@ import type {
   DiskSpaceInfo,
   CompanionApiStatus,
   CompanionApiTokenReveal,
+  CodeAgentRun,
+  CodeSession,
+  CodeSessionDetail,
   ImportConversationPreview,
   ImportConversationResult,
   ImportProgressEvent,
   Message,
+  ManagedModelDownloadProgress,
+  ManagedModelOperation,
+  ManagedModelPreflight,
+  ManagedModelStatus,
   NoteWriteAction,
   OllamaPullProgress,
   Persona,
@@ -31,6 +39,12 @@ import type {
   Project,
   ProjectDeletionPreview,
   ProviderConfig,
+  RepositoryDirectoryListing,
+  RepositoryFileRead,
+  RepositoryGitDiff,
+  RepositoryGitStatus,
+  RepositoryMap,
+  RepositorySearchResult,
   RefreshModelsResult,
   ResponseStyle,
   RestorePreview,
@@ -40,6 +54,7 @@ import type {
   SideEffectPreview,
   StreamEvent,
   ToolCapabilityGrant,
+  ToolDefinition,
   ToolStatus,
   Tone,
   WebSearchInput,
@@ -98,6 +113,18 @@ export interface UpdateProviderInput {
   allowInsecureRemote?: boolean;
 }
 
+export type RemoteProviderKind = "open_ai" | "open_ai_compatible";
+
+export interface CreateRemoteProviderInput {
+  name: string;
+  kind: RemoteProviderKind;
+  /** Omitted for OpenAI, whose official endpoint is fixed by Ark. */
+  baseUrl?: string | null;
+  acknowledgeRemoteRisk: boolean;
+  /** Development-only exception for an advanced compatible endpoint. */
+  allowInsecureRemote?: boolean;
+}
+
 export interface UpdateConversationSettingsInput {
   id: string;
   systemPrompt?: string | null;
@@ -117,6 +144,45 @@ export interface UpdateProjectInput {
   defaultMaxTokens?: number | null;
   responseStyle?: ResponseStyle | null;
   tone?: Tone | null;
+}
+
+export interface CodeListDirectoryInput {
+  projectId: string;
+  path: string;
+  maxEntries?: number | null;
+}
+
+export interface CodeReadFileInput {
+  projectId: string;
+  path: string;
+  startLine?: number | null;
+  maxLines?: number | null;
+}
+
+export interface CodeSearchInput {
+  projectId: string;
+  query: string;
+  path?: string | null;
+  caseSensitive?: boolean | null;
+  maxResults?: number | null;
+}
+
+export interface CreateCodeSessionInput {
+  projectId: string;
+  title: string;
+  idempotencyKey: string;
+}
+
+export interface CreateCodeRunInput {
+  sessionId: string;
+  parentRunId?: string | null;
+  providerId: string;
+  modelId: string;
+  maxSteps?: number | null;
+  maxActiveMs?: number | null;
+  maxTokens?: number | null;
+  maxCostMicrounits?: number | null;
+  idempotencyKey: string;
 }
 
 export interface CreatePersonaInput {
@@ -186,6 +252,8 @@ export interface ArkClient {
   restoreWorkspaceRecoveryKey(recoveryKey: string): Promise<WorkspaceProtectionStatus>;
   /** ARC-006: theme and the built-in runtime's model path — device-scoped, not workspace-scoped. */
   updateDeviceSettings(settings: DeviceSettings): Promise<DeviceSettings>;
+  /** FTR-003: portable workspace-wide instruction fallback; null clears it. */
+  updateApplicationInstructions(instructions: string | null): Promise<string | null>;
 
   /**
    * SEC-008: opens a URL through the OS's default browser/handler via the Tauri opener plugin,
@@ -229,6 +297,8 @@ export interface ArkClient {
    * the branch comparison view. */
   getMessage(id: string): Promise<Message>;
   getAssistantAlternatives(conversationId: string, messageId: string): Promise<BranchAlternative[]>;
+  /** FTR-005: compact nodes for the dedicated whole-conversation branch explorer. */
+  getConversationBranchTopology(conversationId: string): Promise<BranchTopologyNode[]>;
   switchActiveBranch(conversationId: string, messageId: string): Promise<Message[]>;
   /** FTR-005: `name: null` clears the label back to the default ordinal presentation. Only
    * assistant messages can be named. */
@@ -243,7 +313,10 @@ export interface ArkClient {
   cancelStream(messageId: string): Promise<void>;
 
   refreshModels(providerId: string): Promise<RefreshModelsResult>;
+  cancelProviderRefresh(providerId: string): Promise<void>;
   updateProvider(input: UpdateProviderInput): Promise<ProviderConfig>;
+  createRemoteProvider(input: CreateRemoteProviderInput): Promise<ProviderConfig>;
+  deleteProvider(providerId: string, confirmed: boolean): Promise<void>;
   getSecretStoreStatus(): Promise<SecretStoreStatus>;
   upsertProviderSecret(providerId: string, secret: string): Promise<SecretMetadata>;
   getProviderSecretMetadata(providerId: string): Promise<SecretMetadata | null>;
@@ -264,6 +337,8 @@ export interface ArkClient {
   /** Sends the complete current draft, not a partial patch — matching
    * `updateConversationSettings`'s convention. */
   updateProject(input: UpdateProjectInput): Promise<Project>;
+  /** CODE-003: binds/switches a code Repository; `null` removes it without changing the storage Workspace. */
+  setProjectRepository(id: string, repositoryPath: string | null): Promise<Project>;
   /** FTR-003: undo is calling this again with the opposite value. */
   setProjectArchived(id: string, archived: boolean): Promise<Project>;
   /** What deleting this project would affect — call before `deleteProject` so the user can
@@ -284,6 +359,10 @@ export interface ArkClient {
   /** FTR-003 criterion 2: every version ever created for this persona, newest first — the
    * visible proof that versioning is real. */
   listPersonaVersions(id: string): Promise<PersonaVersionSummary[]>;
+  /** Portable, schema-versioned JSON containing the persona and its complete immutable prompt
+   * history. Import creates a new local identity so the source and copy may coexist. */
+  exportPersonaJson(id: string): Promise<string>;
+  importPersonaJson(json: string): Promise<Persona>;
   /** FTR-003: undo is calling this again with the opposite value. */
   setPersonaArchived(id: string, archived: boolean): Promise<Persona>;
   /** What deleting this persona would affect — call before `deletePersona` so the user can
@@ -300,6 +379,19 @@ export interface ArkClient {
   /** Only succeeds while the attachment is still staged (`messageId` still `null`) — one already
    * part of a sent message is not offered for deletion. */
   deleteAttachment(id: string): Promise<void>;
+
+  /** CODE-004: Repository-tier definitions remain separate from Ark Chat's `listTools`. */
+  listArkCodeTools(): Promise<ToolDefinition[]>;
+  codeListDirectory(input: CodeListDirectoryInput): Promise<RepositoryDirectoryListing>;
+  codeReadFile(input: CodeReadFileInput): Promise<RepositoryFileRead>;
+  codeSearch(input: CodeSearchInput): Promise<RepositorySearchResult>;
+  codeRepositoryMap(projectId: string, maxEntries?: number | null): Promise<RepositoryMap>;
+  codeGitStatus(projectId: string): Promise<RepositoryGitStatus>;
+  codeGitDiff(projectId: string): Promise<RepositoryGitDiff>;
+  createCodeSession(input: CreateCodeSessionInput): Promise<CodeSession>;
+  listCodeSessions(includeArchived?: boolean): Promise<CodeSession[]>;
+  getCodeSession(id: string): Promise<CodeSessionDetail>;
+  createCodeRun(input: CreateCodeRunInput): Promise<CodeAgentRun>;
 
   /** CMP-003: every built-in tool's declared definition plus whichever grant (if any) currently
    * governs it. Today this is always exactly the one built-in "notes" tool. */
@@ -365,6 +457,22 @@ export interface ArkClient {
 
   getBuiltInRuntimeStatus(): Promise<BuiltInRuntimeStatus>;
   startBuiltInRuntime(modelPath: string, modelSource: string, modelLicense: string): Promise<BuiltInRuntimeStatus>;
+  listManagedModels(): Promise<ManagedModelStatus[]>;
+  preflightManagedModel(modelId: string, operation: ManagedModelOperation): Promise<ManagedModelPreflight>;
+  downloadManagedModel(
+    modelId: string,
+    acknowledgeWarning?: boolean,
+    advancedOverride?: boolean,
+    overrideReason?: string | null,
+  ): Promise<ManagedModelStatus>;
+  cancelManagedModelDownload(modelId: string): Promise<void>;
+  deleteManagedModel(modelId: string): Promise<void>;
+  startManagedModel(
+    modelId: string,
+    acknowledgeWarning?: boolean,
+    advancedOverride?: boolean,
+    overrideReason?: string | null,
+  ): Promise<BuiltInRuntimeStatus>;
   stopBuiltInRuntime(): Promise<void>;
 
   /**
@@ -380,6 +488,7 @@ export interface ArkClient {
   onStreamCancelled(handler: (event: StreamEvent) => void): Promise<UnlistenFn>;
   onStreamInterrupted(handler: (event: StreamEvent) => void): Promise<UnlistenFn>;
   onOllamaPullProgress(handler: (event: OllamaPullProgress) => void): Promise<UnlistenFn>;
+  onManagedModelDownloadProgress(handler: (event: ManagedModelDownloadProgress) => void): Promise<UnlistenFn>;
   onImportProgress(handler: (event: ImportProgressEvent) => void): Promise<UnlistenFn>;
 }
 
@@ -425,6 +534,8 @@ export function createTauriArkClient(): ArkClient {
         request: { recoveryKey },
       }),
     updateDeviceSettings: (settings) => invoke<DeviceSettings>("update_device_settings", { settings }),
+    updateApplicationInstructions: (instructions) =>
+      invoke<string | null>("update_application_instructions", { instructions }),
     openExternalUrl: (url) => openUrl(url),
 
     requestNotificationPermission: async () => {
@@ -470,6 +581,8 @@ export function createTauriArkClient(): ArkClient {
     getMessage: (id) => invoke<Message>("get_message", { id }),
     getAssistantAlternatives: (conversationId, messageId) =>
       invoke<BranchAlternative[]>("get_assistant_alternatives", { request: { conversationId, messageId } }),
+    getConversationBranchTopology: (conversationId) =>
+      invoke<BranchTopologyNode[]>("get_conversation_branch_topology", { conversationId }),
     switchActiveBranch: (conversationId, messageId) =>
       invoke<Message[]>("switch_active_branch", { request: { conversationId, messageId } }),
     setBranchName: (messageId, name) => invoke<Message>("set_branch_name", { messageId, name }),
@@ -517,6 +630,7 @@ export function createTauriArkClient(): ArkClient {
     cancelStream: (messageId) => invoke<void>("cancel_stream", { messageId }),
 
     refreshModels: (providerId) => invoke<RefreshModelsResult>("refresh_models", { providerId }),
+    cancelProviderRefresh: (providerId) => invoke<void>("cancel_provider_refresh", { providerId }),
     updateProvider: (input) =>
       invoke<ProviderConfig>("update_provider", {
         request: {
@@ -530,6 +644,17 @@ export function createTauriArkClient(): ArkClient {
           allowInsecureRemote: input.allowInsecureRemote ?? false,
         },
       }),
+    createRemoteProvider: (input) =>
+      invoke<ProviderConfig>("create_remote_provider", {
+        request: {
+          name: input.name,
+          kind: input.kind,
+          baseUrl: input.baseUrl ?? null,
+          acknowledgeRemoteRisk: input.acknowledgeRemoteRisk,
+          allowInsecureRemote: input.allowInsecureRemote ?? false,
+        },
+      }),
+    deleteProvider: (providerId, confirmed) => invoke<void>("delete_provider", { providerId, confirmed }),
     getSecretStoreStatus: () => invoke<SecretStoreStatus>("get_secret_store_status"),
     upsertProviderSecret: (providerId, secret) =>
       invoke<SecretMetadata>("upsert_provider_secret", { providerId, secret }),
@@ -546,6 +671,7 @@ export function createTauriArkClient(): ArkClient {
     listProjects: () => invoke<Project[]>("list_projects"),
     createProject: (name) => invoke<Project>("create_project", { name }),
     updateProject: (input) => invoke<Project>("update_project", { request: input }),
+    setProjectRepository: (id, repositoryPath) => invoke<Project>("set_project_repository", { id, repositoryPath }),
     setProjectArchived: (id, archived) => invoke<Project>("set_project_archived", { id, archived }),
     previewProjectDeletion: (id) => invoke<ProjectDeletionPreview>("preview_project_deletion", { id }),
     deleteProject: (id) => invoke<void>("delete_project", { id }),
@@ -555,6 +681,8 @@ export function createTauriArkClient(): ArkClient {
     createPersona: (input) => invoke<Persona>("create_persona", { request: input }),
     updatePersona: (input) => invoke<Persona>("update_persona", { request: input }),
     listPersonaVersions: (id) => invoke<PersonaVersionSummary[]>("list_persona_versions", { id }),
+    exportPersonaJson: (id) => invoke<string>("export_persona_json", { id }),
+    importPersonaJson: (json) => invoke<Persona>("import_persona_json", { json }),
     setPersonaArchived: (id, archived) => invoke<Persona>("set_persona_archived", { id, archived }),
     previewPersonaDeletion: (id) => invoke<PersonaDeletionPreview>("preview_persona_deletion", { id }),
     deletePersona: (id) => invoke<void>("delete_persona", { id }),
@@ -565,6 +693,19 @@ export function createTauriArkClient(): ArkClient {
       invoke<Attachment[]>("list_conversation_attachments", { conversationId }),
     getAttachmentContent: (id) => invoke<string>("get_attachment_content", { id }),
     deleteAttachment: (id) => invoke<void>("delete_attachment", { id }),
+
+    listArkCodeTools: () => invoke<ToolDefinition[]>("list_ark_code_tools"),
+    codeListDirectory: (input) => invoke<RepositoryDirectoryListing>("code_list_directory", { request: input }),
+    codeReadFile: (input) => invoke<RepositoryFileRead>("code_read_file", { request: input }),
+    codeSearch: (input) => invoke<RepositorySearchResult>("code_search", { request: input }),
+    codeRepositoryMap: (projectId, maxEntries) =>
+      invoke<RepositoryMap>("code_repository_map", { request: { projectId, maxEntries: maxEntries ?? null } }),
+    codeGitStatus: (projectId) => invoke<RepositoryGitStatus>("code_git_status", { request: { projectId } }),
+    codeGitDiff: (projectId) => invoke<RepositoryGitDiff>("code_git_diff", { request: { projectId } }),
+    createCodeSession: (input) => invoke<CodeSession>("create_code_session", { request: input }),
+    listCodeSessions: (includeArchived = false) => invoke<CodeSession[]>("list_code_sessions", { includeArchived }),
+    getCodeSession: (id) => invoke<CodeSessionDetail>("get_code_session", { id }),
+    createCodeRun: (input) => invoke<CodeAgentRun>("create_code_run", { request: input }),
 
     listTools: () => invoke<ToolStatus[]>("list_tools"),
     grantToolCapability: (toolId, ttlMinutes) =>
@@ -617,6 +758,19 @@ export function createTauriArkClient(): ArkClient {
     getBuiltInRuntimeStatus: () => invoke<BuiltInRuntimeStatus>("get_built_in_runtime_status"),
     startBuiltInRuntime: (modelPath, modelSource, modelLicense) =>
       invoke<BuiltInRuntimeStatus>("start_built_in_runtime", { modelPath, modelSource, modelLicense }),
+    listManagedModels: () => invoke<ManagedModelStatus[]>("list_managed_models"),
+    preflightManagedModel: (modelId, operation) =>
+      invoke<ManagedModelPreflight>("preflight_managed_model", { modelId, operation }),
+    downloadManagedModel: (modelId, acknowledgeWarning = false, advancedOverride = false, overrideReason = null) =>
+      invoke<ManagedModelStatus>("download_managed_model", {
+        request: { modelId, acknowledgeWarning, advancedOverride, overrideReason },
+      }),
+    cancelManagedModelDownload: (modelId) => invoke<void>("cancel_managed_model_download", { modelId }),
+    deleteManagedModel: (modelId) => invoke<void>("delete_managed_model", { modelId }),
+    startManagedModel: (modelId, acknowledgeWarning = false, advancedOverride = false, overrideReason = null) =>
+      invoke<BuiltInRuntimeStatus>("start_managed_model", {
+        request: { modelId, acknowledgeWarning, advancedOverride, overrideReason },
+      }),
     stopBuiltInRuntime: () => invoke<void>("stop_built_in_runtime"),
 
     onStreamDelta: (handler) =>
@@ -630,6 +784,10 @@ export function createTauriArkClient(): ArkClient {
     onStreamInterrupted: (handler) =>
       listen<StreamEvent>("chat:stream-interrupted", (e) => guardStreamEventVersion(handler)(e.payload)),
     onOllamaPullProgress: (handler) => listen<OllamaPullProgress>("ollama:pull-progress", (e) => handler(e.payload)),
+    onManagedModelDownloadProgress: (handler) =>
+      listen<ManagedModelDownloadProgress>("managed-model:download-progress", (e) => {
+        if (e.payload.schemaVersion === 1) handler(e.payload);
+      }),
     onImportProgress: (handler) => listen<ImportProgressEvent>("import:progress", (e) => handler(e.payload)),
   };
 }
@@ -671,6 +829,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     disableWorkspaceEncryption: notImplemented("disableWorkspaceEncryption"),
     restoreWorkspaceRecoveryKey: notImplemented("restoreWorkspaceRecoveryKey"),
     updateDeviceSettings: async (settings) => settings,
+    updateApplicationInstructions: async (instructions) => instructions,
     openExternalUrl: async () => undefined,
     requestNotificationPermission: async () => true,
     recordFrontendPerfMetric: async () => undefined,
@@ -686,6 +845,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     getMessage: notImplemented("getMessage"),
     getAssistantAlternatives: async () => [],
+    getConversationBranchTopology: async () => [],
     switchActiveBranch: notImplemented("switchActiveBranch"),
     setBranchName: notImplemented("setBranchName"),
     keepPartialMessage: notImplemented("keepPartialMessage"),
@@ -698,7 +858,10 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     cancelStream: async () => undefined,
 
     refreshModels: notImplemented("refreshModels"),
+    cancelProviderRefresh: async () => undefined,
     updateProvider: notImplemented("updateProvider"),
+    createRemoteProvider: notImplemented("createRemoteProvider"),
+    deleteProvider: async () => undefined,
     getSecretStoreStatus: async () => ({
       available: true,
       code: "available",
@@ -715,6 +878,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     listProjects: async () => [],
     createProject: notImplemented("createProject"),
     updateProject: notImplemented("updateProject"),
+    setProjectRepository: notImplemented("setProjectRepository"),
     setProjectArchived: notImplemented("setProjectArchived"),
     previewProjectDeletion: notImplemented("previewProjectDeletion"),
     deleteProject: async () => undefined,
@@ -724,6 +888,8 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     createPersona: notImplemented("createPersona"),
     updatePersona: notImplemented("updatePersona"),
     listPersonaVersions: async () => [],
+    exportPersonaJson: notImplemented("exportPersonaJson"),
+    importPersonaJson: notImplemented("importPersonaJson"),
     setPersonaArchived: notImplemented("setPersonaArchived"),
     previewPersonaDeletion: notImplemented("previewPersonaDeletion"),
     deletePersona: async () => undefined,
@@ -732,6 +898,18 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     listConversationAttachments: async () => [],
     getAttachmentContent: notImplemented("getAttachmentContent"),
     deleteAttachment: async () => undefined,
+
+    listArkCodeTools: async () => [],
+    codeListDirectory: notImplemented("codeListDirectory"),
+    codeReadFile: notImplemented("codeReadFile"),
+    codeSearch: notImplemented("codeSearch"),
+    codeRepositoryMap: notImplemented("codeRepositoryMap"),
+    codeGitStatus: notImplemented("codeGitStatus"),
+    codeGitDiff: notImplemented("codeGitDiff"),
+    createCodeSession: notImplemented("createCodeSession"),
+    listCodeSessions: async () => [],
+    getCodeSession: notImplemented("getCodeSession"),
+    createCodeRun: notImplemented("createCodeRun"),
 
     listTools: async () => [],
     grantToolCapability: notImplemented("grantToolCapability"),
@@ -780,6 +958,12 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
       failure: null,
     }),
     startBuiltInRuntime: notImplemented("startBuiltInRuntime"),
+    listManagedModels: async () => [],
+    preflightManagedModel: notImplemented("preflightManagedModel"),
+    downloadManagedModel: notImplemented("downloadManagedModel"),
+    cancelManagedModelDownload: async () => undefined,
+    deleteManagedModel: async () => undefined,
+    startManagedModel: notImplemented("startManagedModel"),
     stopBuiltInRuntime: async () => undefined,
 
     onStreamDelta: noopSubscribe,
@@ -788,6 +972,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     onStreamCancelled: noopSubscribe,
     onStreamInterrupted: noopSubscribe,
     onOllamaPullProgress: noopSubscribe,
+    onManagedModelDownloadProgress: noopSubscribe,
     onImportProgress: noopSubscribe,
   };
 

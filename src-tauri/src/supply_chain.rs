@@ -318,7 +318,8 @@ pub fn verify_and_record_model(
 ) -> Result<ModelProvenance, AppError> {
     let source = validate_metadata_text(source, "Model source", 2_048)?;
     let license = validate_metadata_text(license, "Model license", 256)?;
-    let canonical = path.canonicalize().map_err(AppError::from)?;
+    let canonical =
+        crate::validation::validate_existing_file_path(&path.display().to_string(), "Model file")?;
     let (size_bytes, sha256) = sha256_file(&canonical, MAX_MODEL_BYTES)?;
     let record = ModelProvenance {
         path: canonical.display().to_string(),
@@ -345,6 +346,23 @@ pub fn load_model_provenance(app: &AppHandle) -> Result<Option<ModelProvenance>,
                 format!("Stored model provenance is invalid: {error}"),
             )
         })
+}
+
+/// FTR-006: remove only the provenance record that belongs to the exact managed model being
+/// deleted. A record for a manually selected or different catalog model is preserved.
+pub fn clear_model_provenance_for_path(app: &AppHandle, path: &Path) -> Result<(), AppError> {
+    let Some(record) = load_model_provenance(app)? else {
+        return Ok(());
+    };
+    if !crate::validation::paths_refer_to_same_location(Path::new(&record.path), path) {
+        return Ok(());
+    }
+    let record_path = model_provenance_path(app)?;
+    match std::fs::remove_file(record_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::from(error)),
+    }
 }
 
 fn save_model_provenance(app: &AppHandle, record: &ModelProvenance) -> Result<(), AppError> {
