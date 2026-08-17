@@ -95,6 +95,22 @@
     "RepositoryMap": ["entries", "inspectedFiles", "skippedFiles", "truncated"],
     "RepositoryGitStatus": ["clean", "porcelain"],
     "RepositoryGitDiff": ["workingTree", "staged"],
+    "EditFilePreview": [
+      "path",
+      "diff",
+      "beforeHash",
+      "expectedAfterHash",
+      "callHash",
+      "previewHash",
+      "preconditionHash"
+    ],
+    "EditFileOutcome": [
+      "path",
+      "beforeHash",
+      "expectedAfterHash",
+      "observedAfterHash",
+      "outcome"
+    ],
     "CodeSession": ["id", "projectId", "title", "archived", "createdAt", "updatedAt"],
     "CodeAgentRun": [
       "id",

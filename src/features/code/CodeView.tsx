@@ -1,14 +1,28 @@
-import { ArrowLeft, Code2, FileSearch, FolderTree, GitCompare, GitCommitHorizontal, Plus } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Code2,
+  FileSearch,
+  FolderTree,
+  GitCompare,
+  GitCommitHorizontal,
+  Pencil,
+  Plus,
+  X,
+} from "lucide-react";
 import * as React from "react";
 import { getErrorMessage } from "../../lib/arkErrors";
 import { useArkClient } from "../../lib/useArkClient";
 import { entityCollection, entityList, type CodeState } from "../../state/arkStores";
 import { useStore } from "../../state/externalStore";
 import { useArkStores } from "../../state/useArkStores";
-import type { Project } from "../../types/ark";
+import type { EditFileOutcome, EditFilePreview, Project } from "../../types/ark";
+import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Select } from "../../ui/select";
+import { Textarea } from "../../ui/textarea";
+import { DiffView } from "./DiffView";
 
 interface CodeViewProps {
   projects: Project[];
@@ -33,6 +47,12 @@ export function CodeView({ projects, onBack, onError }: CodeViewProps) {
   const [filePath, setFilePath] = React.useState("");
   const [cards, setCards] = React.useState<ToolCard[]>([]);
   const [toolBusy, setToolBusy] = React.useState(false);
+  const [editPath, setEditPath] = React.useState("");
+  const [editSearch, setEditSearch] = React.useState("");
+  const [editReplace, setEditReplace] = React.useState("");
+  const [editPreview, setEditPreview] = React.useState<EditFilePreview | null>(null);
+  const [editOutcome, setEditOutcome] = React.useState<EditFileOutcome | null>(null);
+  const [editBusy, setEditBusy] = React.useState(false);
 
   const patchCode = React.useCallback(
     (patch: Partial<CodeState>) => stores.code.set({ ...stores.code.getSnapshot(), ...patch }),
@@ -98,6 +118,49 @@ export function CodeView({ projects, onBack, onError }: CodeViewProps) {
   const activeSession = code.activeId ? code.sessions.byId[code.activeId] : undefined;
   const activeProjectId = activeSession?.projectId ?? projectId;
 
+  async function previewEdit() {
+    if (!editPath.trim() || !editSearch) return;
+    setEditBusy(true);
+    setEditOutcome(null);
+    try {
+      const preview = await client.codePreviewEditFile({
+        projectId: activeProjectId,
+        path: editPath,
+        edits: [{ search: editSearch, replace: editReplace }],
+      });
+      setEditPreview(preview);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  async function approveEdit() {
+    if (!editPreview) return;
+    setEditBusy(true);
+    try {
+      const outcome = await client.codeExecuteEditFile({
+        projectId: activeProjectId,
+        path: editPreview.path,
+        edits: [{ search: editSearch, replace: editReplace }],
+        callHash: editPreview.callHash,
+        previewHash: editPreview.previewHash,
+        preconditionHash: editPreview.preconditionHash,
+      });
+      setEditOutcome(outcome);
+      setEditPreview(null);
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  function rejectEdit() {
+    setEditPreview(null);
+  }
+
   return (
     <main className="min-w-0 flex-1 overflow-y-auto bg-background">
       <header className="sticky top-0 z-10 flex min-h-14 items-center gap-3 border-b border-border bg-card/95 px-4 backdrop-blur">
@@ -107,7 +170,7 @@ export function CodeView({ projects, onBack, onError }: CodeViewProps) {
         <Code2 className="h-5 w-5 text-primary" />
         <div>
           <h1 className="text-sm font-semibold">Ark Code</h1>
-          <p className="text-xs text-muted-foreground">Read-only Repository investigation</p>
+          <p className="text-xs text-muted-foreground">Repository investigation and approved edits</p>
         </div>
       </header>
 
@@ -234,6 +297,63 @@ export function CodeView({ projects, onBack, onError }: CodeViewProps) {
                     Read file
                   </Button>
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h3 className="flex items-center gap-2 text-sm font-semibold">
+                  <Pencil className="h-4 w-4" /> Edit file
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Propose a search/replace edit. Nothing is written until you review the diff and approve it.
+                </p>
+                <div className="mt-3 space-y-2">
+                  <Input
+                    value={editPath}
+                    onChange={(event) => setEditPath(event.target.value)}
+                    placeholder="Relative file path, e.g. src/main.rs"
+                  />
+                  <Textarea
+                    value={editSearch}
+                    onChange={(event) => setEditSearch(event.target.value)}
+                    placeholder="Search text (must match the file exactly once)"
+                    rows={3}
+                  />
+                  <Textarea
+                    value={editReplace}
+                    onChange={(event) => setEditReplace(event.target.value)}
+                    placeholder="Replacement text"
+                    rows={3}
+                  />
+                  <Button
+                    variant="secondary"
+                    disabled={editBusy || !editPath.trim() || !editSearch}
+                    onClick={() => void previewEdit()}
+                  >
+                    <Pencil className="h-4 w-4" /> Preview edit
+                  </Button>
+                </div>
+
+                {editPreview && (
+                  <div className="mt-4 space-y-2 rounded-md border border-border p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Proposed change to {editPreview.path}</p>
+                    <DiffView diff={editPreview.diff} />
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="primary" disabled={editBusy} onClick={() => void approveEdit()}>
+                        <Check className="h-4 w-4" /> Approve and apply
+                      </Button>
+                      <Button size="sm" variant="ghost" disabled={editBusy} onClick={rejectEdit}>
+                        <X className="h-4 w-4" /> Reject
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {editOutcome && (
+                  <div className="mt-4 flex items-center gap-2 rounded-md border border-border p-3 text-sm">
+                    <Badge tone={editOutcome.outcome === "applied" ? "success" : "danger"}>{editOutcome.outcome}</Badge>
+                    <span className="text-muted-foreground">{editOutcome.path}</span>
+                  </div>
+                )}
               </div>
 
               {cards.map((card) => (

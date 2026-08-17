@@ -229,6 +229,36 @@ export interface RepositoryGitDiff {
   staged: string;
 }
 
+/** CODE-005: one search/replace block. `search` must match the target file's current content
+ * exactly once (checked sequentially against each prior block's result within the same call). */
+export interface EditBlock {
+  search: string;
+  replace: string;
+}
+
+/** CODE-005: an `edit_file` proposal. `callHash`/`previewHash`/`preconditionHash` bind an
+ * approval to this exact change — they must be echoed back unchanged to `executeEditFile`, which
+ * re-derives all three from current Repository state and refuses if any no longer match. */
+export interface EditFilePreview {
+  path: string;
+  diff: string;
+  beforeHash: string;
+  expectedAfterHash: string;
+  callHash: string;
+  previewHash: string;
+  preconditionHash: string;
+}
+
+/** CODE-005: the result of an approved `edit_file` execution, classified into exactly one of the
+ * ADR 0003 file-verifier's recovery outcomes. `diverged` is never auto-corrected. */
+export interface EditFileOutcome {
+  path: string;
+  beforeHash: string;
+  expectedAfterHash: string;
+  observedAfterHash: string;
+  outcome: CodeRecoveryOutcome;
+}
+
 export type CodeRunState =
   | "queued"
   | "planning"

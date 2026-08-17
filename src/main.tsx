@@ -23,7 +23,9 @@ const arkClient =
               ? developmentClients!.createOllamaModelsFixtureClient()
               : fixture === "bootstrap-failure"
                 ? developmentClients!.createBootstrapFailureFixtureClient()
-                : createTauriArkClient();
+                : fixture === "code-edit"
+                  ? developmentClients!.createCodeEditFixtureClient()
+                  : createTauriArkClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

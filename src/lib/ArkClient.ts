@@ -23,6 +23,9 @@ import type {
   CodeAgentRun,
   CodeSession,
   CodeSessionDetail,
+  EditBlock,
+  EditFileOutcome,
+  EditFilePreview,
   ImportConversationPreview,
   ImportConversationResult,
   ImportProgressEvent,
@@ -165,6 +168,23 @@ export interface CodeSearchInput {
   path?: string | null;
   caseSensitive?: boolean | null;
   maxResults?: number | null;
+}
+
+export interface CodePreviewEditFileInput {
+  projectId: string;
+  path: string;
+  edits: EditBlock[];
+}
+
+/** CODE-005: `edits`/`callHash`/`previewHash`/`preconditionHash` must be exactly what
+ * `codePreviewEditFile` returned and the user reviewed — this is the approval binding. */
+export interface CodeExecuteEditFileInput {
+  projectId: string;
+  path: string;
+  edits: EditBlock[];
+  callHash: string;
+  previewHash: string;
+  preconditionHash: string;
 }
 
 export interface CreateCodeSessionInput {
@@ -388,6 +408,12 @@ export interface ArkClient {
   codeRepositoryMap(projectId: string, maxEntries?: number | null): Promise<RepositoryMap>;
   codeGitStatus(projectId: string): Promise<RepositoryGitStatus>;
   codeGitDiff(projectId: string): Promise<RepositoryGitDiff>;
+  /** CODE-005: proposes an `edit_file` write. Never mutates the Repository — pass the returned
+   * diff and hashes to `codeExecuteEditFile` only after the user has approved them. */
+  codePreviewEditFile(input: CodePreviewEditFileInput): Promise<EditFilePreview>;
+  /** CODE-005: applies an approved `edit_file` write. Refuses (without writing) if the echoed
+   * hashes no longer match current Repository state. */
+  codeExecuteEditFile(input: CodeExecuteEditFileInput): Promise<EditFileOutcome>;
   createCodeSession(input: CreateCodeSessionInput): Promise<CodeSession>;
   listCodeSessions(includeArchived?: boolean): Promise<CodeSession[]>;
   getCodeSession(id: string): Promise<CodeSessionDetail>;
@@ -702,6 +728,8 @@ export function createTauriArkClient(): ArkClient {
       invoke<RepositoryMap>("code_repository_map", { request: { projectId, maxEntries: maxEntries ?? null } }),
     codeGitStatus: (projectId) => invoke<RepositoryGitStatus>("code_git_status", { request: { projectId } }),
     codeGitDiff: (projectId) => invoke<RepositoryGitDiff>("code_git_diff", { request: { projectId } }),
+    codePreviewEditFile: (input) => invoke<EditFilePreview>("code_preview_edit_file", { request: input }),
+    codeExecuteEditFile: (input) => invoke<EditFileOutcome>("code_execute_edit_file", { request: input }),
     createCodeSession: (input) => invoke<CodeSession>("create_code_session", { request: input }),
     listCodeSessions: (includeArchived = false) => invoke<CodeSession[]>("list_code_sessions", { includeArchived }),
     getCodeSession: (id) => invoke<CodeSessionDetail>("get_code_session", { id }),
@@ -906,6 +934,8 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     codeRepositoryMap: notImplemented("codeRepositoryMap"),
     codeGitStatus: notImplemented("codeGitStatus"),
     codeGitDiff: notImplemented("codeGitDiff"),
+    codePreviewEditFile: notImplemented("codePreviewEditFile"),
+    codeExecuteEditFile: notImplemented("codeExecuteEditFile"),
     createCodeSession: notImplemented("createCodeSession"),
     listCodeSessions: async () => [],
     getCodeSession: notImplemented("getCodeSession"),

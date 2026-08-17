@@ -158,6 +158,30 @@ pub struct CodeRepositoryMapRequest {
     pub max_entries: Option<usize>,
 }
 
+/// CODE-005: previews an `edit_file` write. `edits` are the same typed search/replace blocks the
+/// approved execution request must echo back unchanged (via `CodeExecuteEditFileRequest`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodePreviewEditFileRequest {
+    pub project_id: String,
+    pub path: String,
+    pub edits: Vec<crate::code_write_tools::EditBlock>,
+}
+
+/// CODE-005: the frontend must echo `edits`/`call_hash`/`preview_hash`/`precondition_hash`
+/// unchanged from the `EditFilePreview` the user approved — `execute_edit_file` re-derives all
+/// three hashes from current Repository state and refuses if any no longer match.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeExecuteEditFileRequest {
+    pub project_id: String,
+    pub path: String,
+    pub edits: Vec<crate::code_write_tools::EditBlock>,
+    pub call_hash: String,
+    pub preview_hash: String,
+    pub precondition_hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCodeSessionRequest {
@@ -538,6 +562,33 @@ pub async fn code_git_diff(
 ) -> Result<crate::code_tools::RepositoryGitDiff, AppError> {
     let context = code_repository_context(&state, &request.project_id)?;
     crate::code_tools::git_diff(&context).await
+}
+
+#[tauri::command]
+pub fn code_preview_edit_file(
+    state: State<'_, AppState>,
+    request: CodePreviewEditFileRequest,
+) -> Result<crate::code_write_tools::EditFilePreview, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_write_tools::preview_edit_file(&context, &request.path, request.edits)
+}
+
+#[tauri::command]
+pub fn code_execute_edit_file(
+    state: State<'_, AppState>,
+    request: CodeExecuteEditFileRequest,
+) -> Result<crate::code_write_tools::EditFileOutcome, AppError> {
+    let context = code_repository_context(&state, &request.project_id)?;
+    crate::code_write_tools::execute_edit_file(
+        &context,
+        crate::code_write_tools::ApprovedEditFile {
+            path: request.path,
+            edits: request.edits,
+            call_hash: request.call_hash,
+            preview_hash: request.preview_hash,
+            precondition_hash: request.precondition_hash,
+        },
+    )
 }
 
 #[tauri::command]

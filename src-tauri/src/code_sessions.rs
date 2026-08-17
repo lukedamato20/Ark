@@ -250,14 +250,45 @@ pub fn repository_snapshot(root: &Path) -> Result<(String, String), AppError> {
     Ok((path.to_string(), hash))
 }
 
-pub fn request_hash<T: Serialize>(request: &T) -> Result<String, AppError> {
-    let bytes = serde_json::to_vec(request).map_err(|_| {
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn hash_json<T: Serialize>(value: &T) -> Result<String, AppError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| {
         AppError::new(
             "code_request_serialization_failed",
             "Ark Code could not safely fingerprint this request.",
         )
     })?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(sha256_hex(&bytes))
+}
+
+pub fn request_hash<T: Serialize>(request: &T) -> Result<String, AppError> {
+    hash_json(request)
+}
+
+/// ADR 0003's approval binding: the fingerprint of a proposed tool call's own typed arguments.
+/// Struct field order is fixed by the Rust source, so `serde_json::to_vec` on a strongly-typed
+/// argument struct (never a loosely-typed `Value`) serializes deterministically without needing
+/// canonical-JSON key sorting.
+pub fn compute_call_hash<T: Serialize>(arguments: &T) -> Result<String, AppError> {
+    hash_json(arguments)
+}
+
+/// ADR 0003's approval binding: the fingerprint of the exact human-readable preview text shown to
+/// the user before approval. An approval echoing back a different hash than what is currently
+/// proposed did not approve the change actually about to run.
+pub fn compute_preview_hash(preview_text: &str) -> String {
+    sha256_hex(preview_text.as_bytes())
+}
+
+/// ADR 0003's approval binding: the fingerprint of the typed preconditions a proposal was
+/// evaluated against (e.g. a file's current content hash). Execution re-derives this hash from
+/// live state and refuses if it no longer matches what was approved, rather than trusting a
+/// stale approval against state that has since changed.
+pub fn compute_precondition_hash<T: Serialize>(preconditions: &T) -> Result<String, AppError> {
+    hash_json(preconditions)
 }
 
 #[cfg(test)]
@@ -293,6 +324,54 @@ mod tests {
         assert!(validate_run_budgets(65, 1_000, 256).is_err());
         assert!(validate_run_budgets(1, 999, 256).is_err());
         assert!(validate_run_budgets(1, 1_000, 255).is_err());
+    }
+
+    #[derive(Serialize)]
+    struct Fixture<'a> {
+        path: &'a str,
+        edits: Vec<&'a str>,
+    }
+
+    #[test]
+    fn approval_hashes_are_deterministic_and_sensitive_to_any_change() {
+        let a = Fixture {
+            path: "src/lib.rs",
+            edits: vec!["one"],
+        };
+        let a_again = Fixture {
+            path: "src/lib.rs",
+            edits: vec!["one"],
+        };
+        let b = Fixture {
+            path: "src/lib.rs",
+            edits: vec!["two"],
+        };
+        assert_eq!(
+            compute_call_hash(&a).unwrap(),
+            compute_call_hash(&a_again).unwrap()
+        );
+        assert_ne!(
+            compute_call_hash(&a).unwrap(),
+            compute_call_hash(&b).unwrap()
+        );
+        assert_eq!(
+            compute_precondition_hash(&a).unwrap(),
+            compute_precondition_hash(&a_again).unwrap()
+        );
+        assert_ne!(
+            compute_precondition_hash(&a).unwrap(),
+            compute_precondition_hash(&b).unwrap()
+        );
+
+        assert_eq!(
+            compute_preview_hash("Replace X with Y"),
+            compute_preview_hash("Replace X with Y")
+        );
+        assert_ne!(
+            compute_preview_hash("Replace X with Y"),
+            compute_preview_hash("Replace X with Z")
+        );
+        assert_eq!(compute_call_hash(&a).unwrap().len(), 64);
     }
 
     #[test]

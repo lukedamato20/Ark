@@ -1,9 +1,11 @@
-//! CODE-004: Ark Code's read-only Repository tool set.
+//! CODE-004: Ark Code's read-only Repository tool set, plus the registry entry for CODE-005's
+//! write-capable tools (implemented in `code_write_tools`, which reuses `RepositoryContext`,
+//! `enforce_tool`, and `relative_display` from this module rather than duplicating them).
 //!
 //! These tools reuse SEC-009's authoritative `ToolDefinition`/`CapabilityScope` model, but live
 //! in a separate registry from Ark Chat's tools. Every operation requires a `RepositoryContext`
 //! constructed from an existing Project binding, applies `.gitignore`-aware traversal, and
-//! returns bounded, explicit results. No function in this module writes Repository state.
+//! returns bounded, explicit results. No function in *this* module writes Repository state.
 
 use crate::errors::AppError;
 use crate::projects::Project;
@@ -236,10 +238,33 @@ pub fn ark_code_tools() -> Vec<ToolDefinition> {
         publisher: "Ark (built-in)".to_string(),
         scope: scope(),
     })
+    .chain(std::iter::once(ToolDefinition {
+        id: crate::code_write_tools::EDIT_FILE_TOOL_ID.to_string(),
+        name: "Edit file".to_string(),
+        description:
+            "Propose and, once approved, apply a search/replace edit to one Repository file."
+                .to_string(),
+        publisher: "Ark (built-in)".to_string(),
+        scope: CapabilityScope {
+            tier: CapabilityTier::RepositoryExecution,
+            read: true,
+            write: true,
+            network: false,
+            secret: false,
+            data: "Files inside the active Project's bound Repository".to_string(),
+        },
+    }))
     .collect()
 }
 
 /// Model-facing schemas stay separate from permission definitions, as established by CODE-001.
+///
+/// CODE-005's `edit_file` is deliberately absent here even though `ark_code_tools()` declares it:
+/// there is no agent loop yet that gates a model-initiated write behind human preview/approval
+/// before calling `execute_provider_call`, so offering it to a model would imply a safety path
+/// that does not exist. `edit_file` is reachable today only through its own direct
+/// `preview_edit_file`/`execute_edit_file` Tauri commands, which the frontend approval UI calls
+/// after a human has reviewed the diff.
 pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
     use serde_json::json;
     vec![
@@ -381,7 +406,7 @@ fn empty_schema_tool(name: &str, description: &str) -> ProviderToolDefinition {
     }
 }
 
-fn enforce_tool(context: &RepositoryContext, tool_id: &str) -> Result<(), AppError> {
+pub(crate) fn enforce_tool(context: &RepositoryContext, tool_id: &str) -> Result<(), AppError> {
     let definition = ark_code_tools()
         .into_iter()
         .find(|tool| tool.id == tool_id)
@@ -833,7 +858,7 @@ fn read_file_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, AppError> {
     Ok(bytes)
 }
 
-fn relative_display(root: &Path, path: &Path) -> Result<String, AppError> {
+pub(crate) fn relative_display(root: &Path, path: &Path) -> Result<String, AppError> {
     let relative = path.strip_prefix(root).map_err(|_| repository_escape())?;
     if relative.as_os_str().is_empty() {
         return Ok(".".to_string());
@@ -1007,7 +1032,7 @@ fn walk_error(_: ignore::Error) -> AppError {
     )
 }
 
-fn repository_read_error() -> AppError {
+pub(crate) fn repository_read_error() -> AppError {
     AppError::new(
         "repository_read_failed",
         "Ark Code could not read the requested Repository content safely.",
@@ -1069,18 +1094,34 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_repository_scoped_read_only_and_model_schemas_are_bounded() {
+    fn registry_is_repository_scoped_and_model_schemas_stay_read_only() {
         let tools = ark_code_tools();
-        assert_eq!(tools.len(), 6);
-        assert!(tools.iter().all(|tool| {
-            tool.scope.tier == CapabilityTier::RepositoryExecution
-                && tool.scope.read
-                && !tool.scope.write
-                && !tool.scope.network
-                && !tool.scope.secret
-        }));
+        assert_eq!(tools.len(), 7);
+        assert!(tools
+            .iter()
+            .all(|tool| tool.scope.tier == CapabilityTier::RepositoryExecution));
+        let read_only: Vec<_> = tools
+            .iter()
+            .filter(|tool| tool.id != crate::code_write_tools::EDIT_FILE_TOOL_ID)
+            .collect();
+        assert_eq!(read_only.len(), 6);
+        assert!(read_only.iter().all(|tool| tool.scope.read
+            && !tool.scope.write
+            && !tool.scope.network
+            && !tool.scope.secret));
+        let edit_file = tools
+            .iter()
+            .find(|tool| tool.id == crate::code_write_tools::EDIT_FILE_TOOL_ID)
+            .expect("edit_file is registered");
+        assert!(edit_file.scope.write);
+
+        // The model-facing tool-calling schema stays read-only-only until an agent loop exists
+        // that can gate a model-proposed edit_file call behind human approval before dispatch.
         let provider_tools = provider_tool_definitions();
-        assert_eq!(provider_tools.len(), tools.len());
+        assert_eq!(provider_tools.len(), read_only.len());
+        assert!(provider_tools
+            .iter()
+            .all(|tool| tool.name != crate::code_write_tools::EDIT_FILE_TOOL_ID));
         assert!(provider_tools
             .iter()
             .all(|tool| tool.input_schema["additionalProperties"] == false));

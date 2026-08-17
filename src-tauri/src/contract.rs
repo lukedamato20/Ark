@@ -13,13 +13,14 @@ use crate::chat::{
     Message, SendChatResult, StreamEvent,
 };
 use crate::code_sessions::{
-    CodeAgentRun, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
+    CodeAgentRun, CodeRecoveryOutcome, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
 };
 use crate::code_tools::{
     RepositoryDirectoryListing, RepositoryEntry, RepositoryEntryKind, RepositoryFileRead,
     RepositoryGitDiff, RepositoryGitStatus, RepositoryMap, RepositorySearchMatch,
     RepositorySearchResult,
 };
+use crate::code_write_tools::{EditFileOutcome, EditFilePreview};
 use crate::commands::ImportProgressEvent;
 use crate::companion_api::{CompanionApiStatus, CompanionApiTokenReveal};
 use crate::data_protection::{
@@ -469,6 +470,28 @@ fn ark_code_repository_dtos_match_contract() {
         &RepositoryGitStatus {
             clean: true,
             porcelain: String::new(),
+        },
+    );
+    assert_matches_contract(
+        "EditFilePreview",
+        &EditFilePreview {
+            path: "src/lib.rs".to_string(),
+            diff: "- 42\n+ 43\n".to_string(),
+            before_hash: "a".repeat(64),
+            expected_after_hash: "b".repeat(64),
+            call_hash: "c".repeat(64),
+            preview_hash: "d".repeat(64),
+            precondition_hash: "e".repeat(64),
+        },
+    );
+    assert_matches_contract(
+        "EditFileOutcome",
+        &EditFileOutcome {
+            path: "src/lib.rs".to_string(),
+            before_hash: "a".repeat(64),
+            expected_after_hash: "b".repeat(64),
+            observed_after_hash: "b".repeat(64),
+            outcome: CodeRecoveryOutcome::Applied,
         },
     );
     assert_matches_contract(

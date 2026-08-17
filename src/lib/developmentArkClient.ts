@@ -3,9 +3,13 @@ import type {
   Attachment,
   AuditEvent,
   BuiltInRuntimeStatus,
+  CodeSession,
+  CodeSessionDetail,
   CompanionApiStatus,
   Conversation,
   ConversationNote,
+  EditFileOutcome,
+  EditFilePreview,
   Message,
   ModelInfo,
   NoteWriteAction,
@@ -1805,6 +1809,171 @@ export function createBootstrapFailureFixtureClient(): ArkClient {
     },
     getBuiltInRuntimeStatus: async () => {
       throw { code: "ipc_unavailable", message: "Ark could not reach its local runtime." };
+    },
+  });
+}
+
+/** Deterministic, non-cryptographic stand-in for the Rust fixture's SHA-256 hashes — only needs
+ * to change when the fixture's fake file content changes, so `codeExecuteEditFile` below can
+ * genuinely reject a stale approval the same way the real backend does. */
+function fixtureHash(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (Math.imul(31, hash) + value.charCodeAt(index)) | 0;
+  }
+  return `fixture-${(hash >>> 0).toString(16)}`;
+}
+
+/**
+ * CODE-005 browser fixture: one Ark Code session bound to a fake Repository containing a single
+ * file, for live-verifying the `edit_file` diff-preview/approve/reject UI in `CodeView.tsx`
+ * without a real Tauri backend. `codePreviewEditFile`/`codeExecuteEditFile` mirror the real
+ * backend's approval-hash binding (`code_write_tools::execute_edit_file`): execution recomputes
+ * hashes from the fixture's *current* fake file content and refuses if they no longer match what
+ * was approved, so the "stale/tampered approval is rejected" behavior is genuinely exercised
+ * here, not merely assumed.
+ */
+export function createCodeEditFixtureClient(): ArkClient {
+  const timestamp = "2026-08-17T09:00:00Z";
+  const project: Project = {
+    id: "fixture-code-project",
+    name: "Ark Code Fixture",
+    repositoryPath: "C:\\fixtures\\ark-code-demo",
+    instructions: null,
+    defaultProviderId: null,
+    defaultModelId: null,
+    defaultTemperature: null,
+    defaultMaxTokens: null,
+    responseStyle: null,
+    tone: null,
+    archivedAt: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const conversation: Conversation = {
+    id: "fixture-code-conversation",
+    title: "Ark Chat",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    providerId: "built_in",
+    archived: false,
+  };
+  const bootstrap: AppBootstrap = {
+    conversationPage: { items: [conversation], nextCursor: null, searchSnippets: {} },
+    providers: [],
+    models: [],
+    projects: [project],
+    personas: [],
+    applicationInstructions: null,
+    workspacePath: "C:\\Ark",
+    workspace: {
+      rootPath: "C:\\Ark",
+      databasePath: "C:\\Ark\\ark.sqlite3",
+      defaultRootPath: "C:\\Ark",
+      configPath: "C:\\Ark\\workspace.json",
+      isPortable: false,
+      requiresRestart: false,
+    },
+    deviceSettings: {
+      theme: "dark",
+      builtInModelPath: null,
+      crashCaptureEnabled: false,
+      completionNotificationsEnabled: false,
+      perfMetricsEnabled: false,
+    },
+    workspaceOpenError: null,
+  };
+
+  const sessions = new Map<string, CodeSession>();
+  const filePath = "src/greeting.rs";
+  let fileContent = 'pub fn greet() -> &\'static str {\n    "Hello, world!"\n}\n';
+  let lastPreview: EditFilePreview | null = null;
+
+  function buildPreview(path: string, search: string, replace: string): EditFilePreview {
+    if (path !== filePath) {
+      throw { code: "repository_path_not_found", message: "The requested Repository path was not found." };
+    }
+    const occurrences = fileContent.split(search).length - 1;
+    if (occurrences === 0) {
+      throw { code: "edit_search_not_found", message: "Edit block 1 search text was not found in the file." };
+    }
+    if (occurrences > 1) {
+      throw {
+        code: "edit_search_ambiguous",
+        message: `Edit block 1 search text matches ${occurrences} places; it must match exactly one.`,
+      };
+    }
+    const beforeHash = fixtureHash(fileContent);
+    const afterContent = fileContent.replace(search, replace);
+    const expectedAfterHash = fixtureHash(afterContent);
+    const diff = [
+      ...search.split("\n").map((line) => `- ${line}`),
+      ...replace.split("\n").map((line) => `+ ${line}`),
+    ].join("\n");
+    const preview: EditFilePreview = {
+      path,
+      diff,
+      beforeHash,
+      expectedAfterHash,
+      callHash: fixtureHash(`${path}::${search}::${replace}`),
+      previewHash: fixtureHash(diff),
+      preconditionHash: fixtureHash(`${path}::${beforeHash}`),
+    };
+    lastPreview = preview;
+    return preview;
+  }
+
+  return createFakeArkClient({
+    getAppBootstrap: async () => bootstrap,
+    getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
+    listCodeSessions: async () => Array.from(sessions.values()),
+    createCodeSession: async (input) => {
+      const session: CodeSession = {
+        id: `fixture-session-${sessions.size + 1}`,
+        projectId: input.projectId,
+        title: input.title,
+        archived: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      sessions.set(session.id, session);
+      return session;
+    },
+    getCodeSession: async (id) => {
+      const session = sessions.get(id);
+      if (!session) throw { code: "not_found", message: "Ark Code session not found." };
+      const detail: CodeSessionDetail = { session, runs: [], events: [] };
+      return detail;
+    },
+    codePreviewEditFile: async (input) => {
+      const [edit] = input.edits;
+      return buildPreview(input.path, edit.search, edit.replace);
+    },
+    codeExecuteEditFile: async (input): Promise<EditFileOutcome> => {
+      const [edit] = input.edits;
+      const fresh = buildPreview(input.path, edit.search, edit.replace);
+      if (
+        !lastPreview ||
+        input.callHash !== fresh.callHash ||
+        input.previewHash !== fresh.previewHash ||
+        input.preconditionHash !== fresh.preconditionHash
+      ) {
+        throw {
+          code: "edit_approval_stale",
+          message: "This edit no longer matches what was approved. Request a new preview.",
+        };
+      }
+      const beforeHash = fixtureHash(fileContent);
+      fileContent = fileContent.replace(edit.search, edit.replace);
+      const observedAfterHash = fixtureHash(fileContent);
+      lastPreview = null;
+      return {
+        path: input.path,
+        beforeHash,
+        expectedAfterHash: fresh.expectedAfterHash,
+        observedAfterHash,
+        outcome: observedAfterHash === fresh.expectedAfterHash ? "applied" : "diverged",
+      };
     },
   });
 }
