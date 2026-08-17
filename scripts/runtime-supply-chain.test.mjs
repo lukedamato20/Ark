@@ -54,7 +54,7 @@ test("verified artifacts reject tampered and truncated payloads before extractio
   assert.throws(() => verifyArtifactBytes(original.subarray(0, original.length - 1), metadata), /size mismatch/u);
 });
 
-test("archive validation rejects traversal, absolute paths, links, and device entries", () => {
+test("archive validation rejects traversal, absolute paths, unresolvable links, and device entries", () => {
   validateArchiveEntries([
     { path: "llama-b9859/llama-server", type: "-" },
     { path: "llama-b9859/libggml.so", type: "-" },
@@ -65,10 +65,27 @@ test("archive validation rejects traversal, absolute paths, links, and device en
     { path: "safe/../../outside", type: "-" },
     { path: "/absolute", type: "-" },
     { path: "C:\\outside", type: "-" },
-    { path: "safe/link", type: "l" },
+    { path: "safe/link", type: "l" }, // symlink with no known target fails closed
     { path: "safe/device", type: "b" },
   ]) {
     assert.throws(() => validateArchiveEntries([entry]));
+  }
+});
+
+test("archive validation accepts a versioned-library symlink only when its target stays inside the archive root", () => {
+  // The real-world case this exists for: llama.cpp's own macOS/Linux release archives contain
+  // entries like "llama-b9859/libmtmd.so.0 -> libmtmd.so" -- a same-directory sibling symlink.
+  validateArchiveEntries([
+    { path: "llama-b9859/libmtmd.so.0", type: "l", linkTarget: "libmtmd.so" },
+    { path: "llama-b9859/nested/lib.so.0", type: "l", linkTarget: "../lib.so" },
+  ]);
+  for (const entry of [
+    { path: "safe/link", type: "l", linkTarget: "../../outside" },
+    { path: "safe/link", type: "l", linkTarget: "/absolute/outside" },
+    { path: "safe/link", type: "l", linkTarget: "C:\\outside" },
+    { path: "safe/link", type: "l", linkTarget: "" },
+  ]) {
+    assert.throws(() => validateArchiveEntries([entry]), /escapes the extraction root|no safe, known target/u);
   }
 });
 

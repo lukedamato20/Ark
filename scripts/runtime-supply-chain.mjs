@@ -9,6 +9,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   rename,
   rm,
   stat,
@@ -65,7 +66,31 @@ export function validateArchiveEntries(entries) {
       throw new Error(`Archive path escapes the extraction root: ${rawPath}`);
     }
     if (type !== "-" && type !== "d") {
-      throw new Error(`Archive entry type '${type}' is not a regular file or directory: ${rawPath}`);
+      if (type !== "l") {
+        throw new Error(`Archive entry type '${type}' is not a regular file or directory: ${rawPath}`);
+      }
+      // Reviewed llama.cpp release archives legitimately contain versioned shared-library
+      // symlinks (e.g. libmtmd.so.0 -> libmtmd.so). The archive's exact bytes are already
+      // SHA-256-pinned against the reviewed manifest before this ever runs (verifyArtifactBytes),
+      // so this isn't the primary trust boundary for the symlink's *content* -- but a symlink's
+      // *target* is a separate, real escape vector (a classic tar "symlink attack": create a
+      // symlink pointing outside the extraction root, then a later entry writes through it). A
+      // symlink is only accepted if its target, resolved relative to its own directory, provably
+      // stays inside the archive root under the exact same rules already applied to entry paths
+      // above. An entry with no known target fails closed rather than being assumed safe.
+      const linkTarget = typeof entry === "string" ? undefined : entry.linkTarget;
+      if (typeof linkTarget !== "string" || linkTarget.length === 0 || linkTarget.includes("\0")) {
+        throw new Error(`Archive symlink has no safe, known target: ${rawPath}`);
+      }
+      const normalizedTarget = linkTarget.replaceAll("\\", "/");
+      if (normalizedTarget.startsWith("/") || /^[A-Za-z]:/.test(normalizedTarget)) {
+        throw new Error(`Archive symlink target escapes the extraction root: ${rawPath} -> ${linkTarget}`);
+      }
+      const entryDir = path.posix.dirname(normalized);
+      const resolvedTarget = path.posix.normalize(path.posix.join(entryDir, normalizedTarget));
+      if (resolvedTarget === ".." || resolvedTarget.startsWith("../")) {
+        throw new Error(`Archive symlink target escapes the extraction root: ${rawPath} -> ${linkTarget}`);
+      }
     }
   }
 }
@@ -307,12 +332,18 @@ function runTar(args) {
 
 function inspectArchive(archivePath) {
   const paths = runTar(["-tf", archivePath]).split(/\r?\n/u).filter(Boolean);
-  const types = runTar(["-tvf", archivePath])
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => line.trimStart()[0]);
+  const verboseLines = runTar(["-tvf", archivePath]).split(/\r?\n/u).filter(Boolean);
+  const types = verboseLines.map((line) => line.trimStart()[0]);
+  // GNU/BSD tar's verbose listing renders a symlink entry as "... path -> target"; the plain
+  // `-tf` listing used for `paths` never includes this suffix, so it's only ever parsed here.
+  const linkTargets = verboseLines.map((line) => {
+    const arrowIndex = line.indexOf(" -> ");
+    return arrowIndex === -1 ? undefined : line.slice(arrowIndex + 4).trim();
+  });
   if (types.length !== paths.length) throw new Error("Archive listing was internally inconsistent.");
-  validateArchiveEntries(paths.map((entryPath, index) => ({ path: entryPath, type: types[index] })));
+  validateArchiveEntries(
+    paths.map((entryPath, index) => ({ path: entryPath, type: types[index], linkTarget: linkTargets[index] })),
+  );
 }
 
 // Streams every regular archive member to stdout without writing it to disk, counting bytes and
@@ -370,14 +401,40 @@ export function measureArchivePayload(archivePath, archiveBytes) {
   });
 }
 
+async function readSymlinkTarget(absolute) {
+  try {
+    return await readlink(absolute);
+  } catch (error) {
+    throw new Error(`Could not read extracted symbolic link target for ${absolute}: ${error.message}`);
+  }
+}
+
 async function walk(root, current = root, collected = []) {
   for (const entry of await readdir(current, { withFileTypes: true })) {
     const absolute = path.join(current, entry.name);
     const info = await lstat(absolute);
-    if (info.isSymbolicLink()) throw new Error(`Extracted archive contains a symbolic link: ${entry.name}`);
-    if (info.isDirectory()) await walk(root, absolute, collected);
-    else if (info.isFile()) collected.push({ path: absolute, size: info.size });
-    else throw new Error(`Extracted archive contains a non-regular filesystem entry: ${entry.name}`);
+    if (info.isSymbolicLink()) {
+      // Mirrors validateArchiveEntries' pre-extraction symlink-target check, re-verified here
+      // against what tar actually wrote to disk (not just what it claimed it would write) --
+      // belt-and-suspenders against a tar implementation quirk diverging from its own listing.
+      const target = await readSymlinkTarget(absolute);
+      const resolved = path.resolve(path.dirname(absolute), target);
+      const relative = path.relative(root, resolved);
+      if (path.isAbsolute(target) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+        throw new Error(`Extracted archive contains a symbolic link escaping the install root: ${entry.name}`);
+      }
+      const targetInfo = await stat(absolute).catch(() => null);
+      if (!targetInfo || !targetInfo.isFile()) {
+        throw new Error(`Extracted archive contains a symbolic link to a non-regular target: ${entry.name}`);
+      }
+      collected.push({ path: absolute, size: targetInfo.size });
+    } else if (info.isDirectory()) {
+      await walk(root, absolute, collected);
+    } else if (info.isFile()) {
+      collected.push({ path: absolute, size: info.size });
+    } else {
+      throw new Error(`Extracted archive contains a non-regular filesystem entry: ${entry.name}`);
+    }
     if (collected.length > MAX_ARCHIVE_ENTRIES) throw new Error("Extracted archive exceeds the entry limit.");
   }
   return collected;
