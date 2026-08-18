@@ -57,11 +57,11 @@ test("responsive shell has no page overflow and preserves Chat state across Code
   await composer.fill("draft survives mode switching");
 
   await openSidebarIfNeeded(page);
-  const codeMode = page.getByRole("button", { name: "Ark Code" });
+  const codeMode = page.getByRole("button", { name: "Ark Code", exact: true });
   await codeMode.click();
   await expect(page.getByText("Repository investigation and approved edits")).toBeVisible();
   await openSidebarIfNeeded(page);
-  const chatMode = page.getByRole("button", { name: "Ark Chat" });
+  const chatMode = page.getByRole("button", { name: "Ark Chat", exact: true });
   await chatMode.click();
   await expect(composer).toHaveValue("draft survives mode switching");
 
