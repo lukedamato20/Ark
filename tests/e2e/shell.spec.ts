@@ -99,7 +99,7 @@ test("Models presents installed cards before the curated library with honest lif
 
   const largeModel = page.getByRole("listitem").filter({ has: page.getByRole("heading", { name: "Llama 3.1 8B" }) });
   await largeModel.getByRole("button", { name: "Pull" }).click();
-  await expect(page.getByRole("alert")).toContainText("may not have enough disk space");
+  await expect(page.getByRole("alert")).toContainText("may fail partway through if space runs out");
   await page.getByRole("button", { name: "Cancel" }).click();
 
   const overflow = await page.evaluate(
