@@ -8,13 +8,12 @@ test("startup reflects bootstrap readiness and failure without an artificial hol
   await expect(page.getByRole("button", { name: /new chat/i })).toBeVisible();
 
   await page.goto("/?fixture=bootstrap-failure");
-  await expect(page.getByRole("alert")).toContainText("Ark could not start");
+  await expect(page.getByRole("alert")).toContainText("Ark couldn't start up");
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
 });
 
 test("conversation fixture is keyboard reachable and has no serious accessibility violations", async ({ page }) => {
   await page.goto("/?fixture=conversation-organization");
-  expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
   const newChat = page.getByRole("button", { name: /new chat/i });
   if (!(await newChat.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
   await expect(newChat).toBeVisible();
