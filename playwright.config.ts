@@ -26,7 +26,7 @@ export default defineConfig({
   projects: viewports.flatMap(({ name, width, height }) =>
     (["light", "dark"] as const).map((colorScheme) => ({
       name: `${name}-${colorScheme}`,
-      use: { ...devices["Desktop Chrome"], viewport: { width, height }, colorScheme },
+      use: { ...devices["Desktop Chrome"], viewport: { width, height }, colorScheme, reducedMotion: "reduce" },
     })),
   ),
   webServer: {
