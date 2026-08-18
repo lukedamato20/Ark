@@ -59,7 +59,7 @@ test("responsive shell has no page overflow and preserves Chat state across Code
   await openSidebarIfNeeded(page);
   const codeMode = page.getByRole("button", { name: "Ark Code" });
   await codeMode.click();
-  await expect(page.getByText("What should Ark Code build or investigate?")).toBeVisible();
+  await expect(page.getByText("Repository investigation and approved edits")).toBeVisible();
   await openSidebarIfNeeded(page);
   const chatMode = page.getByRole("button", { name: "Ark Chat" });
   await chatMode.click();
@@ -76,7 +76,7 @@ test("responsive shell has no page overflow and preserves Chat state across Code
 test("Models presents installed cards before the curated library with honest lifecycle guidance", async ({ page }) => {
   await page.goto("/?fixture=ollama-models");
   await openSidebarIfNeeded(page);
-  const settings = page.getByRole("button", { name: "Settings" });
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
   await settings.click();
   await page.getByRole("tab", { name: "Models" }).click();
 
