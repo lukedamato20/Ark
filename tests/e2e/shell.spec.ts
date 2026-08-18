@@ -1,10 +1,16 @@
-import { expect, test } from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+
+async function openSidebarIfNeeded(page: Page) {
+  const toggle = page.getByRole("button", { name: "Open conversations" });
+  if (await toggle.isVisible()) await toggle.click();
+}
 
 test("startup reflects bootstrap readiness and failure without an artificial hold", async ({ page }) => {
   await page.goto("/?fixture=delayed-bootstrap");
   await expect(page.getByRole("status", { name: "Starting Ark" })).toBeVisible();
   await expect(page.getByRole("status", { name: "Starting Ark" })).toBeHidden();
+  await openSidebarIfNeeded(page);
   await expect(page.getByRole("button", { name: /new chat/i })).toBeVisible();
 
   await page.goto("/?fixture=bootstrap-failure");
@@ -14,9 +20,8 @@ test("startup reflects bootstrap readiness and failure without an artificial hol
 
 test("conversation fixture is keyboard reachable and has no serious accessibility violations", async ({ page }) => {
   await page.goto("/?fixture=conversation-organization");
-  const newChat = page.getByRole("button", { name: /new chat/i });
-  if (!(await newChat.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
-  await expect(newChat).toBeVisible();
+  await openSidebarIfNeeded(page);
+  await expect(page.getByRole("button", { name: /new chat/i })).toBeVisible();
 
   await page.keyboard.press("Tab");
   await expect(page.locator(":focus-visible")).toBeVisible();
@@ -31,8 +36,8 @@ test("New Chat protects an unsent draft and creates after confirmation", async (
   await page.goto("/?fixture=conversation-organization");
   const composer = page.getByPlaceholder(/Ask Ark/i);
   await composer.fill("unsent private draft");
+  await openSidebarIfNeeded(page);
   const newChat = page.getByRole("button", { name: "New Chat" });
-  if (!(await newChat.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
   await newChat.click();
 
   const dialog = page.getByRole("alertdialog", { name: "Discard unsent message?" });
@@ -40,6 +45,7 @@ test("New Chat protects an unsent draft and creates after confirmation", async (
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(composer).toHaveValue("unsent private draft");
 
+  await openSidebarIfNeeded(page);
   await newChat.click();
   await dialog.getByRole("button", { name: "Discard and create chat" }).click();
   await expect(composer).toHaveValue("");
@@ -50,12 +56,12 @@ test("responsive shell has no page overflow and preserves Chat state across Code
   const composer = page.getByPlaceholder(/Ask Ark/i);
   await composer.fill("draft survives mode switching");
 
+  await openSidebarIfNeeded(page);
   const codeMode = page.getByRole("button", { name: "Ark Code" });
-  if (!(await codeMode.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
   await codeMode.click();
   await expect(page.getByText("What should Ark Code build or investigate?")).toBeVisible();
+  await openSidebarIfNeeded(page);
   const chatMode = page.getByRole("button", { name: "Ark Chat" });
-  if (!(await chatMode.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
   await chatMode.click();
   await expect(composer).toHaveValue("draft survives mode switching");
 
@@ -69,8 +75,8 @@ test("responsive shell has no page overflow and preserves Chat state across Code
 
 test("Models presents installed cards before the curated library with honest lifecycle guidance", async ({ page }) => {
   await page.goto("/?fixture=ollama-models");
+  await openSidebarIfNeeded(page);
   const settings = page.getByRole("button", { name: "Settings" });
-  if (!(await settings.isVisible())) await page.getByRole("button", { name: "Open conversations" }).click();
   await settings.click();
   await page.getByRole("tab", { name: "Models" }).click();
 
