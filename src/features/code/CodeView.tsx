@@ -850,8 +850,7 @@ export function CodeView({ projects, providers, models, onBack, onError }: CodeV
                               >
                                 <span className="mt-0.5 shrink-0 font-medium">↩</span>
                                 <span>
-                                  <strong className="font-medium">Response not accepted.</strong>{" "}
-                                  {observation.content}
+                                  <strong className="font-medium">Response not accepted.</strong> {observation.content}
                                 </span>
                               </div>
                             ) : (

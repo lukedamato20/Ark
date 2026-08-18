@@ -389,12 +389,7 @@ export interface CodeToolInvocation {
   createdAt: string;
 }
 
-export type CodeObservationKind =
-  | "tool_result"
-  | "tool_error"
-  | "model_text"
-  | "system"
-  | "completion_rejected";
+export type CodeObservationKind = "tool_result" | "tool_error" | "model_text" | "system" | "completion_rejected";
 
 export interface CodeObservation {
   id: string;

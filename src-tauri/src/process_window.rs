@@ -23,6 +23,3 @@ pub fn isolate_std_process_window(command: &mut std::process::Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
-
-#[cfg(not(windows))]
-pub fn isolate_std_process_window(_command: &mut std::process::Command) {}
