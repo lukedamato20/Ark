@@ -1494,7 +1494,7 @@ function ProviderModelDropdown({
         <div
           role="listbox"
           aria-label="Providers and models"
-          className="absolute left-0 top-full z-50 mt-1.5 max-h-96 w-72 overflow-y-auto rounded-lg border border-border bg-popover p-1.5 shadow-lg"
+          className="absolute left-0 bottom-full z-50 mb-1.5 max-h-96 w-72 overflow-y-auto rounded-lg border border-border bg-popover p-1.5 shadow-lg"
         >
           {providers.map((item) => {
             const itemHealth = providerHealth[item.id];

@@ -78,7 +78,7 @@ fn parse_brave_response(body: &str) -> Result<Vec<SearchCitation>, AppError> {
     let parsed: BraveSearchResponse = serde_json::from_str(body).map_err(|error| {
         AppError::new(
             "web_search_failed",
-            format!("Could not parse Brave Search's response: {error}"),
+            format!("Could not parse the search API's response: {error}"),
         )
     })?;
     Ok(parsed
@@ -119,7 +119,7 @@ fn append_bounded_response(target: &mut Vec<u8>, chunk: &[u8]) -> Result<(), App
     if target.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
         return Err(AppError::new(
             "web_search_response_too_large",
-            "Brave Search returned more data than Ark's safe response limit.",
+            "The search API returned more data than Ark's safe response limit.",
         ));
     }
     target.extend_from_slice(chunk);
@@ -133,7 +133,7 @@ async fn read_bounded_response(response: reqwest::Response) -> Result<String, Ap
     {
         return Err(AppError::new(
             "web_search_response_too_large",
-            "Brave Search returned more data than Ark's safe response limit.",
+            "The search API returned more data than Ark's safe response limit.",
         ));
     }
     let mut body = Vec::new();
@@ -142,7 +142,7 @@ async fn read_bounded_response(response: reqwest::Response) -> Result<String, Ap
         let chunk = chunk.map_err(|error| {
             AppError::new(
                 "web_search_failed",
-                format!("Could not read Brave Search's response body: {error}"),
+                format!("Could not read the search API's response body: {error}"),
             )
         })?;
         append_bounded_response(&mut body, &chunk)?;
@@ -150,7 +150,7 @@ async fn read_bounded_response(response: reqwest::Response) -> Result<String, Ap
     String::from_utf8(body).map_err(|_| {
         AppError::new(
             "web_search_failed",
-            "Brave Search returned a response that was not valid UTF-8.",
+            "The search API returned a response that was not valid UTF-8.",
         )
     })
 }
@@ -159,19 +159,19 @@ fn brave_status_error(status: reqwest::StatusCode) -> AppError {
     match status.as_u16() {
         301 | 302 | 303 | 307 | 308 => AppError::new(
             "web_search_redirect_blocked",
-            "Brave Search attempted to redirect the request; Ark did not follow it.",
+            "The search API attempted to redirect the request; Ark did not follow it.",
         ),
         401 | 403 => AppError::new(
             "web_search_unauthorized",
-            "Brave Search rejected the configured API key. Check the key in Settings → Tools.",
+            "The search API rejected the configured API key. Check the key in Settings → Tools.",
         ),
         429 => AppError::new(
             "web_search_rate_limited",
-            "Brave Search's rate limit was hit. Wait and try again.",
+            "The search API's rate limit was hit. Wait and try again.",
         ),
         _ => AppError::new(
             "web_search_failed",
-            format!("Brave Search returned HTTP {status}."),
+            format!("The search API returned HTTP {status}."),
         ),
     }
 }
@@ -207,11 +207,11 @@ async fn brave_search(api_key: &str, query: &str) -> Result<Vec<SearchCitation>,
         Ok(response) => Err(brave_status_error(response.status())),
         Err(error) if error.is_timeout() => Err(AppError::new(
             "web_search_timeout",
-            "The search request to Brave Search timed out.",
+            "The web search request timed out.",
         )),
         Err(error) if error.is_connect() => Err(AppError::new(
             "web_search_unreachable",
-            "Could not reach Brave Search. Check the network connection.",
+            "Could not reach the search API. Check the network connection.",
         )),
         Err(error) => Err(AppError::new(
             "web_search_failed",
@@ -229,7 +229,7 @@ async fn brave_search(api_key: &str, query: &str) -> Result<Vec<SearchCitation>,
 pub fn preview_web_search(query: &str) -> SideEffectPreview {
     SideEffectPreview {
         tool_id: WEB_SEARCH_TOOL_ID.to_string(),
-        summary: format!("Send this query to Brave Search: \"{query}\""),
+        summary: format!("Send this query to the web search API: \"{query}\""),
         idempotency: IdempotencyPolicy::RequiresFreshApproval,
     }
 }
@@ -314,7 +314,7 @@ mod tests {
         let preview = preview_web_search("latest rust release");
         assert_eq!(preview.tool_id, WEB_SEARCH_TOOL_ID);
         assert!(preview.summary.contains("latest rust release"));
-        assert!(preview.summary.contains("Brave Search"));
+        assert!(preview.summary.contains("web search API"));
         assert_eq!(
             preview.idempotency,
             IdempotencyPolicy::RequiresFreshApproval

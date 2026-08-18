@@ -1,4 +1,4 @@
-//! FTR-001: verified backup, restore, and workspace-copy migration.
+﻿//! FTR-001: verified backup, restore, and workspace-copy migration.
 //!
 //! Three independent operations, each reusing the same safety pattern already established by
 //! `data_protection.rs`'s SEC-006 protection-mode changes and `db::backup_before_migrations`:
@@ -384,7 +384,7 @@ mod tests {
         let state = test_state(&database_path);
         {
             let db = state.db.lock().expect("lock db");
-            db.create_conversation(Some("seed conversation".to_string()))
+            db.create_conversation(Some("seed conversation".to_string()), None)
                 .expect("seed a conversation so backups have real data to preserve");
         }
         (state, workspace_dir)

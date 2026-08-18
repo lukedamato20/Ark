@@ -440,7 +440,7 @@ pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
         },
         ProviderToolDefinition {
             name: READ_FILE_TOOL_ID.to_string(),
-            description: "Read a bounded line range from a Repository text file.".to_string(),
+            description: "Read and return the actual source code or text content of a Repository file, line by line. This is the only tool that returns real file contents — repository_map and list_directory return only paths and metadata, never code or text. Call this before making any claim about what a file contains.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -474,7 +474,7 @@ pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
         ProviderToolDefinition {
             name: REPOSITORY_MAP_TOOL_ID.to_string(),
             description: format!(
-                "Build a bounded map of context-eligible Repository files. Call with an empty object to use the default; the only accepted field is optional max_entries between 1 and {MAX_MAP_ENTRIES}. The map contains paths and metadata, not file contents."
+                "Build a bounded map of context-eligible Repository files for navigation. Call with an empty object to use the default; the only accepted field is optional max_entries between 1 and {MAX_MAP_ENTRIES}. IMPORTANT: the map contains only file paths and metadata — it does not contain any source code or file contents. Use read_file to obtain actual file contents."
             ),
             input_schema: json!({
                 "type": "object",

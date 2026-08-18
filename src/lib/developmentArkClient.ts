@@ -1094,7 +1094,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
       conversation.pinnedAt = pinned ? new Date().toISOString() : null;
       return { ...conversation };
     },
-    createConversation: async () => {
+    createConversation: async (_title?: string, projectId?: string | null) => {
       const created: Conversation = {
         id: `fixture-conv-created-${conversations.length}`,
         title: "New conversation",
@@ -1104,6 +1104,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
         modelId: model.name,
         archived: false,
         pinnedAt: null,
+        projectId: projectId ?? null,
       };
       conversations.unshift(created);
       return created;

@@ -37,7 +37,7 @@ interface ConversationSidebarProps {
   searchSnippets: Record<string, string>;
   showArchived: boolean;
   onToggleCollapsed: () => void;
-  onCreate: () => void;
+  onCreate: (projectId?: string | null) => void;
   onCreateProject: (name: string) => Promise<void>;
   onSelect: (id: string) => void;
   onSearch: (query: string) => void;
@@ -195,22 +195,32 @@ export function ConversationSidebar(props: ConversationSidebarProps) {
             </Button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Ark mode">
+          <div className="relative grid grid-cols-2 rounded-lg bg-muted p-1" role="group" aria-label="Ark mode">
+            <div
+              aria-hidden="true"
+              className={cn(
+                "pointer-events-none absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-md bg-card shadow-sm",
+                "transition-transform duration-200 ease-in-out motion-reduce:transition-none",
+                activeMode === "code" && "translate-x-full",
+              )}
+            />
             <Button
               size="sm"
-              variant={activeMode === "chat" ? "secondary" : "ghost"}
+              variant="ghost"
               aria-label="Ark Chat"
               aria-pressed={activeMode === "chat"}
               onClick={() => onModeChange("chat")}
+              className="relative z-10"
             >
               Chat
             </Button>
             <Button
               size="sm"
-              variant={activeMode === "code" ? "secondary" : "ghost"}
+              variant="ghost"
               aria-label="Ark Code"
               aria-pressed={activeMode === "code"}
               onClick={() => onModeChange("code")}
+              className="relative z-10"
             >
               Code
             </Button>
@@ -359,7 +369,7 @@ export function ConversationSidebar(props: ConversationSidebarProps) {
               contentId="sidebar-chats-content"
               onToggle={() => toggleSection("chats")}
               actionLabel="New Chat"
-              onAction={onCreate}
+              onAction={() => onCreate(selectedProjectId)}
             />
           )}
           {(collapsed || sections.chats) && (

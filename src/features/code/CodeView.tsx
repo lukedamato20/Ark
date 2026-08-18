@@ -436,8 +436,8 @@ export function CodeView({ projects, providers, models, onBack, onError }: CodeV
   }
 
   return (
-    <main className="min-w-0 flex-1 overflow-y-auto bg-background">
-      <header className="sticky top-0 z-10 flex min-h-14 items-center gap-3 border-b border-border bg-card/95 px-4 backdrop-blur">
+    <main className="min-w-0 flex-1 overflow-hidden flex flex-col bg-background">
+      <header className="shrink-0 z-10 flex min-h-14 items-center gap-3 border-b border-border bg-card/95 px-4 backdrop-blur">
         <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back to Ark Chat">
           <ArrowLeft className="h-4 w-4" />
         </Button>
@@ -448,8 +448,8 @@ export function CodeView({ projects, providers, models, onBack, onError }: CodeV
         </div>
       </header>
 
-      <div className="mx-auto grid w-full max-w-6xl gap-5 p-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="space-y-4 rounded-lg border border-border bg-card p-4">
+      <div className="mx-auto grid w-full max-w-6xl gap-5 p-4 flex-1 min-h-0 overflow-hidden lg:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="min-h-0 overflow-y-auto space-y-4 rounded-lg border border-border bg-card p-4">
           <div>
             <h2 className="text-sm font-semibold">Sessions</h2>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -499,7 +499,7 @@ export function CodeView({ projects, providers, models, onBack, onError }: CodeV
           </div>
         </aside>
 
-        <section className="flex min-h-[calc(100vh-7rem)] min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
+        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
           {!activeSession ? (
             <div className="grid flex-1 place-items-center p-8 text-center text-sm text-muted-foreground">
               Create or select a coding session, then describe the result you want.

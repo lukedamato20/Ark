@@ -103,6 +103,66 @@ const CURATED_MODELS = [
     description: "An extremely small model for testing on very limited hardware.",
     approxSizeGb: 0.6,
   },
+  {
+    name: "llama3.3:70b",
+    label: "Llama 3.3 70B",
+    description: "Meta's most capable current open model — strongest reasoning, large download.",
+    approxSizeGb: 43,
+  },
+  {
+    name: "qwen2.5-coder:7b",
+    label: "Qwen 2.5 Coder 7B",
+    description: "Alibaba's fast code-focused model — strong at completion, debugging, and code review.",
+    approxSizeGb: 4.7,
+  },
+  {
+    name: "qwen2.5-coder:32b",
+    label: "Qwen 2.5 Coder 32B",
+    description: "Alibaba's larger coding model — higher quality at the cost of a much bigger download.",
+    approxSizeGb: 20,
+  },
+  {
+    name: "phi4:14b",
+    label: "Phi-4 14B",
+    description: "Microsoft's high-quality reasoning model that punches above its weight class.",
+    approxSizeGb: 9.1,
+  },
+  {
+    name: "phi4-mini:3.8b",
+    label: "Phi-4 Mini 3.8B",
+    description: "Microsoft's compact, efficient reasoning model — low hardware requirements.",
+    approxSizeGb: 2.5,
+  },
+  {
+    name: "gemma3:4b",
+    label: "Gemma 3 4B",
+    description: "Google's fast and capable small model — excellent quality for its size.",
+    approxSizeGb: 2.5,
+  },
+  {
+    name: "gemma3:12b",
+    label: "Gemma 3 12B",
+    description: "Google's mid-size model with multimodal capabilities and strong reasoning.",
+    approxSizeGb: 8.1,
+  },
+  {
+    name: "deepseek-r1:7b",
+    label: "DeepSeek R1 7B",
+    description: "DeepSeek's efficient reasoning model — strong at math, code, and logic.",
+    approxSizeGb: 4.7,
+  },
+  {
+    name: "deepseek-r1:14b",
+    label: "DeepSeek R1 14B",
+    description: "DeepSeek's mid-size reasoning model — more capable with a larger footprint.",
+    approxSizeGb: 9.0,
+  },
+  {
+    name: "mistral-small3.2:24b",
+    label: "Mistral Small 3.2 24B",
+    description: "Mistral's latest small model — fast, instruction-following, multilingual.",
+    approxSizeGb: 15,
+  },
 ] as const;
 
 export const SUGGESTED_OLLAMA_MODELS: SuggestedOllamaModel[] = CURATED_MODELS.map((model) => ({
@@ -116,6 +176,6 @@ export const SUGGESTED_OLLAMA_MODELS: SuggestedOllamaModel[] = CURATED_MODELS.ma
           ? "embedding"
           : "general",
   sourceUrl: `https://ollama.com/library/${model.name.split(":")[0]}`,
-  reviewedAt: "2026-08-17",
+  reviewedAt: "2026-08-18",
   metadataConfidence: "reviewed_approximate",
 }));

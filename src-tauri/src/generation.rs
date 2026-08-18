@@ -1,4 +1,4 @@
-//! ARC-001: the conversation/generation application workflow, extracted from `commands::mod` —
+﻿//! ARC-001: the conversation/generation application workflow, extracted from `commands::mod` —
 //! sending a new message, editing a user message, regenerating an assistant message, cancelling
 //! a stream, and the streaming supervision underneath all of them. Tauri commands in
 //! `commands::mod` remain thin adapters: decode the request, delegate here, return the result.
@@ -1871,7 +1871,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Ordering".to_string()))
+            .create_conversation(Some("Ordering".to_string()), None)
             .expect("conversation created");
 
         let result = send_chat_message(
@@ -1921,7 +1921,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Idempotent send".to_string()))
+            .create_conversation(Some("Idempotent send".to_string()), None)
             .expect("conversation created");
         let request_path = format!("/v1/conversations/{}/messages", conversation.id);
         let request_hash = "a".repeat(64);
@@ -1996,7 +1996,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Failed queue receipt".to_string()))
+            .create_conversation(Some("Failed queue receipt".to_string()), None)
             .expect("conversation created");
         let request_path = format!("/v1/conversations/{}/messages", conversation.id);
         let request_hash = "e".repeat(64);
@@ -2058,7 +2058,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Idempotent cancel".to_string()))
+            .create_conversation(Some("Idempotent cancel".to_string()), None)
             .expect("conversation created");
         let first = send_chat_message(
             &state,
@@ -2145,7 +2145,7 @@ mod tests {
         let assistant_id = {
             let db = state.db.lock().expect("database lock");
             let conversation = db
-                .create_conversation(Some("Checkpoint failure".to_string()))
+                .create_conversation(Some("Checkpoint failure".to_string()), None)
                 .expect("conversation created");
             let assistant = db
                 .append_message(
@@ -2209,7 +2209,7 @@ mod tests {
                 .db
                 .lock()
                 .expect("database lock")
-                .create_conversation(None)
+                .create_conversation(None, None)
                 .expect("conversation created");
             state
                 .db
@@ -2286,7 +2286,7 @@ mod tests {
             let (conversation_id, user_id, assistant_id) = {
                 let db = state.db.lock().expect("database lock");
                 let conversation = db
-                    .create_conversation(Some("Ancestry".to_string()))
+                    .create_conversation(Some("Ancestry".to_string()), None)
                     .expect("conversation created");
                 let user = db
                     .append_message(
@@ -2386,7 +2386,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Launch failure".to_string()))
+            .create_conversation(Some("Launch failure".to_string()), None)
             .expect("conversation created");
         let assistant = state
             .db
@@ -2460,7 +2460,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Credential failure".to_string()))
+            .create_conversation(Some("Credential failure".to_string()), None)
             .expect("conversation created");
         let assistant = state
             .db
@@ -2544,7 +2544,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Concurrent".to_string()))
+            .create_conversation(Some("Concurrent".to_string()), None)
             .expect("conversation created")
             .id;
         let state = Arc::new(state);
@@ -2607,7 +2607,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Cancellation".to_string()))
+            .create_conversation(Some("Cancellation".to_string()), None)
             .expect("conversation created");
         let result = send_chat_message(
             &state,
@@ -2883,7 +2883,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Provenance default".to_string()))
+            .create_conversation(Some("Provenance default".to_string()), None)
             .expect("conversation created");
 
         let result = send_chat_message(&state, basic_send_request(conversation.id, "hello"))
@@ -2922,7 +2922,7 @@ mod tests {
                 "Prefer locally verifiable answers.",
             )
             .expect("application instructions saved");
-            db.create_conversation(Some("Application instructions".to_string()))
+            db.create_conversation(Some("Application instructions".to_string()), None)
                 .expect("conversation created")
         };
 
@@ -2951,7 +2951,7 @@ mod tests {
         let conversation = {
             let db = state.db.lock().expect("database lock");
             let conversation = db
-                .create_conversation(Some("Provenance override".to_string()))
+                .create_conversation(Some("Provenance override".to_string()), None)
                 .expect("conversation created");
             db.update_conversation_settings(
                 &conversation.id,
@@ -2994,7 +2994,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Provenance web search".to_string()))
+            .create_conversation(Some("Provenance web search".to_string()), None)
             .expect("conversation created");
 
         let mut request = basic_send_request(conversation.id, "what's new in rust");
@@ -3044,7 +3044,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Provenance no search".to_string()))
+            .create_conversation(Some("Provenance no search".to_string()), None)
             .expect("conversation created");
 
         let result = send_chat_message(&state, basic_send_request(conversation.id, "hello"))
@@ -3072,7 +3072,7 @@ mod tests {
         let (conversation_id, attachment_id) = {
             let db = state.db.lock().expect("database lock");
             let conversation = db
-                .create_conversation(Some("Attachment send".to_string()))
+                .create_conversation(Some("Attachment send".to_string()), None)
                 .expect("conversation created");
             let attachment = db
                 .create_attachment(&conversation.id, "notes.txt", "the attached body")
@@ -3116,7 +3116,7 @@ mod tests {
             .db
             .lock()
             .expect("database lock")
-            .create_conversation(Some("Bad attachment".to_string()))
+            .create_conversation(Some("Bad attachment".to_string()), None)
             .expect("conversation created");
         let conversation_id = conversation.id.clone();
 
@@ -3147,7 +3147,7 @@ mod tests {
         let conversation = {
             let db = state.db.lock().expect("database lock");
             let conversation = db
-                .create_conversation(Some("Request wins".to_string()))
+                .create_conversation(Some("Request wins".to_string()), None)
                 .expect("conversation created");
             db.update_conversation_settings(&conversation.id, None, Some(0.1), Some(64), None, None)
                 .expect("conversation settings saved")
@@ -3199,7 +3199,7 @@ mod tests {
                 )
                 .expect("project defaults saved");
             let conversation = db
-                .create_conversation(Some("In a project".to_string()))
+                .create_conversation(Some("In a project".to_string()), None)
                 .expect("conversation created");
             db.set_conversation_project(&conversation.id, Some(&project.id))
                 .expect("conversation assigned to project")

@@ -45,7 +45,7 @@ const MESSAGE_PAGE_INCREMENT = 50;
 
 export interface ArkController {
   bootstrap: () => Promise<void>;
-  createConversation: (discardDraft?: boolean) => Promise<void>;
+  createConversation: (discardDraft?: boolean, projectId?: string | null) => Promise<void>;
   setChatComposerDraft: (draft: string) => void;
   dismissNewChatConfirmation: () => void;
   selectConversation: (id: string) => void;
@@ -456,7 +456,7 @@ export function useArkController(): ArkController {
   }, [client, loadConversation, refreshProviderModels, stores]);
 
   const createConversation = React.useCallback(
-    async (discardDraft = false) => {
+    async (discardDraft = false, projectId?: string | null) => {
       const initialShell = stores.shell.getSnapshot();
       if (needsNewChatConfirmation(initialShell.chatComposerDraft, discardDraft)) {
         patchStore(stores.shell, { newChatConfirmationRequested: true });
@@ -465,7 +465,7 @@ export function useArkController(): ArkController {
       if (createConversationInFlightRef.current) return;
       createConversationInFlightRef.current = true;
       try {
-        const conversation = await client.createConversation();
+        const conversation = await client.createConversation(undefined, projectId);
         const catalog = stores.catalog.getSnapshot();
         const conversations = entityList(catalog.conversations);
         stores.catalog.set({

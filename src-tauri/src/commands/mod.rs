@@ -395,8 +395,9 @@ pub fn list_pinned_conversations(
 pub fn create_conversation(
     state: State<'_, AppState>,
     title: Option<String>,
+    project_id: Option<String>,
 ) -> Result<crate::chat::Conversation, AppError> {
-    lock_db(&state)?.create_conversation(title)
+    lock_db(&state)?.create_conversation(title, project_id)
 }
 
 #[tauri::command]

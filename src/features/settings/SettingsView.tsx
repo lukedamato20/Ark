@@ -2990,7 +2990,7 @@ function OllamaModelsPanel({
           </div>
         </div>
         <div
-          className="grid max-h-[28rem] grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3 overflow-y-auto pr-1"
+          className="grid max-h-[44rem] grid-cols-[repeat(auto-fill,minmax(17rem,1fr))] gap-4 overflow-y-auto pr-1"
           role="list"
           aria-label="Curated Ollama Library"
         >
@@ -3002,53 +3002,42 @@ function OllamaModelsPanel({
               provider.destinationClass !== "loopback",
             );
             return (
-              <Card key={suggestion.name} className="flex min-w-0 flex-col gap-2 p-3" role="listitem">
-                <div>
+              <Card key={suggestion.name} className="flex min-w-0 flex-col gap-3 p-4" role="listitem">
+                <div className="flex min-h-0 flex-1 flex-col gap-2">
                   <div className="flex items-start justify-between gap-2">
-                    <h4 className="text-sm font-semibold">{suggestion.label}</h4>
-                    <Badge tone={installed ? "success" : "muted"}>
+                    <h4 className="text-sm font-semibold leading-tight">{suggestion.label}</h4>
+                    <Badge tone={installed ? "success" : "muted"} className="shrink-0">
                       {installed ? "installed" : suggestion.category}
                     </Badge>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">{suggestion.description}</p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{suggestion.description}</p>
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    <span className="font-medium">~{suggestion.approxSizeGb} GB</span>
+                    <span title={fit.reason} className="truncate">
+                      {fit.category.replaceAll("_", " ")} fit
+                    </span>
+                  </div>
                 </div>
-                <dl className="grid grid-cols-2 gap-1 text-xs text-muted-foreground">
-                  <div>
-                    <dt className="sr-only">Download size</dt>
-                    <dd>~{suggestion.approxSizeGb} GB</dd>
-                  </div>
-                  <div>
-                    <dt className="sr-only">Hardware fit</dt>
-                    <dd title={fit.reason}>
-                      Fit: {fit.category.replaceAll("_", " ")} · {fit.confidence} confidence
-                    </dd>
-                  </div>
-                </dl>
-                <details className="text-xs text-muted-foreground">
-                  <summary className="cursor-pointer">Source and provenance</summary>
-                  <div className="mt-1 grid gap-1">
-                    <span>Reviewed by Ark on {suggestion.reviewedAt}; approximate metadata.</span>
-                    <button
-                      type="button"
-                      className="w-fit text-primary underline"
-                      onClick={() => void client.openExternalUrl(suggestion.sourceUrl)}
-                    >
-                      Open Ollama library source
-                    </button>
-                  </div>
-                </details>
-                <Button
-                  size="sm"
-                  className="mt-auto"
-                  variant={installed ? "secondary" : "primary"}
-                  disabled={installed || pulling || !reachable}
-                  onClick={() => {
-                    setPullName(suggestion.name);
-                    void handlePullClickFor(suggestion.name);
-                  }}
-                >
-                  {installed ? "Installed" : "Pull"}
-                </Button>
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    className="text-xs text-primary underline underline-offset-2 hover:no-underline"
+                    onClick={() => void client.openExternalUrl(suggestion.sourceUrl)}
+                  >
+                    Ollama library ↗
+                  </button>
+                  <Button
+                    size="sm"
+                    variant={installed ? "secondary" : "primary"}
+                    disabled={installed || pulling || !reachable}
+                    onClick={() => {
+                      setPullName(suggestion.name);
+                      void handlePullClickFor(suggestion.name);
+                    }}
+                  >
+                    {installed ? "Installed" : "Pull"}
+                  </Button>
+                </div>
               </Card>
             );
           })}

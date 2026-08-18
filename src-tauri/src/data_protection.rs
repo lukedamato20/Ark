@@ -1,4 +1,4 @@
-//! SEC-006: optional SQLCipher workspace encryption with OS-protected keys.
+﻿//! SEC-006: optional SQLCipher workspace encryption with OS-protected keys.
 //!
 //! Protection metadata contains opaque key references only. Every plaintext/encrypted mode
 //! change exports into a sibling database, verifies it independently, then atomically swaps it
@@ -842,7 +842,7 @@ mod tests {
         let path = temp_database("rotate-restore");
         {
             let seed = Database::open(&path).expect("create plaintext database");
-            seed.create_conversation(Some("survives rotation".to_string()))
+            seed.create_conversation(Some("survives rotation".to_string()), None)
                 .expect("seed row");
             seed.checkpoint().expect("checkpoint");
         }
@@ -942,7 +942,7 @@ mod tests {
     fn plaintext_to_encrypted_and_back_is_copy_based_and_preserves_rows() {
         let path = temp_database("round-trip");
         let db = Database::open(&path).expect("create plaintext database");
-        db.create_conversation(Some("preserved".to_string()))
+        db.create_conversation(Some("preserved".to_string()), None)
             .expect("seed row");
         db.checkpoint().expect("checkpoint");
         drop(db);

@@ -1,4 +1,4 @@
-//! ARC-001: the conversation export/import application workflow, extracted from
+﻿//! ARC-001: the conversation export/import application workflow, extracted from
 //! `commands::mod` as a cohesive service. Every function here takes `&Database` directly
 //! rather than a Tauri `State`, so each one can be exercised in a unit test against a real
 //! (temp-file or in-memory) SQLite database with zero Tauri runtime involved — the same
@@ -521,7 +521,7 @@ where
     // original export. The whole import commits atomically or not at all.
     let (imported_id, normalized_message_count) = db.transaction(|| {
         let imported =
-            db.create_conversation(Some(format!("{} (imported)", export.conversation.title)))?;
+            db.create_conversation(Some(format!("{} (imported)", export.conversation.title)), None)?;
         let mut id_map: HashMap<String, String> = HashMap::new();
         let mut imported_current_message_id: Option<String> = None;
         let mut normalized_message_count: i64 = 0;
@@ -687,7 +687,7 @@ mod tests {
     fn export_and_import_round_trip_through_the_extracted_service_functions() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Round trip via service".to_string()))
+            .create_conversation(Some("Round trip via service".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -788,7 +788,7 @@ mod tests {
     fn workspace_v2_round_trip_hashes_attachments_and_tolerates_unknown_fields() {
         let (source_db, source_path) = test_db();
         let conversation = source_db
-            .create_conversation(Some("Workspace portable".to_string()))
+            .create_conversation(Some("Workspace portable".to_string()), None)
             .expect("conversation created");
         let message = source_db
             .append_message(
@@ -902,7 +902,7 @@ mod tests {
     fn workspace_v1_without_attachments_or_new_provider_fields_remains_importable() {
         let (source_db, source_path) = test_db();
         let conversation = source_db
-            .create_conversation(Some("Legacy workspace".to_string()))
+            .create_conversation(Some("Legacy workspace".to_string()), None)
             .expect("conversation created");
         source_db
             .append_message(
@@ -963,7 +963,7 @@ mod tests {
     fn conversation_export_excludes_provider_secret_references_and_values() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Secret-safe export".to_string()))
+            .create_conversation(Some("Secret-safe export".to_string()), None)
             .expect("conversation created");
         db.set_provider_api_key_ref(
             DEFAULT_PROVIDER_ID,
@@ -990,7 +990,7 @@ mod tests {
     fn import_normalizes_transient_statuses_and_reports_the_count() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Source".to_string()))
+            .create_conversation(Some("Source".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -1079,7 +1079,7 @@ mod tests {
     fn dry_run_reports_counts_depth_conflicts_mapping_normalization_and_storage() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Preview source".to_string()))
+            .create_conversation(Some("Preview source".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -1126,7 +1126,7 @@ mod tests {
     fn cancellation_after_progress_rolls_back_every_imported_row() {
         let (db, path) = test_db();
         let source = db
-            .create_conversation(Some("Cancelled source".to_string()))
+            .create_conversation(Some("Cancelled source".to_string()), None)
             .expect("conversation created");
         let mut parent = None;
         for index in 0..3 {
@@ -1191,7 +1191,7 @@ mod tests {
     fn import_preserves_settings_provenance_and_maps_an_unavailable_provider() {
         let (db, path) = test_db();
         let source = db
-            .create_conversation(Some("Portable".to_string()))
+            .create_conversation(Some("Portable".to_string()), None)
             .expect("conversation created");
         let message = db
             .append_message(

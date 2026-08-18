@@ -1,4 +1,4 @@
-//! FTR-010: a disabled-by-default local HTTP API for external integrations and the future
+﻿//! FTR-010: a disabled-by-default local HTTP API for external integrations and the future
 //! mobile companion (MOB-009). Reuses SEC-002's proven proxy pattern (`proxy.rs`): a
 //! loopback-only listener, custom-header bearer auth with zero exempt routes (not even
 //! `/v1/health`), and no response this server sends ever carries an `Access-Control-*` header —
@@ -817,7 +817,7 @@ fn create_conversation(
         CONVERSATIONS_PATH,
         &request_hash,
         StatusCode::CREATED,
-        |db| db.create_conversation(request.title),
+        |db| db.create_conversation(request.title, None),
     )
 }
 
@@ -1559,7 +1559,7 @@ mod tests {
             CONVERSATIONS_PATH,
             &hash,
             StatusCode::CREATED,
-            |db| db.create_conversation(Some("First".to_string())),
+            |db| db.create_conversation(Some("First".to_string()), None),
         )
         .expect("first mutation succeeds");
         let replay = execute_idempotent(
@@ -1569,7 +1569,7 @@ mod tests {
             CONVERSATIONS_PATH,
             &hash,
             StatusCode::CREATED,
-            |db| db.create_conversation(Some("Must not be created".to_string())),
+            |db| db.create_conversation(Some("Must not be created".to_string()), None),
         )
         .expect("matching retry replays");
         assert_eq!(replay.id, first.id);
@@ -1592,7 +1592,7 @@ mod tests {
             CONVERSATIONS_PATH,
             &request_hash(br#"{"title":"Different"}"#),
             StatusCode::CREATED,
-            |db| db.create_conversation(Some("Different".to_string())),
+            |db| db.create_conversation(Some("Different".to_string()), None),
         )
         .expect_err("same key with a different body must fail");
         assert_eq!(conflict.code, "idempotency_conflict");

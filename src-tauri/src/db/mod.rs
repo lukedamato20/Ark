@@ -1,4 +1,4 @@
-use crate::attachments::Attachment;
+﻿use crate::attachments::Attachment;
 use crate::chat::{
     BranchAlternative, BranchTopologyNode, Conversation, ConversationListRequest, ConversationPage,
     Message,
@@ -1182,7 +1182,11 @@ impl Database {
         collect_rows(rows)
     }
 
-    pub fn create_conversation(&self, title: Option<String>) -> Result<Conversation, AppError> {
+    pub fn create_conversation(
+        &self,
+        title: Option<String>,
+        project_id: Option<String>,
+    ) -> Result<Conversation, AppError> {
         let timestamp = now();
         let id = Uuid::new_v4().to_string();
         let provider = self.get_provider(DEFAULT_PROVIDER_ID)?;
@@ -1199,14 +1203,15 @@ impl Database {
         // override → conversation override → live provider default) at generation time instead.
         self.connection.execute(
             "INSERT INTO conversations (
-                id, title, created_at, updated_at, provider_id, model_id, archived
-            ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, 0)",
+                id, title, created_at, updated_at, provider_id, model_id, archived, project_id
+            ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, 0, ?6)",
             params![
                 id,
                 conversation_title,
                 timestamp,
                 provider.id,
                 provider.default_model_id,
+                project_id,
             ],
         )?;
 
@@ -6104,7 +6109,7 @@ mod tests {
         let reader = Database::open_read_replica(&path).expect("read replica opens");
 
         let conversation = writer
-            .create_conversation(Some("Before transaction".to_string()))
+            .create_conversation(Some("Before transaction".to_string()), None)
             .expect("conversation created before the transaction");
 
         // Open a write transaction and leave it uncommitted while the reader reads.
@@ -6151,7 +6156,7 @@ mod tests {
         let reader = Database::open_read_replica(&path).expect("read replica opens");
 
         let error = reader
-            .create_conversation(Some("Should not be allowed".to_string()))
+            .create_conversation(Some("Should not be allowed".to_string()), None)
             .expect_err("a write attempted through the read-only connection must fail");
         // `AppError::from<rusqlite::Error>` classifies SQLite's read-only-connection rejection
         // as `workspace_read_only` — the same code a genuinely read-only filesystem produces —
@@ -6182,7 +6187,7 @@ mod tests {
     ) {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Concurrent writers".to_string()))
+            .create_conversation(Some("Concurrent writers".to_string()), None)
             .expect("conversation created");
         let message = db
             .append_message(
@@ -6263,7 +6268,7 @@ mod tests {
         let reader = Database::open_read_replica(":memory:").expect("read replica opens");
 
         let conversation = writer
-            .create_conversation(Some("Shared in-memory cache".to_string()))
+            .create_conversation(Some("Shared in-memory cache".to_string()), None)
             .expect("conversation created on the writer");
 
         let seen = reader
@@ -6287,7 +6292,7 @@ mod tests {
     fn checkpoint_after_writes_folds_the_wal_back_into_the_main_file() {
         let path = std::env::temp_dir().join(format!("ark-test-{}.sqlite3", Uuid::new_v4()));
         let db = Database::open(&path).expect("database opens");
-        db.create_conversation(Some("Triggers a WAL write".to_string()))
+        db.create_conversation(Some("Triggers a WAL write".to_string()), None)
             .expect("write succeeds");
 
         db.checkpoint().expect("checkpoint succeeds after a write");
@@ -7266,7 +7271,7 @@ mod tests {
         let (db, path) = test_db();
 
         let created = db
-            .create_conversation(Some("Initial".to_string()))
+            .create_conversation(Some("Initial".to_string()), None)
             .expect("conversation created");
         assert_eq!(created.title, "Initial");
 
@@ -7304,8 +7309,8 @@ mod tests {
     fn repeated_new_chat_creates_distinct_durable_rows() {
         let (db, path) = test_db();
 
-        let first = db.create_conversation(None).expect("first conversation");
-        let second = db.create_conversation(None).expect("second conversation");
+        let first = db.create_conversation(None, None).expect("first conversation");
+        let second = db.create_conversation(None, None).expect("second conversation");
 
         assert_ne!(first.id, second.id);
         assert_eq!(first.title, "New conversation");
@@ -7322,7 +7327,7 @@ mod tests {
         let (db, path) = test_db();
 
         let created = db
-            .create_conversation(Some("Fresh".to_string()))
+            .create_conversation(Some("Fresh".to_string()), None)
             .expect("conversation created");
         assert_eq!(created.system_prompt, None);
         assert_eq!(created.temperature, None);
@@ -7336,7 +7341,7 @@ mod tests {
     fn update_conversation_settings_sets_and_clears_each_override_independently() {
         let (db, path) = test_db();
         let created = db
-            .create_conversation(Some("Overrides".to_string()))
+            .create_conversation(Some("Overrides".to_string()), None)
             .expect("conversation created");
 
         let updated = db
@@ -7376,7 +7381,7 @@ mod tests {
     fn set_conversation_archived_toggles_independently_of_updated_at() {
         let (db, path) = test_db();
         let created = db
-            .create_conversation(Some("Archive me".to_string()))
+            .create_conversation(Some("Archive me".to_string()), None)
             .expect("conversation created");
         assert!(!created.archived);
         let original_updated_at = created.updated_at.clone();
@@ -7405,7 +7410,7 @@ mod tests {
     fn set_conversation_pinned_records_and_clears_a_timestamp() {
         let (db, path) = test_db();
         let created = db
-            .create_conversation(Some("Pin me".to_string()))
+            .create_conversation(Some("Pin me".to_string()), None)
             .expect("conversation created");
         assert_eq!(created.pinned_at, None);
         let original_updated_at = created.updated_at.clone();
@@ -7432,13 +7437,13 @@ mod tests {
     fn pinned_navigation_query_is_global_ordered_bounded_and_excludes_archived() {
         let (db, path) = test_db();
         let older = db
-            .create_conversation(Some("Older pin".to_string()))
+            .create_conversation(Some("Older pin".to_string()), None)
             .expect("older");
         let newer = db
-            .create_conversation(Some("Newer pin".to_string()))
+            .create_conversation(Some("Newer pin".to_string()), None)
             .expect("newer");
         let archived = db
-            .create_conversation(Some("Archived pin".to_string()))
+            .create_conversation(Some("Archived pin".to_string()), None)
             .expect("archived");
         db.connection
             .execute(
@@ -7602,7 +7607,7 @@ mod tests {
     fn set_conversation_project_validates_the_project_exists_first() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Unassigned".to_string()))
+            .create_conversation(Some("Unassigned".to_string()), None)
             .expect("conversation created");
 
         let error = db
@@ -7636,7 +7641,7 @@ mod tests {
         let (db, path) = test_db();
         let project = db.create_project("Doomed project").expect("created");
         let conversation = db
-            .create_conversation(Some("Survives project deletion".to_string()))
+            .create_conversation(Some("Survives project deletion".to_string()), None)
             .expect("conversation created");
         db.set_conversation_project(&conversation.id, Some(&project.id))
             .expect("assigned");
@@ -7792,7 +7797,7 @@ mod tests {
     fn set_conversation_persona_validates_the_persona_exists_first() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Unassigned".to_string()))
+            .create_conversation(Some("Unassigned".to_string()), None)
             .expect("conversation created");
 
         let error = db
@@ -7827,7 +7832,7 @@ mod tests {
     fn a_conversation_can_have_an_independent_project_and_persona_at_once() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Both assigned".to_string()))
+            .create_conversation(Some("Both assigned".to_string()), None)
             .expect("conversation created");
         let project = db.create_project("Research").expect("project created");
         let persona = db
@@ -7853,7 +7858,7 @@ mod tests {
             .create_persona("Doomed persona", "Be terse.", None, None, None, None)
             .expect("created");
         let conversation = db
-            .create_conversation(Some("Survives persona deletion".to_string()))
+            .create_conversation(Some("Survives persona deletion".to_string()), None)
             .expect("conversation created");
         db.set_conversation_persona(&conversation.id, Some(&persona.id))
             .expect("assigned");
@@ -7887,7 +7892,7 @@ mod tests {
     fn create_attachment_stages_it_unlinked_with_a_computed_hash_and_size() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Attach here".to_string()))
+            .create_conversation(Some("Attach here".to_string()), None)
             .expect("conversation created");
 
         let attachment = db
@@ -7915,10 +7920,10 @@ mod tests {
     fn list_conversation_attachments_returns_only_this_conversations_rows_in_creation_order() {
         let (db, path) = test_db();
         let conversation_a = db
-            .create_conversation(Some("A".to_string()))
+            .create_conversation(Some("A".to_string()), None)
             .expect("conversation created");
         let conversation_b = db
-            .create_conversation(Some("B".to_string()))
+            .create_conversation(Some("B".to_string()), None)
             .expect("conversation created");
         db.create_attachment(&conversation_a.id, "first.txt", "1")
             .expect("attached");
@@ -7941,7 +7946,7 @@ mod tests {
     fn get_attachment_content_returns_the_full_stored_text() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Content check".to_string()))
+            .create_conversation(Some("Content check".to_string()), None)
             .expect("conversation created");
         let attachment = db
             .create_attachment(&conversation.id, "notes.txt", "the full body")
@@ -7965,7 +7970,7 @@ mod tests {
     fn delete_attachment_only_succeeds_while_still_staged() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Delete check".to_string()))
+            .create_conversation(Some("Delete check".to_string()), None)
             .expect("conversation created");
         let staged = db
             .create_attachment(&conversation.id, "staged.txt", "content")
@@ -8011,10 +8016,10 @@ mod tests {
     fn link_attachments_to_message_rejects_the_whole_call_if_any_id_is_invalid() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Link check".to_string()))
+            .create_conversation(Some("Link check".to_string()), None)
             .expect("conversation created");
         let other_conversation = db
-            .create_conversation(Some("Other".to_string()))
+            .create_conversation(Some("Other".to_string()), None)
             .expect("conversation created");
         let valid = db
             .create_attachment(&conversation.id, "valid.txt", "content")
@@ -8057,7 +8062,7 @@ mod tests {
     fn link_attachments_to_message_returns_content_alongside_the_linked_summary() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Link content".to_string()))
+            .create_conversation(Some("Link content".to_string()), None)
             .expect("conversation created");
         let attachment = db
             .create_attachment(&conversation.id, "notes.txt", "the body text")
@@ -8104,7 +8109,7 @@ mod tests {
     fn deleting_a_conversation_cascades_to_its_attachments() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Doomed conversation".to_string()))
+            .create_conversation(Some("Doomed conversation".to_string()), None)
             .expect("conversation created");
         let attachment = db
             .create_attachment(&conversation.id, "notes.txt", "content")
@@ -8126,7 +8131,7 @@ mod tests {
     fn search_results_carry_a_snippet_and_non_matching_results_carry_none() {
         let (db, path) = test_db();
         let matching = db
-            .create_conversation(Some("Weather report".to_string()))
+            .create_conversation(Some("Weather report".to_string()), None)
             .expect("conversation created");
         db.append_message(
             &matching.id,
@@ -8139,7 +8144,7 @@ mod tests {
             None,
         )
         .expect("message appended");
-        db.create_conversation(Some("Unrelated conversation".to_string()))
+        db.create_conversation(Some("Unrelated conversation".to_string()), None)
             .expect("conversation created");
 
         let page = db
@@ -8172,7 +8177,7 @@ mod tests {
         let mut ids = Vec::new();
         for index in 0..7 {
             let conversation = db
-                .create_conversation(Some(format!("Conversation {index}")))
+                .create_conversation(Some(format!("Conversation {index}")), None)
                 .expect("conversation created");
             let project = if index < 5 { "project-a" } else { "project-b" };
             db.connection
@@ -8278,7 +8283,7 @@ mod tests {
     fn unicode_fts_search_stays_consistent_across_writes_deletes_and_rebuild() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Résumé РЕЦЕПТ 東京計画".to_string()))
+            .create_conversation(Some("Résumé РЕЦЕПТ 東京計画".to_string()), None)
             .expect("conversation created");
         let message = db
             .append_message(
@@ -8486,7 +8491,7 @@ mod tests {
     fn recursive_branch_queries_are_bounded_indexed_and_meet_the_100ms_target() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Long branch".to_string()))
+            .create_conversation(Some("Long branch".to_string()), None)
             .expect("conversation created");
         db.transaction(|| {
             for index in 0..250 {
@@ -8575,7 +8580,7 @@ mod tests {
     fn get_active_messages_page_bounds_depth_and_reports_whether_older_messages_remain() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Long branch".to_string()))
+            .create_conversation(Some("Long branch".to_string()), None)
             .expect("conversation created");
         db.transaction(|| {
             for index in 0..250 {
@@ -8649,7 +8654,7 @@ mod tests {
     fn get_active_message_ids_matches_the_full_active_path_on_a_branched_conversation() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Branched".to_string()))
+            .create_conversation(Some("Branched".to_string()), None)
             .expect("conversation created");
 
         db.transaction(|| {
@@ -8709,7 +8714,7 @@ mod tests {
     fn loads_active_append_only_branch_path() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Branch".to_string()))
+            .create_conversation(Some("Branch".to_string()), None)
             .expect("conversation created");
 
         let user = db
@@ -8781,7 +8786,7 @@ mod tests {
     fn lists_and_switches_assistant_branch_alternatives() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Alternatives".to_string()))
+            .create_conversation(Some("Alternatives".to_string()), None)
             .expect("conversation created");
 
         let user = db
@@ -8886,7 +8891,7 @@ mod tests {
     fn set_message_branch_name_labels_clears_and_is_visible_in_alternatives() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Naming".to_string()))
+            .create_conversation(Some("Naming".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -8964,7 +8969,7 @@ mod tests {
 
         // Emoji: each is a multi-byte UTF-8 scalar. The old byte-slice implementation could
         // panic by cutting mid-codepoint; char-based truncation cannot.
-        let emoji_conversation = db.create_conversation(None).expect("conversation created");
+        let emoji_conversation = db.create_conversation(None, None).expect("conversation created");
         let emoji_content =
             "😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗😚😙🥲😋😛😜🤪😝🤑🤗🤭🤫🤔🤐🤨😐😑😶🙄😏😣😥😮";
         db.maybe_title_conversation(&emoji_conversation.id, emoji_content)
@@ -8976,7 +8981,7 @@ mod tests {
         );
 
         // CJK: dense multi-byte content with no whitespace to split on.
-        let cjk_conversation = db.create_conversation(None).expect("conversation created");
+        let cjk_conversation = db.create_conversation(None, None).expect("conversation created");
         let cjk_content = "这是一个非常长的中文句子用来测试标题生成功能是否能够正确处理多字节字符而不会导致程序崩溃或者产生无效的UTF八编码";
         db.maybe_title_conversation(&cjk_conversation.id, cjk_content)
             .expect("titles CJK content");
@@ -8985,7 +8990,7 @@ mod tests {
 
         // Combining marks: a base character plus combining diacritics — still valid to
         // truncate at a char (scalar) boundary even though it may split a grapheme cluster.
-        let combining_conversation = db.create_conversation(None).expect("conversation created");
+        let combining_conversation = db.create_conversation(None, None).expect("conversation created");
         let combining_content = "e\u{0301}\u{0301}\u{0301} ".repeat(30); // "é" built from combining acute accents
         db.maybe_title_conversation(&combining_conversation.id, &combining_content)
             .expect("titles combining-mark content");
@@ -8995,7 +9000,7 @@ mod tests {
         assert!(titled.title.chars().count() <= 65);
 
         // RTL (Arabic) and a long no-space string, in one message.
-        let rtl_conversation = db.create_conversation(None).expect("conversation created");
+        let rtl_conversation = db.create_conversation(None, None).expect("conversation created");
         let rtl_content = "هذا نص طويل جداً باللغة العربية لاختبار توليد العنوان بشكل صحيح دون أي أعطال في البرنامج";
         db.maybe_title_conversation(&rtl_conversation.id, rtl_content)
             .expect("titles RTL content");
@@ -9003,7 +9008,7 @@ mod tests {
         assert!(titled.title.chars().count() <= 65);
 
         // Leading whitespace and newlines: split_whitespace() must not produce an empty title.
-        let whitespace_conversation = db.create_conversation(None).expect("conversation created");
+        let whitespace_conversation = db.create_conversation(None, None).expect("conversation created");
         db.maybe_title_conversation(&whitespace_conversation.id, "   \n\n  hello world  \n")
             .expect("titles whitespace-padded content");
         let titled = db
@@ -9012,7 +9017,7 @@ mod tests {
         assert_eq!(titled.title, "hello world");
 
         // Fully empty/whitespace-only content falls back to the default title, not a panic.
-        let empty_conversation = db.create_conversation(None).expect("conversation created");
+        let empty_conversation = db.create_conversation(None, None).expect("conversation created");
         db.maybe_title_conversation(&empty_conversation.id, "   \n\t  ")
             .expect("titles empty content without panicking");
         let titled = db.get_conversation(&empty_conversation.id).expect("reload");
@@ -9031,7 +9036,7 @@ mod tests {
     fn append_to_message_content_reconstructs_a_large_response_from_batched_checkpoints() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Long response".to_string()))
+            .create_conversation(Some("Long response".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9092,7 +9097,7 @@ mod tests {
     fn transaction_commits_all_writes_on_success() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Txn commit".to_string()))
+            .create_conversation(Some("Txn commit".to_string()), None)
             .expect("conversation created");
 
         let user_id = db
@@ -9157,7 +9162,7 @@ mod tests {
     fn transaction_rolls_back_all_writes_when_a_later_statement_fails() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Txn rollback".to_string()))
+            .create_conversation(Some("Txn rollback".to_string()), None)
             .expect("conversation created");
 
         let result = db.transaction(|| {
@@ -9333,7 +9338,7 @@ mod tests {
     fn finish_message_if_active_transitions_active_messages_and_reports_change() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Cancellation".to_string()))
+            .create_conversation(Some("Cancellation".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9383,7 +9388,7 @@ mod tests {
     fn finish_message_if_active_is_a_no_op_on_already_terminal_messages() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Idempotent cancel".to_string()))
+            .create_conversation(Some("Idempotent cancel".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9441,7 +9446,7 @@ mod tests {
     fn finish_message_if_active_first_writer_wins_under_concurrent_terminal_transitions() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Race".to_string()))
+            .create_conversation(Some("Race".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9727,7 +9732,7 @@ mod tests {
         assert!(provider.capabilities.requires_auth);
 
         let conversation = db
-            .create_conversation(Some("Remote chat".to_string()))
+            .create_conversation(Some("Remote chat".to_string()), None)
             .expect("conversation created");
         db.connection
             .execute(
@@ -9798,7 +9803,7 @@ mod tests {
     fn recovers_stale_streaming_and_pending_messages_as_interrupted() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Recovery".to_string()))
+            .create_conversation(Some("Recovery".to_string()), None)
             .expect("conversation created");
 
         let user = db
@@ -9883,7 +9888,7 @@ mod tests {
     fn keep_partial_message_promotes_interrupted_to_complete_without_losing_content() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Keep partial".to_string()))
+            .create_conversation(Some("Keep partial".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9931,7 +9936,7 @@ mod tests {
     fn discard_interrupted_message_falls_back_to_completed_sibling() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Discard with sibling".to_string()))
+            .create_conversation(Some("Discard with sibling".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -9999,7 +10004,7 @@ mod tests {
     fn discard_interrupted_message_falls_back_to_parent_when_no_sibling_exists() {
         let (db, path) = test_db();
         let conversation = db
-            .create_conversation(Some("Discard without sibling".to_string()))
+            .create_conversation(Some("Discard without sibling".to_string()), None)
             .expect("conversation created");
         let user = db
             .append_message(
@@ -10058,7 +10063,7 @@ mod tests {
     #[test]
     fn note_create_list_update_delete_round_trip() {
         let (db, path) = test_db();
-        let conversation = db.create_conversation(None).expect("conversation created");
+        let conversation = db.create_conversation(None, None).expect("conversation created");
 
         let created = db
             .create_note(&conversation.id, "first draft")
@@ -10092,8 +10097,8 @@ mod tests {
     #[test]
     fn list_conversation_notes_returns_only_this_conversations_rows() {
         let (db, path) = test_db();
-        let conversation_a = db.create_conversation(None).expect("conversation a");
-        let conversation_b = db.create_conversation(None).expect("conversation b");
+        let conversation_a = db.create_conversation(None, None).expect("conversation a");
+        let conversation_b = db.create_conversation(None, None).expect("conversation b");
 
         db.create_note(&conversation_a.id, "a's note")
             .expect("note a created");
@@ -10382,7 +10387,7 @@ mod tests {
     #[test]
     fn conversation_response_style_check_constraint_rejects_an_unlisted_value() {
         let (db, path) = test_db();
-        let conversation = db.create_conversation(None).expect("conversation created");
+        let conversation = db.create_conversation(None, None).expect("conversation created");
         // Calls the DB layer directly with a value Rust-level `validate_response_style` would
         // already reject — proving the storage-layer CHECK constraint (defense in depth) is
         // itself real and not just documentation, independent of the Rust allow-list.

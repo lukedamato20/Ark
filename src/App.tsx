@@ -234,8 +234,8 @@ function ConversationSidebarContainer({
       searchSnippets={catalog.searchSnippets}
       showArchived={catalog.showArchived}
       onToggleCollapsed={controller.toggleSidebar}
-      onCreate={() => {
-        void controller.createConversation();
+      onCreate={(projectId) => {
+        void controller.createConversation(false, projectId);
         onNavigate?.();
       }}
       onCreateProject={async (name) => {

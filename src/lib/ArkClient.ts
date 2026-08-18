@@ -330,7 +330,7 @@ export interface ArkClient {
 
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
   listPinnedConversations(limit?: number): Promise<Conversation[]>;
-  createConversation(title?: string): Promise<Conversation>;
+  createConversation(title?: string, projectId?: string | null): Promise<Conversation>;
   renameConversation(id: string, title: string): Promise<Conversation>;
   /** FTR-004: each field independently `null`/omitted clears that override tier back to
    * "inherit the provider default" — always send the complete current draft, not a partial patch. */
@@ -638,7 +638,8 @@ export function createTauriArkClient(): ArkClient {
         },
       }),
     listPinnedConversations: (limit = 50) => invoke<Conversation[]>("list_pinned_conversations", { limit }),
-    createConversation: (title) => invoke<Conversation>("create_conversation", { title }),
+    createConversation: (title, projectId) =>
+      invoke<Conversation>("create_conversation", { title, projectId: projectId ?? null }),
     renameConversation: (id, title) => invoke<Conversation>("rename_conversation", { request: { id, title } }),
     updateConversationSettings: (input) =>
       invoke<Conversation>("update_conversation_settings", {
