@@ -96,6 +96,7 @@ interface ChatViewProps {
   /** UX-007: bumped by an explicit "New Chat"/conversation-select action (see `ShellState`'s own
    * doc comment) — focuses the composer, never on a passive background update. */
   focusComposerSignal: number;
+  composerDraft: string;
   onMessagesChange: (messages: Message[]) => void;
   onConversationDeleted: () => void;
   onConversationImported: (conversation: Conversation) => void;
@@ -108,6 +109,7 @@ interface ChatViewProps {
   onRefreshProviderModels: (providerId: string) => Promise<void>;
   onError: (message: string) => void;
   onInfo: (message: string) => void;
+  onDraftChange: (draft: string) => void;
 }
 
 export function ChatView({
@@ -123,6 +125,7 @@ export function ChatView({
   isLoadingOlderMessages,
   onLoadOlderMessages,
   focusComposerSignal,
+  composerDraft,
   onMessagesChange,
   onConversationDeleted,
   onConversationImported,
@@ -132,9 +135,10 @@ export function ChatView({
   onRefreshProviderModels,
   onError,
   onInfo,
+  onDraftChange,
 }: ChatViewProps) {
   const client = useArkClient();
-  const [draft, setDraft] = React.useState("");
+  const [draft, setDraft] = React.useState(composerDraft);
   const [isSending, setIsSending] = React.useState(false);
   const [isRenaming, setIsRenaming] = React.useState(false);
   const [titleDraft, setTitleDraft] = React.useState("");
@@ -160,6 +164,8 @@ export function ChatView({
   /** PERF-003: see `MessageScrollContainer`'s `suppressNextMutationRef` doc comment — set by
    * `ChatMessageList`'s "Load earlier messages" handler right before it prepends older content. */
   const loadOlderSuppressRef = React.useRef(false);
+
+  React.useEffect(() => onDraftChange(draft), [draft, onDraftChange]);
 
   // UX-007: focuses the composer only on an explicit "New Chat"/select action (see
   // `focusComposerSignal`'s doc comment on `ShellState`) — a plain `useEffect` on `conversation`
@@ -287,8 +293,10 @@ export function ChatView({
     Boolean(conversation && provider && model && selectedModelAvailable && draft.trim()) && !activeAssistant;
 
   React.useEffect(() => {
-    const conversationChanged = previousConversationIdRef.current !== conversation?.id;
+    const previousConversationId = previousConversationIdRef.current;
+    const conversationChanged = previousConversationId !== conversation?.id;
     previousConversationIdRef.current = conversation?.id;
+    if (conversationChanged && previousConversationId !== undefined) setDraft("");
 
     setProviderId((currentProviderId) => {
       const currentProviderStillExists = providers.some((item) => item.id === currentProviderId);
@@ -915,17 +923,6 @@ export function ChatView({
           >
             <GitBranch className="h-4 w-4" aria-hidden="true" />
           </button>
-          <ProviderModelDropdown
-            providers={providers}
-            models={models}
-            providerHealth={providerHealth}
-            providerId={providerId}
-            model={model}
-            onSelect={(nextProviderId, nextModel) => {
-              setProviderId(nextProviderId);
-              setModel(nextModel);
-            }}
-          />
           <ConversationSettingsButton
             conversation={conversation}
             provider={provider}
@@ -1143,6 +1140,17 @@ export function ChatView({
             />
             <div className="flex items-center justify-between px-1 pt-2">
               <div className="flex items-center gap-2">
+                <ProviderModelDropdown
+                  providers={providers}
+                  models={models}
+                  providerHealth={providerHealth}
+                  providerId={providerId}
+                  model={model}
+                  onSelect={(nextProviderId, nextModel) => {
+                    setProviderId(nextProviderId);
+                    setModel(nextModel);
+                  }}
+                />
                 <Button
                   variant="ghost"
                   size="sm"

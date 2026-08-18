@@ -11,7 +11,6 @@ use std::path::Path;
 pub const CODE_RUN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MAX_STEPS: u32 = 12;
 pub const DEFAULT_MAX_ACTIVE_MS: u64 = 10 * 60 * 1_000;
-pub const DEFAULT_MAX_TOKENS: u64 = 32_768;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,12 +152,90 @@ pub struct CodeRunEvent {
     pub created_at: String,
 }
 
+/// Lightweight process event: notification only. Clients refetch `CodeRunDetail` and use the
+/// durable event sequence to detect duplicates/gaps rather than rendering this payload as truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRunUpdatedEvent {
+    pub run_id: String,
+    pub session_id: String,
+    pub sequence: u64,
+    pub schema_version: u32,
+    pub state: CodeRunState,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeSessionDetail {
     pub session: CodeSession,
     pub runs: Vec<CodeAgentRun>,
     pub events: Vec<CodeRunEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSessionRepository {
+    pub session_id: String,
+    pub root_path: String,
+    pub repository_identity_hash: String,
+    pub branch_name: String,
+    pub base_commit_oid: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeGitCheckpoint {
+    pub id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub invocation_id: String,
+    pub commit_oid: String,
+    pub parent_commit_oid: String,
+    pub tree_oid: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeCommandDefinition {
+    pub id: String,
+    pub label: String,
+    pub program: String,
+    pub arguments: Vec<String>,
+    pub timeout_seconds: u32,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewCodeSessionRepository<'a> {
+    pub session_id: &'a str,
+    pub root_path: &'a str,
+    pub repository_identity_hash: &'a str,
+    pub branch_name: &'a str,
+    pub base_commit_oid: &'a str,
+}
+
+pub struct NewCodeGitCheckpoint<'a> {
+    pub session_id: &'a str,
+    pub run_id: &'a str,
+    pub invocation_id: &'a str,
+    pub commit_oid: &'a str,
+    pub parent_commit_oid: &'a str,
+    pub tree_oid: &'a str,
+    pub message: &'a str,
+}
+
+pub struct SaveCodeCommandDefinition<'a> {
+    pub id: Option<&'a str>,
+    pub label: &'a str,
+    pub program: &'a str,
+    pub arguments: &'a [String],
+    pub timeout_seconds: u32,
+    pub enabled: bool,
 }
 
 pub struct NewCodeRun<'a> {
@@ -228,6 +305,7 @@ pub struct CodeAgentStep {
     pub state: CodeAgentStepState,
     pub reserved_tokens: u64,
     pub actual_tokens: Option<u64>,
+    pub streaming_text: Option<String>,
     pub created_at: String,
 }
 
@@ -285,7 +363,13 @@ pub struct CodeToolInvocation {
     pub step_id: String,
     pub tool_name: String,
     pub canonical_arguments_json: String,
+    pub call_hash: String,
     pub state: CodeToolInvocationState,
+    pub preview: Option<String>,
+    pub preview_hash: Option<String>,
+    pub precondition_hash: Option<String>,
+    pub approved_at: Option<String>,
+    pub verification_outcome: Option<CodeRecoveryOutcome>,
     pub created_at: String,
 }
 
@@ -296,6 +380,11 @@ pub enum CodeObservationKind {
     ToolError,
     ModelText,
     System,
+    /// G2/RC-03: persisted when a tool-free model response is rejected because it did not meet the
+    /// completion contract (no current-run evidence, unresolved error, or empty text). The content
+    /// explains the missing condition and is injected into the next provider turn so the model can
+    /// correct its behaviour without consuming a silent context slot.
+    CompletionRejected,
 }
 
 impl CodeObservationKind {
@@ -305,6 +394,7 @@ impl CodeObservationKind {
             Self::ToolError => "tool_error",
             Self::ModelText => "model_text",
             Self::System => "system",
+            Self::CompletionRejected => "completion_rejected",
         }
     }
 }
@@ -318,6 +408,7 @@ impl TryFrom<&str> for CodeObservationKind {
             "tool_error" => Ok(Self::ToolError),
             "model_text" => Ok(Self::ModelText),
             "system" => Ok(Self::System),
+            "completion_rejected" => Ok(Self::CompletionRejected),
             _ => Err(AppError::new(
                 "code_observation_kind_invalid",
                 "Ark Code found an unknown durable observation kind and refused to guess.",
@@ -350,31 +441,119 @@ pub struct CodeRunDetail {
     pub events: Vec<CodeRunEvent>,
 }
 
-/// Inputs for `Database::commit_code_agent_step` — bundles everything one `code_agent::run_step`
-/// call produces after its provider call and (at most one) tool execution complete, so it can be
-/// persisted in a single transaction. `tool_call` and `model_text` are each optional and
-/// independent: a step may produce either, both, or (defensively) neither.
-pub struct NewCodeAgentStep<'a> {
+/// Inputs for the ADR-0003 pre-dispatch claim. The step row, conservative token reservation, and
+/// executor lease are committed together before any provider request can leave the process.
+pub struct NewCodeAgentStepClaim<'a> {
     pub run_id: &'a str,
     pub step_index: u32,
-    pub prompt_manifest_json: String,
+    pub prompt_manifest_json: &'a str,
+    /// Visible, durable notice when CODE-006 omitted older context to fit this model. The same
+    /// summary is supplied to the provider as untrusted context; omitted content is never
+    /// silently represented as complete.
+    pub context_compaction_summary: Option<&'a str>,
     pub reserved_tokens: u64,
+    pub reserved_cost_microunits: Option<u64>,
+    pub executor_lease_id: &'a str,
+    pub executor_lease_expires_at: &'a str,
+}
+
+/// Inputs for `Database::commit_code_agent_step` — bundles everything one already-reserved and
+/// dispatched step produces after its provider call and all accepted tool executions complete,
+/// so they can be persisted in a single ownership-checked transaction. `tool_calls` (G2/RC-08:
+/// now a `Vec` to support multiple executed read-only calls per step), `model_text`, and
+/// `completion_rejection` are each optional and independent.
+pub struct NewCodeAgentStep<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub executor_lease_id: &'a str,
+    pub executor_lease_expires_at: &'a str,
+    pub step_index: u32,
     pub actual_tokens: Option<u64>,
     pub active_elapsed_ms_delta: u64,
     pub model_text: Option<String>,
-    pub tool_call: Option<NewCodeToolCallOutcome<'a>>,
-    /// `Observing` when a tool call was executed (ready for the next step); `Completed` when the
-    /// model returned a final answer with no tool call.
+    /// G2/RC-08: all tool calls executed (or proposed) in this step. Read-only calls all execute;
+    /// approval-capable calls are represented as proposals; at most one approval per step.
+    pub tool_calls: Vec<NewCodeToolCallOutcome<'a>>,
+    /// G2/RC-03: typed reason when a tool-free response was rejected. Persisted as a
+    /// `completion_rejected` observation that the next provider turn will see as context.
+    pub completion_rejection: Option<String>,
+    /// `Observing` when tool calls ran (ready for next step); `Completed` when the model's final
+    /// answer was accepted; `AwaitingApproval` when a write proposal is pending.
     pub new_run_state: CodeRunState,
+    pub terminal_reason: Option<&'a str>,
+}
+
+/// Ownership-checked terminalization of a claimed step. A dispatched provider request whose
+/// usage is unknown retains its conservative reservation; known pre-dispatch or post-response
+/// outcomes release it and record any authoritative usage that was returned.
+pub struct FinishCodeAgentStep<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub executor_lease_id: &'a str,
+    pub step_state: CodeAgentStepState,
+    pub run_state: CodeRunState,
+    pub terminal_reason: &'a str,
+    pub event_kind: &'a str,
+    pub event_summary: &'a str,
+    pub actual_tokens: Option<u64>,
+    pub active_elapsed_ms_delta: u64,
+    pub retain_reservation: bool,
 }
 
 pub struct NewCodeToolCallOutcome<'a> {
+    pub provider_call_id: Option<&'a str>,
     pub tool_name: &'a str,
     pub canonical_arguments_json: String,
     pub scope_json: String,
     pub succeeded: bool,
     /// The tool's result content on success, or a bounded error message on failure.
-    pub observation_content: String,
+    pub observation_content: Option<String>,
+    /// Present only for a write proposal. A proposal is persisted in `proposed` state and pauses
+    /// the run; it never produces a tool observation until approved or denied.
+    pub approval_preview: Option<CodeApprovalPreview>,
+    pub loop_detected: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodeApprovalPreview {
+    pub content: String,
+    pub call_hash: String,
+    pub preview_hash: String,
+    pub precondition_hash: String,
+}
+
+impl From<crate::code_write_tools::EditFilePreview> for CodeApprovalPreview {
+    fn from(value: crate::code_write_tools::EditFilePreview) -> Self {
+        Self {
+            content: value.diff,
+            call_hash: value.call_hash,
+            preview_hash: value.preview_hash,
+            precondition_hash: value.precondition_hash,
+        }
+    }
+}
+
+/// Hash-bound local-user authorization for one already persisted edit proposal.
+pub struct ApproveCodeEdit<'a> {
+    pub run_id: &'a str,
+    pub invocation_id: &'a str,
+    pub tool_name: &'a str,
+    pub call_hash: &'a str,
+    pub preview_hash: &'a str,
+    pub precondition_hash: &'a str,
+    pub execution_lease_id: &'a str,
+    pub execution_lease_expires_at: &'a str,
+    pub verification_plan_json: &'a str,
+}
+
+pub struct FinalizeCodeEdit<'a> {
+    pub run_id: &'a str,
+    pub invocation_id: &'a str,
+    pub tool_name: &'a str,
+    pub execution_lease_id: &'a str,
+    pub outcome: CodeRecoveryOutcome,
+    pub evidence_json: &'a str,
+    pub observation_content: &'a str,
 }
 
 pub const MAX_TASK_CHARS: usize = 4_000;
@@ -468,6 +647,15 @@ pub fn repository_snapshot(root: &Path) -> Result<(String, String), AppError> {
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn serialize_json<T: Serialize + ?Sized>(value: &T) -> Result<String, AppError> {
+    serde_json::to_string(value).map_err(|_| {
+        AppError::new(
+            "code_serialization_failed",
+            "Ark Code could not safely serialize durable execution data.",
+        )
+    })
 }
 
 fn hash_json<T: Serialize>(value: &T) -> Result<String, AppError> {

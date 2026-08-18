@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.ark.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1420",
+    "beforeBuildCommand": "node node_modules/typescript/bin/tsc && node node_modules/vite/bin/vite.js build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },

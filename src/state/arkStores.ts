@@ -26,6 +26,7 @@ export interface EntityCollection<T> {
 
 export interface ConversationCatalogState {
   conversations: EntityCollection<Conversation>;
+  pinnedConversations: EntityCollection<Conversation>;
   nextCursor: string | null;
   search: string;
   isLoading: boolean;
@@ -36,6 +37,7 @@ export interface ConversationCatalogState {
   /** FTR-002: when true, archived conversations are included in the fetched page alongside
    * active ones, rather than the default active-only view. */
   showArchived: boolean;
+  selectedProjectId: string | null;
 }
 
 export interface TranscriptState {
@@ -87,6 +89,9 @@ export interface CodeState {
   activeId?: string;
   detail?: CodeSessionDetail;
   isLoading: boolean;
+  scrollTop: number;
+  composerDraft: string;
+  composerFocused: boolean;
 }
 
 export interface SettingsState {
@@ -95,6 +100,7 @@ export interface SettingsState {
   /** FTR-003: portable workspace-wide instruction fallback. */
   applicationInstructions: string | null;
   theme: ThemeMode;
+  accentPalette: import("../types/ark").AccentPalette;
   builtInStatus: BuiltInRuntimeStatus;
   builtInModelPath: string | null;
   managedModelDirectory: string | null;
@@ -126,6 +132,8 @@ export interface ShellState {
    * focus the composer — never on a passive background update (a reconciliation refetch, a
    * provider health poll), which would steal focus from whatever the user is actually doing. */
   focusComposerSignal: number;
+  chatComposerDraft: string;
+  newChatConfirmationRequested: boolean;
   shortcutsOpen: boolean;
   error: string | null;
   info: string | null;
@@ -151,11 +159,13 @@ export function createArkStores(initial?: {
   return {
     catalog: createExternalStore<ConversationCatalogState>({
       conversations: emptyEntityCollection(),
+      pinnedConversations: emptyEntityCollection(),
       nextCursor: null,
       search: "",
       isLoading: false,
       searchSnippets: {},
       showArchived: false,
+      selectedProjectId: null,
     }),
     transcript: createExternalStore<TranscriptState>({
       messages: [],
@@ -178,12 +188,16 @@ export function createArkStores(initial?: {
     code: createExternalStore<CodeState>({
       sessions: emptyEntityCollection(),
       isLoading: false,
+      scrollTop: 0,
+      composerDraft: "",
+      composerFocused: false,
     }),
     settings: createExternalStore<SettingsState>({
       workspacePath: "",
       workspace: null,
       applicationInstructions: null,
       theme: initial?.theme ?? "dark",
+      accentPalette: "blue",
       builtInStatus: {
         running: false,
         binaryInstalled: false,
@@ -208,6 +222,8 @@ export function createArkStores(initial?: {
       rightPanelCollapsed: initial?.rightPanelCollapsed ?? false,
       focusSearchSignal: 0,
       focusComposerSignal: 0,
+      chatComposerDraft: "",
+      newChatConfirmationRequested: false,
       shortcutsOpen: false,
       error: null,
       info: null,

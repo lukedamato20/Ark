@@ -15,10 +15,9 @@
 //! `edit_file` reuses CODE-004's `RepositoryContext`, `enforce_tool`, and `relative_display` from
 //! `code_tools` rather than duplicating Repository confinement, and is registered in that
 //! module's `ark_code_tools()` so it appears in the same tool registry — but, per that module's
-//! `provider_tool_definitions()` doc comment, it is deliberately not offered to the model yet:
-//! there is no agent loop that gates a model-proposed write behind human approval before
-//! dispatch. Today `edit_file` is reachable only through its own direct Tauri commands, which the
-//! frontend approval UI calls after a human has reviewed the diff.
+//! The agent may create a durable proposal, but execution remains a separate hash-bound command
+//! that requires an explicit local-user approval. Model output can therefore never dispatch this
+//! write directly.
 //!
 //! Git-branch-scoped checkpoint/rollback and an allowlisted command-execution tool are the other
 //! two write-capable tools CODE-005 calls for; both remain unimplemented (see
@@ -48,11 +47,11 @@ pub struct EditBlock {
 
 /// The typed shape `call_hash` is computed over. Field order (and therefore the hash) is fixed
 /// by this struct definition, not by whatever order a caller happened to send JSON keys in.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditFileArguments {
-    path: String,
-    edits: Vec<EditBlock>,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditFileArguments {
+    pub path: String,
+    pub edits: Vec<EditBlock>,
 }
 
 /// The typed shape `precondition_hash` is computed over: which file, and what it must currently
@@ -97,6 +96,20 @@ pub struct EditFileOutcome {
     pub expected_after_hash: String,
     pub observed_after_hash: String,
     pub outcome: code_sessions::CodeRecoveryOutcome,
+}
+
+/// Strictly decodes and canonicalizes a provider proposal before previewing it. The returned
+/// JSON is the exact argument representation persisted beside the approval hashes.
+pub fn preview_provider_edit_file(
+    context: &RepositoryContext,
+    arguments: &serde_json::Value,
+) -> Result<(String, EditFilePreview), AppError> {
+    let arguments: EditFileArguments = serde_json::from_value(arguments.clone()).map_err(|_| {
+        AppError::invalid_input("edit_file arguments do not match the declared tool schema.")
+    })?;
+    let canonical = code_sessions::serialize_json(&arguments)?;
+    let preview = preview_edit_file(context, &arguments.path, arguments.edits)?;
+    Ok((canonical, preview))
 }
 
 pub fn preview_edit_file(
@@ -180,6 +193,25 @@ pub fn execute_edit_file(
         expected_after_hash,
         observed_after_hash,
         outcome,
+    })
+}
+
+/// Read-only verifier used after an execution error. It never retries or repairs the write.
+pub fn verify_edit_file_outcome(
+    context: &RepositoryContext,
+    relative_path: &str,
+    before_hash: &str,
+    expected_after_hash: &str,
+) -> Result<EditFileOutcome, AppError> {
+    enforce_tool(context, EDIT_FILE_TOOL_ID)?;
+    let (_path, relative, content) = read_editable_file(context, relative_path)?;
+    let observed_after_hash = code_sessions::sha256_hex(content.as_bytes());
+    Ok(EditFileOutcome {
+        path: relative,
+        before_hash: before_hash.to_string(),
+        expected_after_hash: expected_after_hash.to_string(),
+        outcome: classify_recovery_outcome(&observed_after_hash, before_hash, expected_after_hash),
+        observed_after_hash,
     })
 }
 

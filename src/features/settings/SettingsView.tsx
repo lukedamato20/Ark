@@ -29,6 +29,7 @@ import { getErrorMessage } from "../../lib/arkErrors";
 import { downloadText, safeFilename } from "../../lib/download";
 import { RESPONSE_STYLE_OPTIONS, TONE_OPTIONS } from "../../lib/generationPresets";
 import { SUGGESTED_OLLAMA_MODELS, type SuggestedOllamaModel } from "../../lib/ollamaSuggestedModels";
+import { assessHardwareFit, presentModel } from "../../lib/modelPresentation";
 import { detectIsMacPlatform, formatShortcutKeys } from "../../lib/platform";
 import { useBreakpoint } from "../../lib/useBreakpoint";
 import { validateNumberInput } from "../../lib/numberField";
@@ -37,13 +38,16 @@ import { SETTINGS_SECTIONS, type SettingsSectionId } from "../../lib/settingsSec
 import { SHORTCUTS } from "../../lib/shortcuts";
 import { useArkClient } from "../../lib/useArkClient";
 import type {
+  AccentPalette,
   AppErrorShape,
   AuditEvent,
   BackupResult,
   BuiltInRuntimeStatus,
+  CodeCommandDefinition,
   CompanionApiStatus,
   DiagnosticsBundle,
   ManagedModelDownloadProgress,
+  HardwareFitEvidence,
   ManagedModelOperation,
   ManagedModelPreflight,
   ManagedModelStatus,
@@ -70,6 +74,7 @@ import type {
 } from "../../types/ark";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
+import { Card } from "../../ui/card";
 import { Input } from "../../ui/input";
 import { NumberField } from "../../ui/numberField";
 import { Panel } from "../../ui/panel";
@@ -89,6 +94,7 @@ interface SettingsViewProps {
   applicationInstructions: string | null;
   onApplicationInstructionsChange: (instructions: string | null) => Promise<void>;
   theme: ThemeMode;
+  accentPalette: AccentPalette;
   workspace?: WorkspaceInfo | null;
   builtInStatus: BuiltInRuntimeStatus;
   onBuiltInStatusChange: (status: BuiltInRuntimeStatus) => void;
@@ -107,6 +113,7 @@ interface SettingsViewProps {
   perfMetricsEnabled: boolean;
   onPerfMetricsEnabledChange: (enabled: boolean) => void;
   onThemeChange: (theme: ThemeMode) => void;
+  onAccentPaletteChange: (palette: AccentPalette) => void;
   onWorkspaceChange: (workspace: WorkspaceInfo) => void;
   onProviderSaved: (provider: ProviderConfig) => void;
   onProviderDeleted: (id: string) => void;
@@ -134,6 +141,7 @@ export function SettingsView({
   applicationInstructions,
   onApplicationInstructionsChange,
   theme,
+  accentPalette,
   workspace,
   builtInStatus,
   onBuiltInStatusChange,
@@ -148,6 +156,7 @@ export function SettingsView({
   perfMetricsEnabled,
   onPerfMetricsEnabledChange,
   onThemeChange,
+  onAccentPaletteChange,
   onWorkspaceChange,
   onProviderSaved,
   onProviderDeleted,
@@ -324,6 +333,14 @@ export function SettingsView({
         </>
       );
       break;
+    case "tools":
+      sectionContent = (
+        <>
+          <ToolsPanel onError={onError} />
+          <CodeCommandAllowlistPanel onError={onError} />
+        </>
+      );
+      break;
     case "providers":
       sectionContent = (
         <Panel className="p-4">
@@ -376,17 +393,14 @@ export function SettingsView({
             aria-labelledby={provider ? `provider-tab-${provider.id}` : undefined}
           >
             {provider?.providerType === "built_in" ? (
-              <BuiltInRuntimeForm
-                key={provider.id}
-                status={builtInStatus}
-                onStatusChange={onBuiltInStatusChange}
-                modelPath={builtInModelPath}
-                onModelPathChange={onBuiltInModelPathChange}
-                managedModelDirectory={managedModelDirectory}
-                onManagedModelDirectoryChange={onManagedModelDirectoryChange}
-                onRefreshProviderModels={onRefreshProviderModels}
-                onError={onError}
-              />
+              <div className="grid gap-3 text-sm">
+                <p className="text-muted-foreground">
+                  The built-in runtime is configured through its reviewed model catalog in Settings → Models.
+                </p>
+                <Button variant="secondary" className="w-fit" onClick={() => onSettingsSectionChange("models")}>
+                  Manage local runtime
+                </Button>
+              </div>
             ) : provider ? (
               <ProviderForm
                 key={provider.id}
@@ -408,17 +422,45 @@ export function SettingsView({
       );
       break;
     case "models":
-      sectionContent =
-        modelPullProviders.length === 0 ? (
-          <Panel className="p-6 text-center">
-            <p className="text-sm text-muted-foreground">No Ollama provider configured yet.</p>
-            <Button variant="secondary" className="mt-3" onClick={() => onSettingsSectionChange("providers")}>
-              Go to Providers
-            </Button>
-          </Panel>
-        ) : (
-          <>
-            {modelPullProviders.map((p) => (
+      sectionContent = (
+        <>
+          {visibleProviders.some((candidate) => candidate.providerType === "built_in") && (
+            <Panel className="p-4">
+              <div className="mb-4">
+                <h3 className="font-medium">Managed local runtime</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Download, verify, load, and remove Ark-reviewed local models without leaving the model library.
+                </p>
+              </div>
+              <BuiltInRuntimeForm
+                status={builtInStatus}
+                onStatusChange={onBuiltInStatusChange}
+                modelPath={builtInModelPath}
+                onModelPathChange={onBuiltInModelPathChange}
+                managedModelDirectory={managedModelDirectory}
+                onManagedModelDirectoryChange={onManagedModelDirectoryChange}
+                onRefreshProviderModels={onRefreshProviderModels}
+                onError={onError}
+              />
+            </Panel>
+          )}
+          <ModelInventoryPanel
+            providers={visibleProviders.filter(
+              (candidate) => !candidate.capabilities.modelPull && candidate.providerType !== "built_in",
+            )}
+            models={models}
+          />
+          {modelPullProviders.length === 0 ? (
+            <Panel className="p-6 text-center">
+              <p className="text-sm text-muted-foreground">
+                Connect Ollama to browse and pull its curated local library.
+              </p>
+              <Button variant="secondary" className="mt-3" onClick={() => onSettingsSectionChange("providers")}>
+                Go to Providers
+              </Button>
+            </Panel>
+          ) : (
+            modelPullProviders.map((p) => (
               <OllamaModelsPanel
                 key={p.id}
                 provider={p}
@@ -427,31 +469,55 @@ export function SettingsView({
                 onRefreshProviderModels={onRefreshProviderModels}
                 onError={onError}
               />
-            ))}
-          </>
-        );
+            ))
+          )}
+        </>
+      );
       break;
     case "appearance":
       sectionContent = (
-        <Panel className="p-4">
-          <div className="flex gap-2">
-            <Button
-              variant={theme === "dark" ? "primary" : "secondary"}
-              aria-pressed={theme === "dark"}
-              onClick={() => onThemeChange("dark")}
-            >
-              <Moon className="h-4 w-4" />
-              Dark
-            </Button>
-            <Button
-              variant={theme === "light" ? "primary" : "secondary"}
-              aria-pressed={theme === "light"}
-              onClick={() => onThemeChange("light")}
-            >
-              <Sun className="h-4 w-4" />
-              Light
-            </Button>
+        <Panel className="space-y-5 p-4">
+          <div>
+            <h3 className="mb-2 text-sm font-medium">Theme</h3>
+            <div className="flex gap-2">
+              <Button
+                variant={theme === "dark" ? "primary" : "secondary"}
+                aria-pressed={theme === "dark"}
+                onClick={() => onThemeChange("dark")}
+              >
+                <Moon className="h-4 w-4" />
+                Dark
+              </Button>
+              <Button
+                variant={theme === "light" ? "primary" : "secondary"}
+                aria-pressed={theme === "light"}
+                onClick={() => onThemeChange("light")}
+              >
+                <Sun className="h-4 w-4" />
+                Light
+              </Button>
+            </div>
           </div>
+          {releaseCapabilities.features.accentPreview && (
+            <fieldset>
+              <legend className="mb-2 text-sm font-medium">Accent preview</legend>
+              <div className="flex flex-wrap gap-2">
+                {(["blue", "violet", "teal", "amber", "graphite"] as const).map((palette) => (
+                  <Button
+                    key={palette}
+                    variant={accentPalette === palette ? "primary" : "secondary"}
+                    aria-pressed={accentPalette === palette}
+                    onClick={() => onAccentPaletteChange(palette)}
+                    className="capitalize"
+                  >
+                    <span className="h-3 w-3 rounded-full bg-primary" aria-hidden="true" />
+                    {palette}
+                  </Button>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">Device-only preview using audited semantic palettes.</p>
+            </fieldset>
+          )}
         </Panel>
       );
       break;
@@ -675,7 +741,6 @@ export function SettingsView({
               </div>
             </div>
           </Panel>
-          <ToolsPanel onError={onError} />
           <CompanionApiPanel onError={onError} />
         </>
       );
@@ -742,6 +807,175 @@ export function SettingsView({
         </div>
       </div>
     </main>
+  );
+}
+
+function CodeCommandAllowlistPanel({ onError }: { onError: (message: string) => void }) {
+  const client = useArkClient();
+  const [definitions, setDefinitions] = React.useState<CodeCommandDefinition[]>([]);
+  const [editingId, setEditingId] = React.useState<string | null>(null);
+  const [label, setLabel] = React.useState("");
+  const [program, setProgram] = React.useState("");
+  const [argumentsText, setArgumentsText] = React.useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = React.useState("300");
+  const [enabled, setEnabled] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setDefinitions(await client.listCodeCommandDefinitions());
+    } catch (error) {
+      onError(getErrorMessage(error));
+    }
+  }, [client, onError]);
+
+  React.useEffect(() => void load(), [load]);
+
+  function edit(definition: CodeCommandDefinition) {
+    setEditingId(definition.id);
+    setLabel(definition.label);
+    setProgram(definition.program);
+    setArgumentsText(definition.arguments.join("\n"));
+    setTimeoutSeconds(String(definition.timeoutSeconds));
+    setEnabled(definition.enabled);
+  }
+
+  function clear() {
+    setEditingId(null);
+    setLabel("");
+    setProgram("");
+    setArgumentsText("");
+    setTimeoutSeconds("300");
+    setEnabled(true);
+  }
+
+  async function save() {
+    const timeout = Number(timeoutSeconds);
+    if (!label.trim() || !program.trim() || !Number.isInteger(timeout)) return;
+    setBusy(true);
+    try {
+      await client.saveCodeCommandDefinition({
+        id: editingId,
+        label: label.trim(),
+        program: program.trim(),
+        arguments: argumentsText.split("\n").filter((argument) => argument.length > 0),
+        timeoutSeconds: timeout,
+        enabled,
+      });
+      clear();
+      await load();
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    try {
+      await client.deleteCodeCommandDefinition(id);
+      if (editingId === id) clear();
+      await load();
+    } catch (error) {
+      onError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel className="space-y-4 p-4">
+      <div>
+        <h2 className="text-sm font-semibold">Ark Code verification commands</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Define exact test, build, or lint commands. Models can select only these fixed templates; every run still
+          requires inline approval. Shell programs and scripts are rejected.
+        </p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="grid gap-1.5 text-sm">
+          Label
+          <Input
+            value={label}
+            maxLength={80}
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="Rust tests"
+          />
+        </label>
+        <label className="grid gap-1.5 text-sm">
+          Executable name
+          <Input
+            value={program}
+            maxLength={128}
+            spellCheck={false}
+            onChange={(event) => setProgram(event.target.value)}
+            placeholder="cargo"
+          />
+        </label>
+      </div>
+      <label className="grid gap-1.5 text-sm">
+        Fixed arguments (one per line)
+        <Textarea
+          value={argumentsText}
+          rows={3}
+          spellCheck={false}
+          onChange={(event) => setArgumentsText(event.target.value)}
+          placeholder={"test\n--all-targets"}
+        />
+      </label>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="grid gap-1.5 text-sm">
+          Timeout (seconds)
+          <Input
+            type="number"
+            min={1}
+            max={1800}
+            value={timeoutSeconds}
+            onChange={(event) => setTimeoutSeconds(event.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-2 pb-2 text-sm">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enabled
+        </label>
+        <Button disabled={busy || !label.trim() || !program.trim()} onClick={() => void save()}>
+          <Save className="h-4 w-4" /> {editingId ? "Update command" : "Add command"}
+        </Button>
+        {editingId && (
+          <Button variant="ghost" onClick={clear}>
+            Cancel
+          </Button>
+        )}
+      </div>
+      <div className="space-y-2">
+        {definitions.map((definition) => (
+          <div
+            key={definition.id}
+            className="flex flex-wrap items-center gap-2 rounded-md border border-border p-3 text-sm"
+          >
+            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => edit(definition)}>
+              <span className="block font-medium">{definition.label}</span>
+              <code className="block truncate text-xs text-muted-foreground">
+                {[definition.program, ...definition.arguments].join(" ")}
+              </code>
+            </button>
+            <Badge tone={definition.enabled ? "success" : "muted"}>{definition.enabled ? "enabled" : "disabled"}</Badge>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`Delete ${definition.label}`}
+              disabled={busy}
+              onClick={() => void remove(definition.id)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        {definitions.length === 0 && (
+          <p className="text-xs text-muted-foreground">No verification commands configured.</p>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -822,7 +1056,7 @@ function ApplicationInstructionsPanel({
  * widths, via `useBreakpoint` in the parent) — the same `role="tablist"`/`role="tab"` semantics
  * either way, just a different `aria-orientation` and layout direction.
  */
-function SettingsNav({
+export function SettingsNav({
   active,
   onSelect,
   orientation,
@@ -831,11 +1065,39 @@ function SettingsNav({
   onSelect: (section: SettingsSectionId) => void;
   orientation: "vertical" | "horizontal";
 }) {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const currentIndex = tabs.indexOf(event.target as HTMLButtonElement);
+    if (currentIndex < 0) return;
+
+    let nextIndex: number | null = null;
+    if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else if (
+      (orientation === "horizontal" && event.key === "ArrowRight") ||
+      (orientation === "vertical" && event.key === "ArrowDown")
+    ) {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (
+      (orientation === "horizontal" && event.key === "ArrowLeft") ||
+      (orientation === "vertical" && event.key === "ArrowUp")
+    ) {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    }
+
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = tabs[nextIndex];
+    nextTab.focus();
+    nextTab.click();
+  };
+
   return (
     <nav
       role="tablist"
       aria-label="Settings sections"
       aria-orientation={orientation}
+      onKeyDown={handleKeyDown}
       className={cn(
         "shrink-0 gap-0.5",
         orientation === "vertical"
@@ -851,6 +1113,7 @@ function SettingsNav({
           id={`settings-tab-${section.id}`}
           aria-selected={section.id === active}
           aria-controls="settings-panel"
+          tabIndex={section.id === active ? 0 : -1}
           onClick={() => onSelect(section.id)}
           className={cn(
             "shrink-0 whitespace-nowrap rounded-md px-3 text-left text-sm font-medium transition-colors",
@@ -2345,21 +2608,63 @@ function ProviderForm({
   );
 }
 
-/** FTR-006: the bounded subset of Ollama's `/api/tags` plus `/api/show` metadata Ark surfaces.
- * The backend derives `arkShow` and never retains Ollama's potentially large full license body. */
-interface OllamaModelDetails {
-  family?: string;
-  parameter_size?: string;
-  quantization_level?: string;
+function useHardwareFitEvidence(): HardwareFitEvidence | null {
+  const client = useArkClient();
+  const [evidence, setEvidence] = React.useState<HardwareFitEvidence | null>(null);
+  React.useEffect(() => {
+    let active = true;
+    void client
+      .getHardwareFitEvidence()
+      .then((value) => {
+        if (active) setEvidence(value);
+      })
+      .catch(() => {
+        if (active) setEvidence(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [client]);
+  return evidence;
 }
 
-interface OllamaModelMetadata {
-  size?: number;
-  details?: OllamaModelDetails;
-  arkShow?: {
-    contextWindow?: number;
-    licenseSummary?: string;
-  };
+function ModelInventoryPanel({ providers, models }: { providers: ProviderConfig[]; models: ModelInfo[] }) {
+  const hardware = useHardwareFitEvidence();
+  const entries = providers.flatMap((provider) =>
+    models.filter((model) => model.providerId === provider.id).map((model) => ({ provider, model })),
+  );
+  if (entries.length === 0) return null;
+  return (
+    <Panel className="p-4">
+      <h3 className="text-sm font-semibold">Your Models</h3>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2" role="list">
+        {entries.map(({ provider, model }) => {
+          const presentation = presentModel(model, provider, hardware?.availableMemoryBytes);
+          return (
+            <Card key={model.id} className="p-3" role="listitem">
+              <div className="flex items-start justify-between gap-2">
+                <h4 className="truncate text-sm font-semibold">{presentation.displayName}</h4>
+                <Badge tone={model.isAvailable ? "success" : "warning"}>
+                  {model.isAvailable ? "available" : "stale"}
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {presentation.sourceLabel} · {presentation.metadataConfidence} metadata
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground" title={presentation.fitReason}>
+                Hardware fit: {presentation.fit.replaceAll("_", " ")} · {presentation.fitConfidence} confidence
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {model.supportsTools && <Badge tone="muted">tools</Badge>}
+                {model.supportsVision && <Badge tone="muted">vision</Badge>}
+                {model.contextWindow && <Badge tone="muted">{model.contextWindow.toLocaleString()} context</Badge>}
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </Panel>
+  );
 }
 
 function OllamaModelsPanel({
@@ -2376,6 +2681,7 @@ function OllamaModelsPanel({
   onError: (message: string) => void;
 }) {
   const client = useArkClient();
+  const hardware = useHardwareFitEvidence();
   const [pullName, setPullName] = React.useState("");
   const [pulling, setPulling] = React.useState(false);
   const [cancelling, setCancelling] = React.useState(false);
@@ -2469,8 +2775,8 @@ function OllamaModelsPanel({
   // best-effort hint against a known size, not a general disk-space gate. A failed or
   // zero-valued check (the workspace's drive couldn't be resolved) never blocks the pull either;
   // see `checkDiskSpace`'s own doc comment for why this figure is an approximation.
-  async function handlePullClick() {
-    const name = pullName.trim();
+  async function handlePullClickFor(requestedName: string) {
+    const name = requestedName.trim();
     if (!name) return;
     setShowSuggestions(false);
 
@@ -2498,6 +2804,10 @@ function OllamaModelsPanel({
     await doPull(name);
   }
 
+  async function handlePullClick() {
+    await handlePullClickFor(pullName);
+  }
+
   function selectSuggestion(model: SuggestedOllamaModel) {
     setPullName(model.name);
     setShowSuggestions(false);
@@ -2514,7 +2824,8 @@ function OllamaModelsPanel({
   }
 
   async function handleDelete(model: ModelInfo) {
-    const sizeLabel = modelSizeLabel(model);
+    const sizeBytes = presentModel(model, provider, hardware?.availableMemoryBytes).sizeBytes;
+    const sizeLabel = sizeBytes ? formatBytes(sizeBytes) : null;
     const isDefaultModel = provider.defaultModelId === model.name;
     const confirmed = window.confirm(
       `Delete model "${model.name}" from Ollama${sizeLabel ? ` (${sizeLabel} on disk)` : ""}? This cannot be undone.` +
@@ -2546,19 +2857,6 @@ function OllamaModelsPanel({
     }
   }
 
-  function modelMetadata(model: ModelInfo): OllamaModelMetadata | null {
-    if (!model.metadataJson) return null;
-    try {
-      return JSON.parse(model.metadataJson) as OllamaModelMetadata;
-    } catch {
-      return null;
-    }
-  }
-
-  function modelSizeLabel(model: ModelInfo, metadata = modelMetadata(model)): string | null {
-    return metadata?.size ? formatBytes(metadata.size) : null;
-  }
-
   const pullPercent =
     pullProgress?.total && pullProgress.completed
       ? Math.round((pullProgress.completed / pullProgress.total) * 100)
@@ -2580,7 +2878,7 @@ function OllamaModelsPanel({
     <div className="mt-4 border-t border-border pt-4">
       <div className="mb-3 flex items-center gap-2">
         <HardDrive className="h-4 w-4" />
-        <h3 className="text-sm font-semibold">Installed models</h3>
+        <h3 className="text-sm font-semibold">Your Models</h3>
         <span className="ml-auto text-xs text-muted-foreground">
           {availableModels.length} model{availableModels.length !== 1 ? "s" : ""}
         </span>
@@ -2609,31 +2907,38 @@ function OllamaModelsPanel({
       {availableModels.length === 0 ? (
         <p className="text-sm text-muted-foreground">No models installed. Pull one below to get started.</p>
       ) : (
-        <div className="mb-4 divide-y divide-border rounded-md border border-border">
+        <div
+          className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+          role="list"
+          aria-label={`${provider.name} installed models`}
+        >
           {availableModels.map((model) => {
-            const metadata = modelMetadata(model);
-            const details = metadata?.details;
-            const sizeLabel = modelSizeLabel(model, metadata);
-            const contextWindow = model.contextWindow ?? metadata?.arkShow?.contextWindow;
+            const presentation = presentModel(model, provider, hardware?.availableMemoryBytes);
+            const sizeLabel = presentation.sizeBytes ? formatBytes(presentation.sizeBytes) : null;
             const detailParts = [
-              details?.parameter_size,
-              details?.quantization_level,
-              details?.family,
-              contextWindow ? `${contextWindow.toLocaleString()} token context` : undefined,
+              presentation.parameterSize,
+              presentation.quantization,
+              presentation.family,
+              presentation.contextWindow ? `${presentation.contextWindow.toLocaleString()} token context` : undefined,
             ].filter((part): part is string => Boolean(part));
             return (
-              <div key={model.id} className="flex items-center gap-3 px-3 py-2.5">
+              <Card key={model.id} className="flex min-w-0 items-start gap-3 p-3" role="listitem">
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium">{model.displayName ?? model.name}</span>
                   {detailParts.length > 0 && (
                     <span className="block text-xs text-muted-foreground">{detailParts.join(" · ")}</span>
                   )}
-                  {metadata?.arkShow?.licenseSummary && (
-                    <span
-                      className="block truncate text-xs text-muted-foreground"
-                      title={metadata.arkShow.licenseSummary}
-                    >
-                      License: {metadata.arkShow.licenseSummary}
+                  <span className="block text-xs text-muted-foreground">{presentation.sourceLabel}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Metadata confidence: {presentation.metadataConfidence}
+                  </span>
+                  <span className="block text-xs text-muted-foreground" title={presentation.fitReason}>
+                    Hardware fit: {presentation.fit.replaceAll("_", " ")} · {presentation.fitConfidence} confidence ·{" "}
+                    {presentation.fitMethodVersion}
+                  </span>
+                  {presentation.licenseSummary && (
+                    <span className="block truncate text-xs text-muted-foreground" title={presentation.licenseSummary}>
+                      License: {presentation.licenseSummary}
                     </span>
                   )}
                 </span>
@@ -2651,7 +2956,7 @@ function OllamaModelsPanel({
                     <Trash2 className="h-3.5 w-3.5" />
                   )}
                 </button>
-              </div>
+              </Card>
             );
           })}
         </div>
@@ -2675,10 +2980,80 @@ function OllamaModelsPanel({
           </div>
         )}
 
-        <p className="text-xs text-muted-foreground">
-          Browse Ark's curated offline suggestions, or enter any Ollama tag. Pulls are handled by your connected Ollama
-          instance.
-        </p>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold">Curated Ollama Library</h3>
+            <p className="text-xs text-muted-foreground">
+              Reviewed offline suggestions. Sizes are approximate; hardware fit is unknown until Ark can measure the
+              execution device.
+            </p>
+          </div>
+        </div>
+        <div
+          className="grid max-h-[28rem] grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3 overflow-y-auto pr-1"
+          role="list"
+          aria-label="Curated Ollama Library"
+        >
+          {SUGGESTED_OLLAMA_MODELS.map((suggestion) => {
+            const installed = availableModels.some((item) => item.name === suggestion.name);
+            const fit = assessHardwareFit(
+              suggestion.approxSizeGb * 1024 ** 3,
+              hardware?.availableMemoryBytes ?? null,
+              provider.destinationClass !== "loopback",
+            );
+            return (
+              <Card key={suggestion.name} className="flex min-w-0 flex-col gap-2 p-3" role="listitem">
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <h4 className="text-sm font-semibold">{suggestion.label}</h4>
+                    <Badge tone={installed ? "success" : "muted"}>
+                      {installed ? "installed" : suggestion.category}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">{suggestion.description}</p>
+                </div>
+                <dl className="grid grid-cols-2 gap-1 text-xs text-muted-foreground">
+                  <div>
+                    <dt className="sr-only">Download size</dt>
+                    <dd>~{suggestion.approxSizeGb} GB</dd>
+                  </div>
+                  <div>
+                    <dt className="sr-only">Hardware fit</dt>
+                    <dd title={fit.reason}>
+                      Fit: {fit.category.replaceAll("_", " ")} · {fit.confidence} confidence
+                    </dd>
+                  </div>
+                </dl>
+                <details className="text-xs text-muted-foreground">
+                  <summary className="cursor-pointer">Source and provenance</summary>
+                  <div className="mt-1 grid gap-1">
+                    <span>Reviewed by Ark on {suggestion.reviewedAt}; approximate metadata.</span>
+                    <button
+                      type="button"
+                      className="w-fit text-primary underline"
+                      onClick={() => void client.openExternalUrl(suggestion.sourceUrl)}
+                    >
+                      Open Ollama library source
+                    </button>
+                  </div>
+                </details>
+                <Button
+                  size="sm"
+                  className="mt-auto"
+                  variant={installed ? "secondary" : "primary"}
+                  disabled={installed || pulling || !reachable}
+                  onClick={() => {
+                    setPullName(suggestion.name);
+                    void handlePullClickFor(suggestion.name);
+                  }}
+                >
+                  {installed ? "Installed" : "Pull"}
+                </Button>
+              </Card>
+            );
+          })}
+        </div>
+        <p className="text-xs text-muted-foreground">Need another model? Enter any Ollama tag below.</p>
         <div className="flex gap-2">
           <div className="relative flex-1">
             <input
@@ -3432,6 +3807,13 @@ function ToolsPanel({ onError }: { onError: (message: string) => void }) {
                 </Badge>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">{tool.definition.description}</p>
+              {tool.definition.id === "web_search" && (
+                <div className="mt-2 rounded-md border border-warning/40 bg-warning/10 p-2 text-xs text-muted-foreground">
+                  Queries leave this device for Brave Search. Brave currently requires account/payment details, offers a
+                  monthly credit, and may retain query records for up to 90 days. Ark sends only the query after
+                  explicit tool approval; review current terms before enabling.
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground">
                 <span>Scope: {tool.definition.scope.data}</span>
                 <span aria-hidden="true">·</span>

@@ -229,6 +229,12 @@ export interface RepositoryGitDiff {
   staged: string;
 }
 
+export interface CodeRepositorySupport {
+  repositoryMap: RepositoryMap;
+  gitStatus: RepositoryGitStatus;
+  gitDiff: RepositoryGitDiff;
+}
+
 /** CODE-005: one search/replace block. `search` must match the target file's current content
  * exactly once (checked sequentially against each prior block's result within the same call). */
 export interface EditBlock {
@@ -282,6 +288,18 @@ export interface CodeSession {
   updatedAt: string;
 }
 
+/** CODE-005: an exact local-user command template. Models receive only its ID and label. */
+export interface CodeCommandDefinition {
+  id: string;
+  label: string;
+  program: string;
+  arguments: string[];
+  timeoutSeconds: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** ADR 0003: an immutable run attempt. Resume/retry creates a child run. */
 export interface CodeAgentRun {
   id: string;
@@ -321,6 +339,15 @@ export interface CodeRunEvent {
   createdAt: string;
 }
 
+/** Refetch notification only; `CodeRunDetail` remains authoritative. */
+export interface CodeRunUpdatedEvent {
+  runId: string;
+  sessionId: string;
+  sequence: number;
+  schemaVersion: number;
+  state: CodeRunState;
+}
+
 export interface CodeSessionDetail {
   session: CodeSession;
   runs: CodeAgentRun[];
@@ -337,6 +364,7 @@ export interface CodeAgentStep {
   state: CodeAgentStepState;
   reservedTokens: number;
   actualTokens?: number | null;
+  streamingText?: string | null;
   createdAt: string;
 }
 
@@ -351,11 +379,22 @@ export interface CodeToolInvocation {
   stepId: string;
   toolName: string;
   canonicalArgumentsJson: string;
+  callHash: string;
   state: CodeToolInvocationState;
+  preview?: string | null;
+  previewHash?: string | null;
+  preconditionHash?: string | null;
+  approvedAt?: string | null;
+  verificationOutcome?: CodeRecoveryOutcome | null;
   createdAt: string;
 }
 
-export type CodeObservationKind = "tool_result" | "tool_error" | "model_text" | "system";
+export type CodeObservationKind =
+  | "tool_result"
+  | "tool_error"
+  | "model_text"
+  | "system"
+  | "completion_rejected";
 
 export interface CodeObservation {
   id: string;
@@ -618,6 +657,7 @@ export interface AppBootstrap {
  */
 export interface DeviceSettings {
   theme: ThemeMode;
+  accentPalette: AccentPalette;
   builtInModelPath?: string | null;
   /** FTR-006: absolute device-local override for catalog-managed GGUF storage. Null uses Ark's
    * per-user application-data models directory. */
@@ -633,6 +673,8 @@ export interface DeviceSettings {
    * and appear in the diagnostics bundle's "Recent performance metrics" section. */
   perfMetricsEnabled: boolean;
 }
+
+export type AccentPalette = "blue" | "violet" | "teal" | "amber" | "graphite";
 
 export interface WorkspaceInfo {
   rootPath: string;
@@ -867,6 +909,14 @@ export interface ManagedModelPreflight {
   requiredDiskBytes: number;
   advisories: string[];
   advancedOverrideAllowed: boolean;
+}
+
+export interface HardwareFitEvidence {
+  totalMemoryBytes: number;
+  availableMemoryBytes: number;
+  executionDevice: "local_device";
+  acceleratorMemoryBytes?: number | null;
+  methodVersion: "ark-fit-v1";
 }
 
 export interface ManagedModelDownloadProgress {

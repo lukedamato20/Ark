@@ -5,6 +5,7 @@ import type {
   BuiltInRuntimeStatus,
   CodeAgentRun,
   CodeAgentStep,
+  CodeCommandDefinition,
   CodeObservation,
   CodeRunDetail,
   CodeSession,
@@ -147,6 +148,7 @@ export function createRuntimeProvenanceFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: status.modelPath,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -232,6 +234,7 @@ export function createSecretStoreFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -321,6 +324,7 @@ export function createWorkspaceProtectionFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -535,6 +539,7 @@ export function createLongConversationFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -1033,6 +1038,7 @@ export function createConversationOrganizationFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -1710,6 +1716,7 @@ export function createOllamaModelsFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -1816,6 +1823,22 @@ export function createBootstrapFailureFixtureClient(): ArkClient {
       throw { code: "ipc_unavailable", message: "Ark could not reach its local runtime." };
     },
   });
+}
+
+/**
+ * Deterministic startup fixture. The delay is intentionally long enough for Playwright to
+ * observe the actual bootstrap-owned startup surface, but it is not product behavior and is
+ * reachable only through Vite's development-only fixture switch.
+ */
+export function createDelayedBootstrapFixtureClient(): ArkClient {
+  const base = createConversationOrganizationFixtureClient();
+  return {
+    ...base,
+    getAppBootstrap: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return base.getAppBootstrap();
+    },
+  };
 }
 
 /** Deterministic, non-cryptographic stand-in for the Rust fixture's SHA-256 hashes — only needs
@@ -1926,6 +1949,7 @@ export function createCodeEditFixtureClient(): ArkClient {
     },
     deviceSettings: {
       theme: "dark",
+      accentPalette: "blue",
       builtInModelPath: null,
       crashCaptureEnabled: false,
       completionNotificationsEnabled: false,
@@ -1999,6 +2023,21 @@ export function createCodeEditFixtureClient(): ArkClient {
     getAppBootstrap: async () => bootstrap,
     getConversationMessages: async () => ({ messages: [], hasMoreOlder: false }),
     listCodeSessions: async () => Array.from(sessions.values()),
+    listCodeCommandDefinitions: async () => [],
+    saveCodeCommandDefinition: async (input) => {
+      const definition: CodeCommandDefinition = {
+        id: input.id ?? "fixture-command",
+        label: input.label,
+        program: input.program,
+        arguments: input.arguments,
+        timeoutSeconds: input.timeoutSeconds,
+        enabled: input.enabled,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      return definition;
+    },
+    deleteCodeCommandDefinition: async () => undefined,
     createCodeSession: async (input) => {
       const session: CodeSession = {
         id: `fixture-session-${sessions.size + 1}`,
@@ -2050,6 +2089,7 @@ export function createCodeEditFixtureClient(): ArkClient {
       runSteps.set(run.id, []);
       return run;
     },
+    initializeProjectGitRepository: async () => undefined,
     runCodeAgentStep: async (sessionId, runId) => {
       const run = runs.get(runId);
       if (!run || run.sessionId !== sessionId) {
@@ -2082,7 +2122,13 @@ export function createCodeEditFixtureClient(): ArkClient {
           stepId,
           toolName: "read_file",
           canonicalArgumentsJson: JSON.stringify({ path: filePath }),
+          callHash: "a".repeat(64),
           state: "applied",
+          preview: null,
+          previewHash: null,
+          preconditionHash: null,
+          approvedAt: null,
+          verificationOutcome: null,
           createdAt: timestamp,
         };
         observations.push({
@@ -2111,6 +2157,99 @@ export function createCodeEditFixtureClient(): ArkClient {
       run.updatedAt = timestamp;
       records.push({ step, invocation, observations });
       runSteps.set(runId, records);
+      return buildRunDetail(runId);
+    },
+    startCodeAgentRun: async (sessionId, runId) => {
+      const run = runs.get(runId);
+      if (!run || run.sessionId !== sessionId) {
+        throw { code: "not_found", message: "Ark Code run not found." };
+      }
+      const records = runSteps.get(runId) ?? [];
+      if (records.length === 0) {
+        const toolStepId = `fixture-step-${runId}-0`;
+        records.push({
+          step: {
+            id: toolStepId,
+            runId,
+            stepIndex: 0,
+            state: "completed",
+            reservedTokens: 512,
+            actualTokens: 96,
+            createdAt: timestamp,
+          },
+          invocation: {
+            id: `fixture-invocation-${runId}`,
+            runId,
+            stepId: toolStepId,
+            toolName: "read_file",
+            canonicalArgumentsJson: JSON.stringify({ path: filePath }),
+            callHash: "a".repeat(64),
+            state: "applied",
+            preview: null,
+            previewHash: null,
+            preconditionHash: null,
+            approvedAt: null,
+            verificationOutcome: null,
+            createdAt: timestamp,
+          },
+          observations: [
+            {
+              id: `fixture-observation-tool-${runId}`,
+              runId,
+              stepId: toolStepId,
+              kind: "tool_result",
+              content: fileContent,
+              createdAt: timestamp,
+            },
+          ],
+        });
+        const answerStepId = `fixture-step-${runId}-1`;
+        records.push({
+          step: {
+            id: answerStepId,
+            runId,
+            stepIndex: 1,
+            state: "completed",
+            reservedTokens: 512,
+            actualTokens: 96,
+            createdAt: timestamp,
+          },
+          observations: [
+            {
+              id: `fixture-observation-text-${runId}`,
+              runId,
+              stepId: answerStepId,
+              kind: "model_text",
+              content: "The greeting function looks correct and returns a static string as expected.",
+              createdAt: timestamp,
+            },
+          ],
+        });
+        runSteps.set(runId, records);
+        run.stepsUsed = 2;
+        run.actualTokens = 192;
+        run.state = "completed";
+        run.completedAt = timestamp;
+        run.updatedAt = timestamp;
+      }
+      return buildRunDetail(runId);
+    },
+    cancelCodeAgentRun: async (sessionId, runId) => {
+      const run = runs.get(runId);
+      if (!run || run.sessionId !== sessionId) {
+        throw { code: "not_found", message: "Ark Code run not found." };
+      }
+      if (!(
+        run.state === "completed" ||
+        run.state === "failed" ||
+        run.state === "cancelled" ||
+        run.state === "interrupted"
+      )) {
+        run.cancelRequestedAt = timestamp;
+        run.state = "cancelled";
+        run.terminalReason = "user_cancelled";
+        run.completedAt = timestamp;
+      }
       return buildRunDetail(runId);
     },
     getCodeRunDetail: async (runId) => buildRunDetail(runId),
@@ -2143,6 +2282,31 @@ export function createCodeEditFixtureClient(): ArkClient {
         observedAfterHash,
         outcome: observedAfterHash === fresh.expectedAfterHash ? "applied" : "diverged",
       };
+    },
+    codeApproveEdit: async (input) => {
+      const detail = buildRunDetail(input.runId);
+      if (detail.run.sessionId !== input.sessionId) throw { code: "not_found", message: "Ark Code run not found." };
+      const invocation = detail.invocations.find((item) => item.id === input.invocationId);
+      if (!invocation || invocation.state !== "proposed" || invocation.callHash !== input.callHash) {
+        throw { code: "code_edit_approval_stale", message: "This edit proposal changed or was already handled." };
+      }
+      invocation.state = "applied";
+      invocation.approvedAt = timestamp;
+      invocation.verificationOutcome = "applied";
+      detail.run.state = "observing";
+      return detail;
+    },
+    codeRejectEdit: async (input) => {
+      const detail = buildRunDetail(input.runId);
+      if (detail.run.sessionId !== input.sessionId) throw { code: "not_found", message: "Ark Code run not found." };
+      const invocation = detail.invocations.find((item) => item.id === input.invocationId);
+      if (!invocation || invocation.state !== "proposed" || invocation.callHash !== input.callHash) {
+        throw { code: "code_edit_approval_stale", message: "This edit proposal changed or was already handled." };
+      }
+      invocation.state = "denied";
+      detail.run.state = "interrupted";
+      detail.run.terminalReason = "edit_rejected";
+      return detail;
     },
   });
 }

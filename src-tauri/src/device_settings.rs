@@ -15,10 +15,23 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentPalette {
+    #[default]
+    Blue,
+    Violet,
+    Teal,
+    Amber,
+    Graphite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSettings {
     pub theme: String,
+    #[serde(default)]
+    pub accent_palette: AccentPalette,
     /// Absolute path to the last GGUF model file selected for the built-in runtime on this
     /// device. `None` until the user starts the built-in runtime at least once.
     pub built_in_model_path: Option<String>,
@@ -53,6 +66,7 @@ impl Default for DeviceSettings {
     fn default() -> Self {
         Self {
             theme: "dark".to_string(),
+            accent_palette: AccentPalette::default(),
             built_in_model_path: None,
             managed_model_directory: None,
             crash_capture_enabled: false,
@@ -178,6 +192,7 @@ mod tests {
     fn device_settings_round_trip_through_json() {
         let settings = DeviceSettings {
             theme: "light".to_string(),
+            accent_palette: AccentPalette::Violet,
             built_in_model_path: Some("C:\\models\\model.gguf".to_string()),
             managed_model_directory: Some("C:\\models".to_string()),
             crash_capture_enabled: true,
@@ -200,6 +215,7 @@ mod tests {
     fn device_settings_json_uses_camel_case_field_names() {
         let settings = DeviceSettings {
             theme: "dark".to_string(),
+            accent_palette: AccentPalette::Blue,
             built_in_model_path: Some("model.gguf".to_string()),
             managed_model_directory: None,
             crash_capture_enabled: false,
@@ -211,6 +227,7 @@ mod tests {
             json.contains("\"builtInModelPath\""),
             "expected camelCase field name in: {json}"
         );
+        assert!(json.contains("\"accentPalette\""));
         assert!(
             json.contains("\"managedModelDirectory\""),
             "expected camelCase managed-model field name in: {json}"
@@ -272,5 +289,17 @@ mod tests {
         // new store as-is — only "dark"/"light" are ever accepted.
         let settings = resolve_device_settings(None, Some("not-a-real-theme"));
         assert_eq!(settings.theme, "dark");
+    }
+
+    #[test]
+    fn old_files_default_the_accent_and_invalid_values_fail_closed() {
+        let old = resolve_device_settings(Some(r#"{"theme":"light"}"#), None);
+        assert_eq!(old.accent_palette, AccentPalette::Blue);
+
+        let invalid = resolve_device_settings(
+            Some(r#"{"theme":"light","accentPalette":"hot_pink"}"#),
+            None,
+        );
+        assert_eq!(invalid, DeviceSettings::default());
     }
 }

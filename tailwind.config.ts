@@ -50,15 +50,20 @@ const config = {
         sm: "calc(var(--radius) - 4px)",
       },
       fontFamily: {
-        sans: [
-          "Inter",
-          "ui-sans-serif",
-          "system-ui",
-          "-apple-system",
-          "BlinkMacSystemFont",
-          "Segoe UI",
-          "sans-serif",
-        ],
+        sans: ["var(--font-ui)"],
+        mono: ["var(--font-code)"],
+      },
+      fontSize: {
+        caption: ["var(--text-caption)", { lineHeight: "1rem", fontWeight: "400" }],
+        metadata: ["var(--text-metadata)", { lineHeight: "1.125rem", fontWeight: "400" }],
+        body: ["var(--text-body)", { lineHeight: "1.3125rem", fontWeight: "400" }],
+        emphasis: ["var(--text-emphasis)", { lineHeight: "1.5rem", fontWeight: "500" }],
+        section: ["var(--text-section)", { lineHeight: "1.5rem", fontWeight: "600" }],
+        view: ["var(--text-view)", { lineHeight: "1.875rem", fontWeight: "600" }],
+      },
+      boxShadow: {
+        surface: "var(--shadow-surface)",
+        elevated: "var(--shadow-elevated)",
       },
       // UX-009: named motion tokens — before this, transitions used a mix of duration-150,
       // duration-200, and (in framer-motion `transition` props, which don't read this Tailwind

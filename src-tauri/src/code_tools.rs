@@ -29,6 +29,7 @@ pub const SEARCH_TOOL_ID: &str = "search";
 pub const GIT_STATUS_TOOL_ID: &str = "git_status";
 pub const GIT_DIFF_TOOL_ID: &str = "git_diff";
 pub const REPOSITORY_MAP_TOOL_ID: &str = "repository_map";
+pub const REQUEST_CLARIFICATION_TOOL_ID: &str = "request_clarification";
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 500;
@@ -66,6 +67,15 @@ impl RepositoryContext {
         })?;
         let root = PathBuf::from(raw_root);
         // Revalidates availability and rejects a root replaced by a symlink since binding.
+        let root = crate::repository::resolve_existing_repository_path(&root, ".")?;
+        Ok(Self { root })
+    }
+
+    /// Reconstructs authority from a run's immutable, database-persisted Repository snapshot.
+    /// This is deliberately not public API: only Ark's durable run protocol may supply this
+    /// path, never a provider tool argument.
+    pub(crate) fn from_run_snapshot(snapshot: &str) -> Result<Self, AppError> {
+        let root = PathBuf::from(snapshot);
         let root = crate::repository::resolve_existing_repository_path(&root, ".")?;
         Ok(Self { root })
     }
@@ -153,6 +163,14 @@ pub struct RepositoryGitStatus {
 pub struct RepositoryGitDiff {
     pub working_tree: String,
     pub staged: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRepositorySupport {
+    pub repository_map: RepositoryMap,
+    pub git_status: RepositoryGitStatus,
+    pub git_diff: RepositoryGitDiff,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,17 +272,76 @@ pub fn ark_code_tools() -> Vec<ToolDefinition> {
             data: "Files inside the active Project's bound Repository".to_string(),
         },
     }))
+    .chain(std::iter::once(ToolDefinition {
+        id: REQUEST_CLARIFICATION_TOOL_ID.to_string(),
+        name: "Request clarification".to_string(),
+        description: "Pause safely and ask the user one concise question in the coding conversation."
+            .to_string(),
+        publisher: "Ark (built-in)".to_string(),
+        scope: CapabilityScope {
+            tier: CapabilityTier::RepositoryExecution,
+            read: false,
+            write: false,
+            network: false,
+            secret: false,
+            data: "Ark Code conversation control only".to_string(),
+        },
+    }))
+    .chain(std::iter::once(ToolDefinition {
+        id: crate::code_command_tools::RUN_COMMAND_TOOL_ID.to_string(),
+        name: "Run verification command".to_string(),
+        description: "Propose one exact, user-configured test/build/lint command and run it only after per-use approval."
+            .to_string(),
+        publisher: "Ark (built-in)".to_string(),
+        scope: CapabilityScope {
+            tier: CapabilityTier::RepositoryExecution,
+            read: true,
+            write: true,
+            network: false,
+            secret: false,
+            data: "One fixed command definition inside Ark Code's isolated Repository"
+                .to_string(),
+        },
+    }))
+    .chain(std::iter::once(ToolDefinition {
+        id: crate::code_git_tools::ROLLBACK_TOOL_ID.to_string(),
+        name: "Git rollback".to_string(),
+        description: "Propose and, once approved, restore Ark Code's isolated branch to one of its recorded checkpoints."
+            .to_string(),
+        publisher: "Ark (built-in)".to_string(),
+        scope: CapabilityScope {
+            tier: CapabilityTier::RepositoryExecution,
+            read: true,
+            write: true,
+            network: false,
+            secret: false,
+            data: "Files and commits produced inside Ark Code's isolated session Repository"
+                .to_string(),
+        },
+    }))
+    .chain(std::iter::once(ToolDefinition {
+        id: crate::code_git_tools::CHECKPOINT_TOOL_ID.to_string(),
+        name: "Git checkpoint".to_string(),
+        description: "Propose and, once approved, commit all reviewed changes on Ark Code's isolated session branch."
+            .to_string(),
+        publisher: "Ark (built-in)".to_string(),
+        scope: CapabilityScope {
+            tier: CapabilityTier::RepositoryExecution,
+            read: true,
+            write: true,
+            network: false,
+            secret: false,
+            data: "Git state inside Ark Code's isolated session Repository".to_string(),
+        },
+    }))
     .collect()
 }
 
 /// Model-facing schemas stay separate from permission definitions, as established by CODE-001.
 ///
-/// CODE-005's `edit_file` is deliberately absent here even though `ark_code_tools()` declares it:
-/// there is no agent loop yet that gates a model-initiated write behind human preview/approval
-/// before calling `execute_provider_call`, so offering it to a model would imply a safety path
-/// that does not exist. `edit_file` is reachable today only through its own direct
-/// `preview_edit_file`/`execute_edit_file` Tauri commands, which the frontend approval UI calls
-/// after a human has reviewed the diff.
+/// Write-capable schemas may appear here only when the agent loop treats them as proposals. The
+/// `edit_file` executor is intentionally not part of `execute_provider_call`; only the separate
+/// approval command may dispatch it after validating the persisted preview hashes.
 pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
     use serde_json::json;
     vec![
@@ -279,6 +356,85 @@ pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
                     "max_entries": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_ENTRIES}
                 },
                 "required": ["path"],
+                "additionalProperties": false
+            }),
+        },
+        ProviderToolDefinition {
+            name: crate::code_write_tools::EDIT_FILE_TOOL_ID.to_string(),
+            description: "Propose search/replace edits to one Repository text file. Ark will show the diff to the user and will not write until they explicitly approve it."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search": {"type": "string", "minLength": 1, "maxLength": 20000},
+                                "replace": {"type": "string", "maxLength": 20000}
+                            },
+                            "required": ["search", "replace"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            }),
+        },
+        ProviderToolDefinition {
+            name: crate::code_git_tools::CHECKPOINT_TOOL_ID.to_string(),
+            description: "Propose a Git checkpoint containing all current reviewed Repository changes. Ark will show the exact status and diff and will commit only after explicit approval."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "minLength": 1, "maxLength": 200}
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+        },
+        ProviderToolDefinition {
+            name: crate::code_git_tools::ROLLBACK_TOOL_ID.to_string(),
+            description: "Propose restoring Ark Code's isolated branch to a previously reported checkpoint ID. Ark verifies ownership and shows every removed change before approval."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                },
+                "required": ["checkpoint_id"],
+                "additionalProperties": false
+            }),
+        },
+        ProviderToolDefinition {
+            name: crate::code_command_tools::RUN_COMMAND_TOOL_ID.to_string(),
+            description: "Propose an enabled user-configured verification command by its ID. Only exact fixed templates listed in prior context are valid, and Ark requires per-use approval."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                },
+                "required": ["command_id"],
+                "additionalProperties": false
+            }),
+        },
+        ProviderToolDefinition {
+            name: REQUEST_CLARIFICATION_TOOL_ID.to_string(),
+            description: "Pause the run and ask the user one concise clarification question when proceeding would require a material guess."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "minLength": 1, "maxLength": 1000}
+                },
+                "required": ["question"],
                 "additionalProperties": false
             }),
         },
@@ -298,7 +454,9 @@ pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
         },
         ProviderToolDefinition {
             name: SEARCH_TOOL_ID.to_string(),
-            description: "Search non-ignored Repository text files for a literal string.".to_string(),
+            description: format!(
+                "Search non-ignored Repository text files for a literal string. max_results is optional and must be between 1 and {MAX_SEARCH_RESULTS}; omit it to use {DEFAULT_SEARCH_RESULTS}."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -315,7 +473,9 @@ pub fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
         empty_schema_tool(GIT_DIFF_TOOL_ID, "Inspect staged and unstaged Git diffs."),
         ProviderToolDefinition {
             name: REPOSITORY_MAP_TOOL_ID.to_string(),
-            description: "Build a bounded map of context-eligible Repository files.".to_string(),
+            description: format!(
+                "Build a bounded map of context-eligible Repository files. Call with an empty object to use the default; the only accepted field is optional max_entries between 1 and {MAX_MAP_ENTRIES}. The map contains paths and metadata, not file contents."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -386,10 +546,13 @@ pub async fn execute_provider_call(
 }
 
 fn decode_arguments<T: for<'de> Deserialize<'de>>(call: &ProviderToolCall) -> Result<T, AppError> {
-    serde_json::from_value(call.arguments.clone()).map_err(|_| {
+    serde_json::from_value(call.arguments.clone()).map_err(|error| {
         AppError::new(
             "invalid_tool_arguments",
-            format!("Ark Code tool '{}' received invalid arguments.", call.name),
+            format!(
+                "Ark Code tool '{}' received invalid arguments: {error}. Correct the arguments to match the tool schema before retrying.",
+                call.name
+            ),
         )
     })
 }
@@ -912,6 +1075,7 @@ async fn run_git(context: &RepositoryContext, args: &[&str]) -> Result<String, A
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let git_directory = validate_git_directory(context)?;
     let mut command = tokio::process::Command::new("git");
+    crate::process_window::hide_tokio_process_window(&mut command);
     command
         .arg("--no-pager")
         .arg("--literal-pathspecs")
@@ -1094,15 +1258,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_repository_scoped_and_model_schemas_stay_read_only() {
+    fn registry_is_repository_scoped_and_side_effects_are_proposals() {
         let tools = ark_code_tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 11);
         assert!(tools
             .iter()
             .all(|tool| tool.scope.tier == CapabilityTier::RepositoryExecution));
         let read_only: Vec<_> = tools
             .iter()
-            .filter(|tool| tool.id != crate::code_write_tools::EDIT_FILE_TOOL_ID)
+            .filter(|tool| tool.scope.read && !tool.scope.write)
             .collect();
         assert_eq!(read_only.len(), 6);
         assert!(read_only.iter().all(|tool| tool.scope.read
@@ -1114,14 +1278,22 @@ mod tests {
             .find(|tool| tool.id == crate::code_write_tools::EDIT_FILE_TOOL_ID)
             .expect("edit_file is registered");
         assert!(edit_file.scope.write);
+        for tool_id in [
+            crate::code_git_tools::CHECKPOINT_TOOL_ID,
+            crate::code_git_tools::ROLLBACK_TOOL_ID,
+            crate::code_command_tools::RUN_COMMAND_TOOL_ID,
+        ] {
+            assert!(tools
+                .iter()
+                .find(|tool| tool.id == tool_id)
+                .is_some_and(|tool| tool.scope.write));
+        }
 
-        // The model-facing tool-calling schema stays read-only-only until an agent loop exists
-        // that can gate a model-proposed edit_file call behind human approval before dispatch.
         let provider_tools = provider_tool_definitions();
-        assert_eq!(provider_tools.len(), read_only.len());
+        assert_eq!(provider_tools.len(), tools.len());
         assert!(provider_tools
             .iter()
-            .all(|tool| tool.name != crate::code_write_tools::EDIT_FILE_TOOL_ID));
+            .any(|tool| tool.name == crate::code_write_tools::EDIT_FILE_TOOL_ID));
         assert!(provider_tools
             .iter()
             .all(|tool| tool.input_schema["additionalProperties"] == false));
@@ -1234,6 +1406,41 @@ mod tests {
             .await
             .expect_err("unknown argument rejected");
         assert_eq!(error.code, "invalid_tool_arguments");
+        assert!(error.message.contains("unknown field `unexpected`"));
+        assert!(error.message.contains("match the tool schema"));
+
+        fs::remove_dir_all(root).expect("fixture removed");
+    }
+
+    #[tokio::test]
+    async fn every_model_supplied_repository_path_is_confined() {
+        let (project, root) = fixture();
+        let context = RepositoryContext::from_project(&project).expect("context created");
+        let calls = [
+            (
+                LIST_DIRECTORY_TOOL_ID,
+                serde_json::json!({"path": "../outside"}),
+            ),
+            (READ_FILE_TOOL_ID, serde_json::json!({"path": "../outside"})),
+            (
+                SEARCH_TOOL_ID,
+                serde_json::json!({"query": "secret", "path": "../outside"}),
+            ),
+        ];
+
+        for (name, arguments) in calls {
+            let error = execute_provider_call(
+                &context,
+                &ProviderToolCall {
+                    provider_call_id: None,
+                    name: name.to_string(),
+                    arguments,
+                },
+            )
+            .await
+            .expect_err("path traversal must fail");
+            assert_eq!(error.code, "invalid_repository_path", "tool {name}");
+        }
 
         fs::remove_dir_all(root).expect("fixture removed");
     }

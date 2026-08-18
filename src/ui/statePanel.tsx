@@ -1,6 +1,7 @@
-import { AlertTriangle, CheckCircle2, Inbox, Loader2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Inbox, XCircle } from "lucide-react";
 import * as React from "react";
 import { cn } from "../lib/cn";
+import { ActivityIndicator } from "./activityIndicator";
 
 /**
  * UX-004: one reusable state-presentation family (loading/empty/success/warning/error), used
@@ -10,8 +11,7 @@ import { cn } from "../lib/cn";
  */
 export type StatePanelTone = "loading" | "empty" | "success" | "warning" | "error";
 
-const TONE_ICON: Record<StatePanelTone, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
-  loading: Loader2,
+const TONE_ICON: Record<Exclude<StatePanelTone, "loading">, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
   empty: Inbox,
   success: CheckCircle2,
   warning: AlertTriangle,
@@ -19,7 +19,7 @@ const TONE_ICON: Record<StatePanelTone, React.ComponentType<React.SVGProps<SVGSV
 };
 
 const TONE_ICON_CLASS: Record<StatePanelTone, string> = {
-  loading: "text-muted-foreground animate-spin",
+  loading: "text-muted-foreground",
   empty: "text-muted-foreground",
   success: "text-emerald-600 dark:text-emerald-400",
   warning: "text-amber-600 dark:text-amber-400",
@@ -41,10 +41,14 @@ interface StatePanelProps {
 }
 
 export function StatePanel({ tone, title, description, detail, actions, role, className }: StatePanelProps) {
-  const Icon = TONE_ICON[tone];
+  const Icon = tone === "loading" ? null : TONE_ICON[tone];
   return (
     <div role={role} className={cn("flex flex-col items-center gap-3 px-6 text-center", className)}>
-      <Icon className={cn("h-8 w-8", TONE_ICON_CLASS[tone])} aria-hidden="true" />
+      {Icon ? (
+        <Icon className={cn("h-8 w-8", TONE_ICON_CLASS[tone])} aria-hidden="true" />
+      ) : (
+        <ActivityIndicator state="preparing" />
+      )}
       <div className="text-base font-semibold text-foreground">{title}</div>
       {description && <div className="max-w-md text-sm text-muted-foreground">{description}</div>}
       {detail && <div className="max-w-md text-xs text-muted-foreground/70">{detail}</div>}

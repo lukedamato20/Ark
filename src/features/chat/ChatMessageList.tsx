@@ -12,6 +12,7 @@ import { useArkStores } from "../../state/useArkStores";
 import type { Attachment, BranchAlternative, Message, ProviderConfig, SearchCitation } from "../../types/ark";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
+import { ActivityIndicator } from "../../ui/activityIndicator";
 import { MarkdownMessage } from "./MarkdownMessage";
 
 interface ChatMessageListProps {
@@ -678,10 +679,7 @@ const MessageBubble = React.memo(function MessageBubble({
             <MarkdownMessage content={throttledContent} isStreaming={isStreaming} />
           )
         ) : (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Thinking
-          </div>
+          <ActivityIndicator state={renderedMessage.status === "streaming" ? "generating" : "provider"} />
         )}
         {isUser && attachments && attachments.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">

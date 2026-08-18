@@ -7,6 +7,7 @@ use crate::errors::AppError;
 use crate::providers::ProviderConfig;
 use crate::workspace::WorkspaceInfo;
 use crate::AppState;
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,6 +154,16 @@ pub struct CodeSearchRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CodeRunSearchRequest {
+    pub run_id: String,
+    pub query: String,
+    pub path: Option<String>,
+    pub case_sensitive: Option<bool>,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodeRepositoryMapRequest {
     pub project_id: String,
     pub max_entries: Option<usize>,
@@ -182,6 +193,28 @@ pub struct CodeExecuteEditFileRequest {
     pub precondition_hash: String,
 }
 
+/// Approval of a proposal produced inside the conversation loop. The client echoes the exact
+/// persisted hashes it displayed; it never sends edit content separately.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeApproveEditRequest {
+    pub session_id: String,
+    pub run_id: String,
+    pub invocation_id: String,
+    pub call_hash: String,
+    pub preview_hash: String,
+    pub precondition_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRejectEditRequest {
+    pub session_id: String,
+    pub run_id: String,
+    pub invocation_id: String,
+    pub call_hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCodeSessionRequest {
@@ -205,6 +238,17 @@ pub struct CreateCodeRunRequest {
     pub max_tokens: Option<u64>,
     pub max_cost_microunits: Option<u64>,
     pub idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCodeCommandDefinitionRequest {
+    pub id: Option<String>,
+    pub label: String,
+    pub program: String,
+    pub arguments: Vec<String>,
+    pub timeout_seconds: u32,
+    pub enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -337,6 +381,14 @@ pub fn list_conversations(
     // replica so it stays responsive while a streaming generation holds the writer lock for a
     // checkpoint write.
     lock_read_db(&state)?.list_conversations_page(&request)
+}
+
+#[tauri::command]
+pub fn list_pinned_conversations(
+    state: State<'_, AppState>,
+    limit: u32,
+) -> Result<Vec<crate::chat::Conversation>, AppError> {
+    lock_read_db(&state)?.list_pinned_conversations(limit)
 }
 
 #[tauri::command]
@@ -568,6 +620,59 @@ pub async fn code_git_diff(
     crate::code_tools::git_diff(&context).await
 }
 
+fn code_run_repository_context(
+    state: &AppState,
+    run_id: &str,
+) -> Result<crate::code_tools::RepositoryContext, AppError> {
+    let run = lock_read_db(state)?.get_code_agent_run(run_id)?;
+    let workspace_root = {
+        let workspace = state
+            .workspace
+            .lock()
+            .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+        std::path::PathBuf::from(&workspace.root_path)
+    };
+    crate::code_git_tools::validate_run_repository(
+        &run.repository_path_snapshot,
+        &workspace_root,
+        &run.session_id,
+        &run.repository_identity_hash,
+    )
+}
+
+#[tauri::command]
+pub async fn get_code_run_repository_support(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<crate::code_tools::CodeRepositorySupport, AppError> {
+    let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
+    let context = code_run_repository_context(&state, run_id)?;
+    let repository_map = crate::code_tools::repository_map(&context, Some(1_000))?;
+    let git_status = crate::code_tools::git_status(&context).await?;
+    let git_diff = crate::code_tools::git_diff(&context).await?;
+    Ok(crate::code_tools::CodeRepositorySupport {
+        repository_map,
+        git_status,
+        git_diff,
+    })
+}
+
+#[tauri::command]
+pub fn search_code_run_repository(
+    state: State<'_, AppState>,
+    request: CodeRunSearchRequest,
+) -> Result<crate::code_tools::RepositorySearchResult, AppError> {
+    let run_id = crate::validation::validate_entity_id(&request.run_id, "Ark Code run ID")?;
+    let context = code_run_repository_context(&state, run_id)?;
+    crate::code_tools::search(
+        &context,
+        &request.query,
+        request.path.as_deref(),
+        request.case_sensitive.unwrap_or(false),
+        request.max_results,
+    )
+}
+
 #[tauri::command]
 pub fn code_preview_edit_file(
     state: State<'_, AppState>,
@@ -593,6 +698,549 @@ pub fn code_execute_edit_file(
             precondition_hash: request.precondition_hash,
         },
     )
+}
+
+#[tauri::command]
+pub async fn code_approve_edit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: CodeApproveEditRequest,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let session_id =
+        crate::validation::validate_entity_id(&request.session_id, "Ark Code session ID")?;
+    let run_id = crate::validation::validate_entity_id(&request.run_id, "Ark Code run ID")?;
+    let invocation_id = crate::validation::validate_entity_id(
+        &request.invocation_id,
+        "Ark Code tool invocation ID",
+    )?;
+    let (run, invocation) = {
+        let db = lock_read_db(&state)?;
+        let detail = db.get_code_run_detail(run_id)?;
+        if detail.run.session_id != session_id {
+            return Err(AppError::not_found("Ark Code run"));
+        }
+        let invocation = detail
+            .invocations
+            .into_iter()
+            .find(|item| item.id == invocation_id)
+            .ok_or_else(|| AppError::not_found("Ark Code edit proposal"))?;
+        (detail.run, invocation)
+    };
+    if invocation.tool_name == crate::code_command_tools::RUN_COMMAND_TOOL_ID {
+        let arguments: crate::code_command_tools::RunCommandArguments =
+            serde_json::from_str(&invocation.canonical_arguments_json).map_err(|_| {
+                AppError::new(
+                    "code_command_proposal_invalid",
+                    "The persisted command proposal could not be decoded safely.",
+                )
+            })?;
+        let definition =
+            lock_read_db(&state)?.get_code_command_definition(&arguments.command_id)?;
+        let workspace_root = {
+            let workspace = state
+                .workspace
+                .lock()
+                .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+            std::path::PathBuf::from(&workspace.root_path)
+        };
+        let context = crate::code_git_tools::validate_run_repository(
+            &run.repository_path_snapshot,
+            &workspace_root,
+            session_id,
+            &run.repository_identity_hash,
+        )?;
+        let fresh = crate::code_command_tools::preview_command(&context, arguments, definition)?;
+        if request.call_hash != invocation.call_hash
+            || Some(request.preview_hash.as_str()) != invocation.preview_hash.as_deref()
+            || Some(request.precondition_hash.as_str()) != invocation.precondition_hash.as_deref()
+            || fresh.call_hash != request.call_hash
+            || fresh.preview_hash != request.preview_hash
+            || fresh.precondition_hash != request.precondition_hash
+            || Some(fresh.content.as_str()) != invocation.preview.as_deref()
+        {
+            return Err(AppError::new(
+                "code_command_approval_stale",
+                "The command definition or proposal changed after it was shown.",
+            ));
+        }
+        if state
+            .active_code_runs
+            .lock()
+            .map_err(|_| AppError::new("state_error", "Could not access active Ark Code runs."))?
+            .contains_key(run_id)
+        {
+            return Err(AppError::new(
+                "code_run_already_active",
+                "This Ark Code run already has an active executor.",
+            ));
+        }
+        let execution_lease_id = uuid::Uuid::new_v4().to_string();
+        let execution_lease_expires_at = (Utc::now()
+            + ChronoDuration::seconds(i64::from(
+                fresh.definition.timeout_seconds.saturating_add(30),
+            )))
+        .to_rfc3339();
+        let verification_plan_json = crate::code_sessions::serialize_json(&serde_json::json!({
+            "kind": "command_v1",
+            "commandId": fresh.definition.id,
+            "definitionPreconditionHash": fresh.precondition_hash,
+        }))?;
+        lock_db(&state)?.begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+            run_id,
+            invocation_id,
+            tool_name: crate::code_command_tools::RUN_COMMAND_TOOL_ID,
+            call_hash: &request.call_hash,
+            preview_hash: &request.preview_hash,
+            precondition_hash: &request.precondition_hash,
+            execution_lease_id: &execution_lease_id,
+            execution_lease_expires_at: &execution_lease_expires_at,
+            verification_plan_json: &verification_plan_json,
+        })?;
+        let cancellation = std::sync::Arc::new(crate::code_agent::CodeRunCancellation::new());
+        state
+            .active_code_runs
+            .lock()
+            .map_err(|_| AppError::new("state_error", "Could not access active Ark Code runs."))?
+            .insert(run_id.to_string(), cancellation.clone());
+        let execution =
+            crate::code_command_tools::execute_command(&context, &fresh, &cancellation).await;
+        if let Ok(mut active) = state.active_code_runs.lock() {
+            active.remove(run_id);
+        }
+        let (outcome, evidence_json, observation) = match execution {
+            Ok(result) => (
+                result.outcome,
+                crate::code_sessions::serialize_json(&result)?,
+                crate::code_sessions::serialize_json(&result)?,
+            ),
+            Err(error) => (
+                crate::code_sessions::CodeRecoveryOutcome::Unknown,
+                crate::code_sessions::serialize_json(&serde_json::json!({
+                    "executionErrorCode": error.code,
+                    "executionError": error.message,
+                }))?,
+                "Ark could not classify the approved verification command safely. Inspect its effects before continuing."
+                    .to_string(),
+            ),
+        };
+        let detail = lock_db(&state)?.finalize_approved_code_edit(
+            &crate::code_sessions::FinalizeCodeEdit {
+                run_id,
+                invocation_id,
+                tool_name: crate::code_command_tools::RUN_COMMAND_TOOL_ID,
+                execution_lease_id: &execution_lease_id,
+                outcome,
+                evidence_json: &evidence_json,
+                observation_content: &observation,
+            },
+        )?;
+        return if detail.run.state == crate::code_sessions::CodeRunState::Observing {
+            crate::code_agent::start_run(app, &state, session_id, run_id)
+        } else {
+            Ok(detail)
+        };
+    }
+    if invocation.tool_name == crate::code_git_tools::ROLLBACK_TOOL_ID {
+        let arguments: crate::code_git_tools::GitRollbackArguments =
+            serde_json::from_str(&invocation.canonical_arguments_json).map_err(|_| {
+                AppError::new(
+                    "code_rollback_proposal_invalid",
+                    "The persisted Git rollback proposal could not be decoded safely.",
+                )
+            })?;
+        let (repository, target, checkpoint_oids) = {
+            let db = lock_read_db(&state)?;
+            let repository = db.get_code_session_repository(session_id)?;
+            let target = db.get_code_git_checkpoint(session_id, &arguments.checkpoint_id)?;
+            let checkpoint_oids = db
+                .list_code_git_checkpoints(session_id)?
+                .into_iter()
+                .map(|checkpoint| checkpoint.commit_oid)
+                .collect::<Vec<_>>();
+            (repository, target, checkpoint_oids)
+        };
+        let workspace_root = {
+            let workspace = state
+                .workspace
+                .lock()
+                .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+            std::path::PathBuf::from(&workspace.root_path)
+        };
+        let context = crate::code_git_tools::validate_run_repository(
+            &run.repository_path_snapshot,
+            &workspace_root,
+            session_id,
+            &run.repository_identity_hash,
+        )?;
+        let fresh = crate::code_git_tools::preview_rollback(
+            &context,
+            arguments,
+            &target.commit_oid,
+            &repository.base_commit_oid,
+            &checkpoint_oids,
+        )
+        .await?;
+        if request.call_hash != invocation.call_hash
+            || Some(request.preview_hash.as_str()) != invocation.preview_hash.as_deref()
+            || Some(request.precondition_hash.as_str()) != invocation.precondition_hash.as_deref()
+            || fresh.call_hash != request.call_hash
+            || fresh.preview_hash != request.preview_hash
+            || fresh.precondition_hash != request.precondition_hash
+            || Some(fresh.content.as_str()) != invocation.preview.as_deref()
+        {
+            return Err(AppError::new(
+                "code_rollback_approval_stale",
+                "Repository state or the rollback proposal changed after it was shown.",
+            ));
+        }
+        let execution_lease_id = uuid::Uuid::new_v4().to_string();
+        let execution_lease_expires_at = (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339();
+        let verification_plan_json = crate::code_sessions::serialize_json(&serde_json::json!({
+            "kind": "git_rollback_v1",
+            "beforeHeadOid": fresh.before_head_oid,
+            "beforeTreeOid": fresh.before_tree_oid,
+            "targetCommitOid": fresh.target_commit_oid,
+            "checkpointId": fresh.checkpoint_id,
+        }))?;
+        lock_db(&state)?.begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+            run_id,
+            invocation_id,
+            tool_name: crate::code_git_tools::ROLLBACK_TOOL_ID,
+            call_hash: &request.call_hash,
+            preview_hash: &request.preview_hash,
+            precondition_hash: &request.precondition_hash,
+            execution_lease_id: &execution_lease_id,
+            execution_lease_expires_at: &execution_lease_expires_at,
+            verification_plan_json: &verification_plan_json,
+        })?;
+        let execution = crate::code_git_tools::execute_rollback(
+            &context,
+            &fresh,
+            &repository.base_commit_oid,
+            &checkpoint_oids,
+        )
+        .await;
+        let (outcome, evidence_json, observation) = match execution {
+            Ok(result) => (
+                crate::code_sessions::CodeRecoveryOutcome::Applied,
+                crate::code_sessions::serialize_json(&result)?,
+                format!(
+                    "Ark Code restored its isolated branch to checkpoint {} and verified a clean Repository.",
+                    result.checkpoint_id
+                ),
+            ),
+            Err(error) => {
+                let outcome = crate::code_git_tools::verify_rollback(
+                    &context,
+                    &fresh.before_head_oid,
+                    &fresh.target_commit_oid,
+                )
+                .await;
+                (
+                    outcome,
+                    crate::code_sessions::serialize_json(&serde_json::json!({
+                        "executionErrorCode": error.code,
+                        "executionError": error.message,
+                        "verificationOutcome": outcome,
+                    }))?,
+                    "The approved rollback did not complete normally. Ark verified the isolated branch and stopped safely."
+                        .to_string(),
+                )
+            }
+        };
+        let detail = lock_db(&state)?.finalize_approved_code_edit(
+            &crate::code_sessions::FinalizeCodeEdit {
+                run_id,
+                invocation_id,
+                tool_name: crate::code_git_tools::ROLLBACK_TOOL_ID,
+                execution_lease_id: &execution_lease_id,
+                outcome,
+                evidence_json: &evidence_json,
+                observation_content: &observation,
+            },
+        )?;
+        return if detail.run.state == crate::code_sessions::CodeRunState::Observing {
+            crate::code_agent::start_run(app, &state, session_id, run_id)
+        } else {
+            Ok(detail)
+        };
+    }
+    if invocation.tool_name == crate::code_git_tools::CHECKPOINT_TOOL_ID {
+        let arguments: crate::code_git_tools::GitCheckpointArguments =
+            serde_json::from_str(&invocation.canonical_arguments_json).map_err(|_| {
+                AppError::new(
+                    "code_checkpoint_proposal_invalid",
+                    "The persisted Git checkpoint proposal could not be decoded safely.",
+                )
+            })?;
+        let workspace_root = {
+            let workspace = state
+                .workspace
+                .lock()
+                .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+            std::path::PathBuf::from(&workspace.root_path)
+        };
+        let context = crate::code_git_tools::validate_run_repository(
+            &run.repository_path_snapshot,
+            &workspace_root,
+            session_id,
+            &run.repository_identity_hash,
+        )?;
+        let fresh = crate::code_git_tools::preview_checkpoint(&context, arguments).await?;
+        if request.call_hash != invocation.call_hash
+            || Some(request.preview_hash.as_str()) != invocation.preview_hash.as_deref()
+            || Some(request.precondition_hash.as_str()) != invocation.precondition_hash.as_deref()
+            || fresh.call_hash != request.call_hash
+            || fresh.preview_hash != request.preview_hash
+            || fresh.precondition_hash != request.precondition_hash
+            || Some(fresh.content.as_str()) != invocation.preview.as_deref()
+        {
+            return Err(AppError::new(
+                "code_checkpoint_approval_stale",
+                "Repository state or the checkpoint proposal changed after it was shown.",
+            ));
+        }
+        let execution_lease_id = uuid::Uuid::new_v4().to_string();
+        let execution_lease_expires_at = (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339();
+        let verification_plan_json = crate::code_sessions::serialize_json(&serde_json::json!({
+            "kind": "git_checkpoint_v1",
+            "beforeHeadOid": fresh.head_oid,
+            "expectedTreeOid": fresh.tree_oid,
+            "branch": format!("refs/heads/ark/session/{session_id}"),
+        }))?;
+        lock_db(&state)?.begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+            run_id,
+            invocation_id,
+            tool_name: crate::code_git_tools::CHECKPOINT_TOOL_ID,
+            call_hash: &request.call_hash,
+            preview_hash: &request.preview_hash,
+            precondition_hash: &request.precondition_hash,
+            execution_lease_id: &execution_lease_id,
+            execution_lease_expires_at: &execution_lease_expires_at,
+            verification_plan_json: &verification_plan_json,
+        })?;
+
+        let execution = crate::code_git_tools::execute_checkpoint(&context, &fresh).await;
+        let (outcome, evidence_json, observation, checkpoint) = match execution {
+            Ok(checkpoint) => (
+                crate::code_sessions::CodeRecoveryOutcome::Applied,
+                crate::code_sessions::serialize_json(&checkpoint)?,
+                format!(
+                    "Git checkpoint {} was committed and verified on Ark Code's isolated branch.",
+                    checkpoint.commit_oid
+                ),
+                Some(checkpoint),
+            ),
+            Err(error) => {
+                let verification = crate::code_git_tools::verify_checkpoint(
+                    &context,
+                    &fresh.head_oid,
+                    &fresh.tree_oid,
+                )
+                .await;
+                let checkpoint =
+                    if verification.outcome == crate::code_sessions::CodeRecoveryOutcome::Applied {
+                        verification.observed_head_oid.as_ref().map(|commit_oid| {
+                            crate::code_git_tools::GitCheckpointOutcome {
+                                commit_oid: commit_oid.clone(),
+                                parent_commit_oid: fresh.head_oid.clone(),
+                                tree_oid: fresh.tree_oid.clone(),
+                                message: fresh.message.clone(),
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                (
+                    verification.outcome,
+                    crate::code_sessions::serialize_json(&serde_json::json!({
+                        "executionErrorCode": error.code,
+                        "executionError": error.message,
+                        "verification": verification,
+                    }))?,
+                    "The approved Git checkpoint did not complete normally. Ark verified the isolated branch and stopped safely."
+                        .to_string(),
+                    checkpoint,
+                )
+            }
+        };
+        if let Some(checkpoint) = checkpoint {
+            lock_db(&state)?.record_code_git_checkpoint(
+                &crate::code_sessions::NewCodeGitCheckpoint {
+                    session_id,
+                    run_id,
+                    invocation_id,
+                    commit_oid: &checkpoint.commit_oid,
+                    parent_commit_oid: &checkpoint.parent_commit_oid,
+                    tree_oid: &checkpoint.tree_oid,
+                    message: &checkpoint.message,
+                },
+            )?;
+        }
+        let detail = lock_db(&state)?.finalize_approved_code_edit(
+            &crate::code_sessions::FinalizeCodeEdit {
+                run_id,
+                invocation_id,
+                tool_name: crate::code_git_tools::CHECKPOINT_TOOL_ID,
+                execution_lease_id: &execution_lease_id,
+                outcome,
+                evidence_json: &evidence_json,
+                observation_content: &observation,
+            },
+        )?;
+        return if detail.run.state == crate::code_sessions::CodeRunState::Observing {
+            crate::code_agent::start_run(app, &state, session_id, run_id)
+        } else {
+            Ok(detail)
+        };
+    }
+    if invocation.tool_name != crate::code_write_tools::EDIT_FILE_TOOL_ID {
+        return Err(AppError::invalid_input(
+            "Only edit_file proposals can be approved here.",
+        ));
+    }
+    let arguments: crate::code_write_tools::EditFileArguments =
+        serde_json::from_str(&invocation.canonical_arguments_json).map_err(|_| {
+            AppError::new(
+                "code_edit_proposal_invalid",
+                "The persisted edit proposal could not be decoded safely.",
+            )
+        })?;
+    let workspace_root = {
+        let workspace = state
+            .workspace
+            .lock()
+            .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+        std::path::PathBuf::from(&workspace.root_path)
+    };
+    let context = crate::code_git_tools::validate_run_repository(
+        &run.repository_path_snapshot,
+        &workspace_root,
+        session_id,
+        &run.repository_identity_hash,
+    )?;
+    let fresh = crate::code_write_tools::preview_edit_file(
+        &context,
+        &arguments.path,
+        arguments.edits.clone(),
+    )?;
+    if request.call_hash != invocation.call_hash
+        || Some(request.preview_hash.as_str()) != invocation.preview_hash.as_deref()
+        || Some(request.precondition_hash.as_str()) != invocation.precondition_hash.as_deref()
+        || fresh.call_hash != request.call_hash
+        || fresh.preview_hash != request.preview_hash
+        || fresh.precondition_hash != request.precondition_hash
+        || Some(fresh.diff.as_str()) != invocation.preview.as_deref()
+    {
+        return Err(AppError::new(
+            "code_edit_approval_stale",
+            "The file or proposal changed after this diff was shown. Request a new proposal.",
+        ));
+    }
+
+    let execution_lease_id = uuid::Uuid::new_v4().to_string();
+    let execution_lease_expires_at = (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339();
+    let verification_plan_json = crate::code_sessions::serialize_json(&serde_json::json!({
+        "kind": "file_hash_v1",
+        "path": &fresh.path,
+        "beforeHash": &fresh.before_hash,
+        "expectedAfterHash": &fresh.expected_after_hash,
+    }))?;
+    lock_db(&state)?.begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+        run_id,
+        invocation_id,
+        tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+        call_hash: &request.call_hash,
+        preview_hash: &request.preview_hash,
+        precondition_hash: &request.precondition_hash,
+        execution_lease_id: &execution_lease_id,
+        execution_lease_expires_at: &execution_lease_expires_at,
+        verification_plan_json: &verification_plan_json,
+    })?;
+
+    let execution = crate::code_write_tools::execute_edit_file(
+        &context,
+        crate::code_write_tools::ApprovedEditFile {
+            path: arguments.path,
+            edits: arguments.edits,
+            call_hash: request.call_hash,
+            preview_hash: request.preview_hash,
+            precondition_hash: request.precondition_hash,
+        },
+    );
+    let (outcome, evidence_json, observation) = match execution {
+        Ok(outcome) => {
+            let evidence = crate::code_sessions::serialize_json(&outcome)?;
+            let observation = crate::code_sessions::serialize_json(&serde_json::json!({
+                "path": outcome.path,
+                "outcome": outcome.outcome,
+                "observedAfterHash": outcome.observed_after_hash,
+            }))?;
+            (outcome.outcome, evidence, observation)
+        }
+        Err(error) => match crate::code_write_tools::verify_edit_file_outcome(
+            &context,
+            &fresh.path,
+            &fresh.before_hash,
+            &fresh.expected_after_hash,
+        ) {
+            Ok(verified) => (
+                verified.outcome,
+                crate::code_sessions::serialize_json(&serde_json::json!({
+                    "executionErrorCode": error.code,
+                    "executionError": error.message,
+                    "verification": verified,
+                }))?,
+                "The approved edit attempt did not complete normally. Ark verified the current file state and stopped before continuing."
+                    .to_string(),
+            ),
+            Err(verification_error) => (
+                crate::code_sessions::CodeRecoveryOutcome::Unknown,
+                crate::code_sessions::serialize_json(&serde_json::json!({
+                    "executionErrorCode": error.code,
+                    "executionError": error.message,
+                    "verificationErrorCode": verification_error.code,
+                    "verificationError": verification_error.message,
+                }))?,
+                "The approved edit could not be verified safely. Inspect the Repository before continuing."
+                    .to_string(),
+            ),
+        },
+    };
+    let detail =
+        lock_db(&state)?.finalize_approved_code_edit(&crate::code_sessions::FinalizeCodeEdit {
+            run_id,
+            invocation_id,
+            tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+            execution_lease_id: &execution_lease_id,
+            outcome,
+            evidence_json: &evidence_json,
+            observation_content: &observation,
+        })?;
+    if detail.run.state == crate::code_sessions::CodeRunState::Observing {
+        crate::code_agent::start_run(app, &state, session_id, run_id)
+    } else {
+        Ok(detail)
+    }
+}
+
+#[tauri::command]
+pub fn code_reject_edit(
+    state: State<'_, AppState>,
+    request: CodeRejectEditRequest,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let session_id =
+        crate::validation::validate_entity_id(&request.session_id, "Ark Code session ID")?;
+    let run_id = crate::validation::validate_entity_id(&request.run_id, "Ark Code run ID")?;
+    let invocation_id = crate::validation::validate_entity_id(
+        &request.invocation_id,
+        "Ark Code tool invocation ID",
+    )?;
+    let detail = lock_read_db(&state)?.get_code_run_detail(run_id)?;
+    if detail.run.session_id != session_id {
+        return Err(AppError::not_found("Ark Code run"));
+    }
+    lock_db(&state)?.deny_code_edit(run_id, invocation_id, &request.call_hash)
 }
 
 #[tauri::command]
@@ -623,6 +1271,39 @@ pub fn list_code_sessions(
 }
 
 #[tauri::command]
+pub fn list_code_command_definitions(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::code_sessions::CodeCommandDefinition>, AppError> {
+    lock_read_db(&state)?.list_code_command_definitions()
+}
+
+#[tauri::command]
+pub fn save_code_command_definition(
+    state: State<'_, AppState>,
+    request: SaveCodeCommandDefinitionRequest,
+) -> Result<crate::code_sessions::CodeCommandDefinition, AppError> {
+    lock_db(&state)?.save_code_command_definition(
+        &crate::code_sessions::SaveCodeCommandDefinition {
+            id: request.id.as_deref(),
+            label: &request.label,
+            program: &request.program,
+            arguments: &request.arguments,
+            timeout_seconds: request.timeout_seconds,
+            enabled: request.enabled,
+        },
+    )
+}
+
+#[tauri::command]
+pub fn delete_code_command_definition(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let id = crate::validation::validate_entity_id(&id, "Command definition ID")?;
+    lock_db(&state)?.delete_code_command_definition(id)
+}
+
+#[tauri::command]
 pub fn get_code_session(
     state: State<'_, AppState>,
     id: String,
@@ -632,7 +1313,7 @@ pub fn get_code_session(
 }
 
 #[tauri::command]
-pub fn create_code_run(
+pub async fn create_code_run(
     state: State<'_, AppState>,
     request: CreateCodeRunRequest,
 ) -> Result<crate::code_sessions::CodeAgentRun, AppError> {
@@ -652,13 +1333,14 @@ pub fn create_code_run(
     }
     let task = crate::code_sessions::validate_task(&request.task)?;
 
-    let (session, project, provider, models) = {
+    let (session, project, provider, models, session_repository) = {
         let db = lock_read_db(&state)?;
         let session = db.get_code_session(session_id)?;
         let project = db.get_project(&session.project_id)?;
         let provider = db.get_provider(provider_id)?;
         let models = db.list_models(provider_id)?;
-        (session, project, provider, models)
+        let session_repository = db.find_code_session_repository(session_id)?;
+        (session, project, provider, models, session_repository)
     };
     if !provider.is_enabled {
         return Err(AppError::new(
@@ -681,22 +1363,81 @@ pub fn create_code_run(
             "This model does not support Ark Code tool calling. Choose a native or prompted-tool model.",
         ));
     }
+    let model_context_window = model
+        .context_window
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value >= 512)
+        .ok_or_else(|| {
+            AppError::new(
+                "model_context_window_unknown",
+                "Ark Code needs the selected model's real context window. Refresh model metadata or choose a model that reports it.",
+            )
+        })?;
 
-    let context = crate::code_tools::RepositoryContext::from_project(&project)?;
+    let workspace_root = {
+        let workspace = state
+            .workspace
+            .lock()
+            .map_err(|_| AppError::new("lock_poisoned", "Workspace state lock poisoned"))?;
+        std::path::PathBuf::from(&workspace.root_path)
+    };
+    let (context, branch_name, base_commit_oid) = if let Some(repository) = session_repository {
+        let context = crate::code_git_tools::validate_run_repository(
+            &repository.root_path,
+            &workspace_root,
+            &session.id,
+            &repository.repository_identity_hash,
+        )?;
+        let branch = crate::code_git_tools::run_managed_git(
+            &context,
+            &["branch", "--show-current"],
+            std::time::Duration::from_secs(10),
+        )
+        .await?;
+        if branch.trim() != repository.branch_name {
+            return Err(AppError::new(
+                "code_repository_branch_changed",
+                "Ark Code's managed Repository is no longer on its dedicated session branch.",
+            ));
+        }
+        (context, repository.branch_name, repository.base_commit_oid)
+    } else {
+        let source_context = crate::code_tools::RepositoryContext::from_project(&project)?;
+        let context = crate::code_git_tools::provision_session_repository(
+            &source_context,
+            &workspace_root,
+            &session.id,
+        )
+        .await?;
+        let branch_name = format!("ark/session/{}", session.id);
+        let base_commit_oid = crate::code_git_tools::run_managed_git(
+            &context,
+            &["rev-parse", "--verify", "HEAD"],
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .trim()
+        .to_string();
+        (context, branch_name, base_commit_oid)
+    };
     let (repository_path, repository_identity_hash) =
         crate::code_sessions::repository_snapshot(context.root())?;
+    lock_db(&state)?.ensure_code_session_repository(
+        &crate::code_sessions::NewCodeSessionRepository {
+            session_id: &session.id,
+            root_path: &repository_path,
+            repository_identity_hash: &repository_identity_hash,
+            branch_name: &branch_name,
+            base_commit_oid: &base_commit_oid,
+        },
+    )?;
     let max_steps = request
         .max_steps
         .unwrap_or(crate::code_sessions::DEFAULT_MAX_STEPS);
     let max_active_ms = request
         .max_active_ms
         .unwrap_or(crate::code_sessions::DEFAULT_MAX_ACTIVE_MS);
-    let max_tokens = request.max_tokens.unwrap_or_else(|| {
-        model
-            .context_window
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(crate::code_sessions::DEFAULT_MAX_TOKENS)
-    });
+    let max_tokens = request.max_tokens.unwrap_or(model_context_window);
     crate::code_sessions::validate_run_budgets(max_steps, max_active_ms, max_tokens)?;
     let request_hash = crate::code_sessions::request_hash(&CodeRunRequestFingerprint {
         session_id: &session.id,
@@ -727,9 +1468,19 @@ pub fn create_code_run(
     })
 }
 
-/// CODE-007: drives exactly one model turn of an existing `queued`/`observing` run. Awaited in
-/// full by this command — see `code_agent::run_step`'s doc comment for why this pass is
-/// synchronous rather than backgrounded/streamed.
+#[tauri::command]
+pub async fn initialize_project_git_repository(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<(), AppError> {
+    let project_id = crate::validation::validate_entity_id(&project_id, "Project ID")?;
+    let project = lock_read_db(&state)?.get_project(project_id)?;
+    let context = crate::code_tools::RepositoryContext::from_project(&project)?;
+    crate::code_git_tools::initialize_project_repository(&context).await
+}
+
+/// CODE-007 development seam: drives exactly one model turn of an existing
+/// `queued`/`observing` run. Production UI uses `start_code_agent_run` instead.
 #[tauri::command]
 pub async fn run_code_agent_step(
     state: State<'_, AppState>,
@@ -739,6 +1490,32 @@ pub async fn run_code_agent_step(
     let session_id = crate::validation::validate_entity_id(&session_id, "Ark Code session ID")?;
     let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
     crate::code_agent::run_step(&state, session_id, run_id).await
+}
+
+/// CODE-007 production path: starts the durable automatic loop and returns immediately. The
+/// single-step command above remains available only for deterministic tests/development tooling.
+#[tauri::command]
+pub fn start_code_agent_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    run_id: String,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let session_id = crate::validation::validate_entity_id(&session_id, "Ark Code session ID")?;
+    let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
+    crate::code_agent::start_run(app, &state, session_id, run_id)
+}
+
+#[tauri::command]
+pub fn cancel_code_agent_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    run_id: String,
+) -> Result<crate::code_sessions::CodeRunDetail, AppError> {
+    let session_id = crate::validation::validate_entity_id(&session_id, "Ark Code session ID")?;
+    let run_id = crate::validation::validate_entity_id(&run_id, "Ark Code run ID")?;
+    crate::code_agent::cancel_run(&app, &state, session_id, run_id)
 }
 
 #[tauri::command]
@@ -1842,6 +2619,11 @@ pub fn preflight_managed_model(
     app: AppHandle,
 ) -> Result<ManagedModelPreflight, AppError> {
     crate::managed_models::preflight_managed_model(&app, &model_id, operation)
+}
+
+#[tauri::command]
+pub fn get_hardware_fit_evidence() -> crate::managed_models::HardwareFitEvidence {
+    crate::managed_models::local_hardware_fit_evidence()
 }
 
 #[tauri::command]

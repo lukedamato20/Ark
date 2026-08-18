@@ -4,6 +4,7 @@ import App from "./App";
 import { createTauriArkClient } from "./lib/ArkClient";
 import { ArkClientProvider } from "./lib/ArkClientContext";
 import { ArkStateProvider } from "./state/ArkStateProvider";
+import "@fontsource-variable/inter/wght.css";
 import "./styles.css";
 
 const fixture = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("fixture") : null;
@@ -21,11 +22,13 @@ const arkClient =
             ? developmentClients!.createConversationOrganizationFixtureClient()
             : fixture === "ollama-models"
               ? developmentClients!.createOllamaModelsFixtureClient()
-              : fixture === "bootstrap-failure"
-                ? developmentClients!.createBootstrapFailureFixtureClient()
-                : fixture === "code-edit"
-                  ? developmentClients!.createCodeEditFixtureClient()
-                  : createTauriArkClient();
+              : fixture === "delayed-bootstrap"
+                ? developmentClients!.createDelayedBootstrapFixtureClient()
+                : fixture === "bootstrap-failure"
+                  ? developmentClients!.createBootstrapFailureFixtureClient()
+                  : fixture === "code-edit"
+                    ? developmentClients!.createCodeEditFixtureClient()
+                    : createTauriArkClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

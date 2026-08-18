@@ -4,9 +4,11 @@ use crate::chat::{
     Message,
 };
 use crate::code_sessions::{
-    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeObservation, CodeObservationKind,
-    CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
-    CodeToolInvocation, CodeToolInvocationState, NewCodeRun,
+    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeCommandDefinition, CodeGitCheckpoint,
+    CodeObservation, CodeObservationKind, CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent,
+    CodeRunState, CodeSession, CodeSessionDetail, CodeSessionRepository, CodeToolInvocation,
+    CodeToolInvocationState, NewCodeGitCheckpoint, NewCodeRun, NewCodeSessionRepository,
+    SaveCodeCommandDefinition,
 };
 use crate::config::{
     BUILT_IN_PROVIDER_BASE_URL, BUILT_IN_PROVIDER_ID, BUILT_IN_PROVIDER_NAME,
@@ -211,6 +213,21 @@ const MIGRATIONS: &[MigrationDef] = &[
         version: 19,
         name: "0019_code_agent_run_task",
         sql: include_str!("../../migrations/0019_code_agent_run_task.sql"),
+    },
+    MigrationDef {
+        version: 20,
+        name: "0020_ark_code_execution_policy",
+        sql: include_str!("../../migrations/0020_ark_code_execution_policy.sql"),
+    },
+    MigrationDef {
+        version: 21,
+        name: "0021_code_agent_streaming_text",
+        sql: include_str!("../../migrations/0021_code_agent_streaming_text.sql"),
+    },
+    MigrationDef {
+        version: 22,
+        name: "0022_code_observation_completion_rejected",
+        sql: include_str!("../../migrations/0022_code_observation_completion_rejected.sql"),
     },
 ];
 
@@ -1143,6 +1160,28 @@ impl Database {
         collect_rows(rows)
     }
 
+    /// A bounded, globally ordered navigation query. This is deliberately separate from the
+    /// updated-at keyset page: pin order is keyed by `pinned_at`, and mixing those cursors would
+    /// make pagination correctness depend on NULL ordering at the pin boundary.
+    pub fn list_pinned_conversations(&self, limit: u32) -> Result<Vec<Conversation>, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AppError::invalid_input(
+                "Pinned conversation limit must be between 1 and 100.",
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, created_at, updated_at, provider_id, model_id, current_message_id,
+                system_prompt, temperature, max_tokens, archived, project_id, pinned_at, persona_id,
+                response_style, tone
+             FROM conversations
+             WHERE pinned_at IS NOT NULL AND archived = 0
+             ORDER BY pinned_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], map_conversation)?;
+        collect_rows(rows)
+    }
+
     pub fn create_conversation(&self, title: Option<String>) -> Result<Conversation, AppError> {
         let timestamp = now();
         let id = Uuid::new_v4().to_string();
@@ -1510,6 +1549,259 @@ impl Database {
         })
     }
 
+    /// Records the external clone only after it has been fully created and verified. Repeated
+    /// idempotent run creation may reuse the exact same session Repository; any path, identity,
+    /// branch, or baseline drift fails closed.
+    pub fn ensure_code_session_repository(
+        &self,
+        input: &NewCodeSessionRepository<'_>,
+    ) -> Result<CodeSessionRepository, AppError> {
+        self.get_code_session(input.session_id)?;
+        self.transaction(|| {
+            if let Some(existing) = self
+                .connection
+                .query_row(
+                    "SELECT session_id, root_path, repository_identity_hash, branch_name,
+                            base_commit_oid, created_at, updated_at
+                     FROM code_session_repositories WHERE session_id = ?1",
+                    params![input.session_id],
+                    map_code_session_repository,
+                )
+                .optional()?
+            {
+                if existing.root_path != input.root_path
+                    || existing.repository_identity_hash != input.repository_identity_hash
+                    || existing.branch_name != input.branch_name
+                    || existing.base_commit_oid != input.base_commit_oid
+                {
+                    return Err(AppError::new(
+                        "code_repository_identity_conflict",
+                        "Ark Code's persisted session Repository no longer matches its isolated clone.",
+                    ));
+                }
+                return Ok(existing);
+            }
+            let timestamp = now();
+            self.connection.execute(
+                "INSERT INTO code_session_repositories (
+                    session_id, root_path, repository_identity_hash, branch_name,
+                    base_commit_oid, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    input.session_id,
+                    input.root_path,
+                    input.repository_identity_hash,
+                    input.branch_name,
+                    input.base_commit_oid,
+                    timestamp,
+                ],
+            )?;
+            self.get_code_session_repository(input.session_id)
+        })
+    }
+
+    pub fn get_code_session_repository(
+        &self,
+        session_id: &str,
+    ) -> Result<CodeSessionRepository, AppError> {
+        self.find_code_session_repository(session_id)?
+            .ok_or_else(|| AppError::not_found("Ark Code session Repository"))
+    }
+
+    pub fn find_code_session_repository(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CodeSessionRepository>, AppError> {
+        let repository = self
+            .connection
+            .query_row(
+                "SELECT session_id, root_path, repository_identity_hash, branch_name,
+                        base_commit_oid, created_at, updated_at
+                 FROM code_session_repositories WHERE session_id = ?1",
+                params![session_id],
+                map_code_session_repository,
+            )
+            .optional()?;
+        Ok(repository)
+    }
+
+    pub fn record_code_git_checkpoint(
+        &self,
+        input: &NewCodeGitCheckpoint<'_>,
+    ) -> Result<CodeGitCheckpoint, AppError> {
+        if let Some(existing) = self
+            .connection
+            .query_row(
+                "SELECT id, session_id, run_id, invocation_id, commit_oid, parent_commit_oid,
+                        tree_oid, message, created_at
+                 FROM code_git_checkpoints WHERE invocation_id = ?1",
+                params![input.invocation_id],
+                map_code_git_checkpoint,
+            )
+            .optional()?
+        {
+            if existing.session_id == input.session_id
+                && existing.run_id == input.run_id
+                && existing.commit_oid == input.commit_oid
+                && existing.parent_commit_oid == input.parent_commit_oid
+                && existing.tree_oid == input.tree_oid
+                && existing.message == input.message
+            {
+                return Ok(existing);
+            }
+            return Err(AppError::new(
+                "code_checkpoint_record_conflict",
+                "The checkpoint invocation already has different durable Git evidence.",
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO code_git_checkpoints (
+                id, session_id, run_id, invocation_id, commit_oid, parent_commit_oid,
+                tree_oid, message, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                input.session_id,
+                input.run_id,
+                input.invocation_id,
+                input.commit_oid,
+                input.parent_commit_oid,
+                input.tree_oid,
+                input.message,
+                timestamp,
+            ],
+        )?;
+        self.get_code_git_checkpoint(input.session_id, &id)
+    }
+
+    pub fn get_code_git_checkpoint(
+        &self,
+        session_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<CodeGitCheckpoint, AppError> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, run_id, invocation_id, commit_oid, parent_commit_oid,
+                        tree_oid, message, created_at
+                 FROM code_git_checkpoints WHERE id = ?1 AND session_id = ?2",
+                params![checkpoint_id, session_id],
+                map_code_git_checkpoint,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Ark Code Git checkpoint"))
+    }
+
+    pub fn list_code_git_checkpoints(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CodeGitCheckpoint>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, run_id, invocation_id, commit_oid, parent_commit_oid,
+                    tree_oid, message, created_at
+             FROM code_git_checkpoints WHERE session_id = ?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![session_id], map_code_git_checkpoint)?;
+        collect_rows(rows)
+    }
+
+    pub fn save_code_command_definition(
+        &self,
+        input: &SaveCodeCommandDefinition<'_>,
+    ) -> Result<CodeCommandDefinition, AppError> {
+        crate::code_command_tools::validate_command_definition(
+            input.label,
+            input.program,
+            input.arguments,
+            input.timeout_seconds,
+        )?;
+        let id = input
+            .id
+            .map(|id| crate::validation::validate_entity_id(id, "Command definition ID"))
+            .transpose()?
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let arguments_json = crate::code_sessions::serialize_json(input.arguments)?;
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO code_command_allowlist (
+                id, label, program, arguments_json, timeout_seconds, enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET label = excluded.label, program = excluded.program,
+                arguments_json = excluded.arguments_json,
+                timeout_seconds = excluded.timeout_seconds, enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                input.label.trim(),
+                input.program.trim(),
+                arguments_json,
+                i64::from(input.timeout_seconds),
+                input.enabled,
+                timestamp,
+            ],
+        )?;
+        self.get_code_command_definition(&id)
+    }
+
+    pub fn get_code_command_definition(&self, id: &str) -> Result<CodeCommandDefinition, AppError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT id, label, program, arguments_json, timeout_seconds, enabled,
+                        created_at, updated_at FROM code_command_allowlist WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Ark Code command definition"))?;
+        decode_code_command_row(row)
+    }
+
+    pub fn list_code_command_definitions(&self) -> Result<Vec<CodeCommandDefinition>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, label, program, arguments_json, timeout_seconds, enabled,
+                    created_at, updated_at FROM code_command_allowlist
+             ORDER BY label COLLATE NOCASE, id",
+        )?;
+        let rows = collect_rows(statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?)?;
+        rows.into_iter().map(decode_code_command_row).collect()
+    }
+
+    pub fn delete_code_command_definition(&self, id: &str) -> Result<(), AppError> {
+        let changed = self.connection.execute(
+            "DELETE FROM code_command_allowlist WHERE id = ?1",
+            params![id],
+        )?;
+        if changed != 1 {
+            return Err(AppError::not_found("Ark Code command definition"));
+        }
+        Ok(())
+    }
+
     pub fn create_code_agent_run(&self, input: &NewCodeRun<'_>) -> Result<CodeAgentRun, AppError> {
         let task = crate::code_sessions::validate_task(input.task)?;
         crate::code_sessions::validate_run_budgets(
@@ -1638,13 +1930,16 @@ impl Database {
         let run = self.get_code_agent_run(run_id)?;
 
         let mut step_statement = self.connection.prepare(
-            "SELECT id, run_id, step_index, state, reserved_tokens, actual_tokens, created_at
+            "SELECT id, run_id, step_index, state, reserved_tokens, actual_tokens,
+                    streaming_text, created_at
              FROM code_agent_steps WHERE run_id = ?1 ORDER BY step_index ASC",
         )?;
         let steps = collect_rows(step_statement.query_map(params![run_id], map_code_agent_step)?)?;
 
         let mut invocation_statement = self.connection.prepare(
-            "SELECT id, run_id, step_id, tool_name, canonical_arguments_json, state, created_at
+            "SELECT id, run_id, step_id, tool_name, canonical_arguments_json, call_hash, state,
+                    preview, preview_hash, precondition_hash, approved_at, verification_outcome,
+                    created_at
              FROM code_tool_invocations WHERE run_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let invocations = collect_rows(
@@ -1756,32 +2051,175 @@ impl Database {
         })
     }
 
-    /// Persists one `code_agent::run_step` outcome — the step itself, its optional tool
-    /// invocation/observation, an optional model-text observation, and the run's own counter/state
-    /// update — as a single transaction. Requires the run to currently be `planning` (the state
-    /// `transition_code_agent_run` put it in before the provider call this step's data came from).
-    pub fn commit_code_agent_step(
+    /// ADR 0003 cancellation is durable before it becomes an in-memory signal. States with no
+    /// provider/tool work in flight can become `cancelled` in this same transaction; `planning`
+    /// and `executing_tool` only record the request so their owner can stop and verify the
+    /// uncertain external operation before choosing a terminal state.
+    pub fn request_code_agent_run_cancellation(
         &self,
-        input: &crate::code_sessions::NewCodeAgentStep<'_>,
-    ) -> Result<CodeRunDetail, AppError> {
+        run_id: &str,
+    ) -> Result<CodeAgentRun, AppError> {
+        self.transaction(|| {
+            let run = self.get_code_agent_run(run_id)?;
+            if run.state.is_terminal() || run.cancel_requested_at.is_some() {
+                return Ok(run);
+            }
+
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )?;
+            let timestamp = now();
+            let can_cancel_immediately = matches!(
+                run.state,
+                CodeRunState::Queued | CodeRunState::AwaitingApproval | CodeRunState::Observing
+            );
+            let new_state = if can_cancel_immediately {
+                CodeRunState::Cancelled
+            } else {
+                run.state
+            };
+            let terminal_reason = can_cancel_immediately.then_some("user_cancelled");
+            let completed_at = can_cancel_immediately.then(|| timestamp.clone());
+
+            self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET cancel_requested_at = ?1, state = ?2, terminal_reason = ?3,
+                     completed_at = ?4, next_event_sequence = next_event_sequence + 1,
+                     updated_at = ?1
+                 WHERE id = ?5",
+                params![
+                    timestamp,
+                    new_state.as_str(),
+                    terminal_reason,
+                    completed_at,
+                    run_id
+                ],
+            )?;
+            self.append_code_run_event(
+                run_id,
+                next_sequence,
+                if can_cancel_immediately {
+                    "run_cancelled"
+                } else {
+                    "cancel_requested"
+                },
+                new_state,
+                if can_cancel_immediately {
+                    "Run cancelled"
+                } else {
+                    "Cancellation requested"
+                },
+                &timestamp,
+            )?;
+            self.get_code_agent_run(run_id)
+        })
+    }
+
+    /// ADR 0003's pre-dispatch transaction. Exactly one executor may move a ready run to
+    /// `planning`; that same transaction creates the reserved step, snapshots its prompt
+    /// manifest, reserves the worst-case budget, and records the renewable execution lease.
+    pub fn claim_code_agent_step(
+        &self,
+        input: &crate::code_sessions::NewCodeAgentStepClaim<'_>,
+    ) -> Result<String, AppError> {
         self.transaction(|| {
             let run = self.get_code_agent_run(input.run_id)?;
-            if run.state != CodeRunState::Planning {
+            if !matches!(run.state, CodeRunState::Queued | CodeRunState::Observing) {
                 return Err(AppError::new(
                     "code_run_state_conflict",
                     format!(
-                        "Ark Code run is '{}', which does not allow committing a step.",
+                        "Ark Code run is '{}', so another executor cannot claim this step.",
                         run.state.as_str()
                     ),
                 ));
             }
+            if run.cancel_requested_at.is_some() {
+                return Err(AppError::new(
+                    "code_run_cancelled",
+                    "Ark Code refused to dispatch work after cancellation was requested.",
+                ));
+            }
+            if input.step_index != run.steps_used || run.steps_used >= run.max_steps {
+                return Err(AppError::new(
+                    "code_run_step_budget_conflict",
+                    "Ark Code could not reserve the requested step within the run's step budget.",
+                ));
+            }
+            if run.reserved_tokens != 0
+                || run
+                    .actual_tokens
+                    .saturating_add(input.reserved_tokens)
+                    > run.max_tokens
+            {
+                return Err(AppError::new(
+                    "code_run_token_budget_conflict",
+                    "Ark Code could not reserve the provider request within the run's token budget.",
+                ));
+            }
+            if let Some(maximum) = run.max_cost_microunits {
+                let reserved = input.reserved_cost_microunits.ok_or_else(|| {
+                    AppError::new(
+                        "code_run_cost_unknown",
+                        "Ark Code cannot enforce this run's cost budget because the selected model has no reviewed cost metadata.",
+                    )
+                })?;
+                if run
+                    .actual_cost_microunits
+                    .unwrap_or(0)
+                    .saturating_add(reserved)
+                    > maximum
+                {
+                    return Err(AppError::new(
+                        "code_run_cost_budget_conflict",
+                        "Ark Code could not reserve the provider request within the run's cost budget.",
+                    ));
+                }
+            }
+
             let timestamp = now();
+            let event_count = if input.context_compaction_summary.is_some() {
+                2_i64
+            } else {
+                1_i64
+            };
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1",
+                params![input.run_id],
+                |row| row.get(0),
+            )?;
+            let claimed = self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET state = 'planning', reserved_tokens = ?1,
+                     executor_lease_id = ?2, executor_lease_expires_at = ?3,
+                     next_event_sequence = next_event_sequence + ?6, updated_at = ?4
+                 WHERE id = ?5 AND state IN ('queued', 'observing')
+                   AND cancel_requested_at IS NULL
+                   AND (executor_lease_id IS NULL OR executor_lease_expires_at IS NULL
+                        OR executor_lease_expires_at <= ?4 OR executor_lease_id = ?2)",
+                params![
+                    i64::try_from(input.reserved_tokens).unwrap_or(i64::MAX),
+                    input.executor_lease_id,
+                    input.executor_lease_expires_at,
+                    timestamp,
+                    input.run_id,
+                    event_count,
+                ],
+            )?;
+            if claimed != 1 {
+                return Err(AppError::new(
+                    "code_run_lease_conflict",
+                    "Another Ark Code executor owns this run.",
+                ));
+            }
+
             let step_id = Uuid::new_v4().to_string();
             self.connection.execute(
                 "INSERT INTO code_agent_steps (
                     id, run_id, step_index, state, prompt_manifest_json, reserved_tokens,
-                    actual_tokens, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, 'completed', ?4, ?5, ?6, ?7, ?7)",
+                    reserved_cost_microunits, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'reserved', ?4, ?5, ?6, ?7, ?7)",
                 params![
                     step_id,
                     input.run_id,
@@ -1789,11 +2227,686 @@ impl Database {
                     input.prompt_manifest_json,
                     i64::try_from(input.reserved_tokens).unwrap_or(i64::MAX),
                     input
-                        .actual_tokens
+                        .reserved_cost_microunits
                         .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
                     timestamp,
                 ],
             )?;
+            let step_event_sequence = if let Some(summary) = input.context_compaction_summary {
+                let observation_id = Uuid::new_v4().to_string();
+                self.connection.execute(
+                    "INSERT INTO code_observations (
+                        id, run_id, step_id, invocation_id, kind, content, content_hash,
+                        provenance_json, created_at
+                     ) VALUES (?1, ?2, ?3, NULL, 'system', ?4, ?5,
+                               '{\"kind\":\"context_compaction\"}', ?6)",
+                    params![
+                        observation_id,
+                        input.run_id,
+                        step_id,
+                        summary,
+                        crate::code_sessions::sha256_hex(summary.as_bytes()),
+                        timestamp,
+                    ],
+                )?;
+                self.append_code_run_event(
+                    input.run_id,
+                    next_sequence,
+                    "context_compacted",
+                    CodeRunState::Planning,
+                    summary,
+                    &timestamp,
+                )?;
+                next_sequence + 1
+            } else {
+                next_sequence
+            };
+            self.append_code_run_event(
+                input.run_id,
+                step_event_sequence,
+                "step_reserved",
+                CodeRunState::Planning,
+                "Step and provider budget reserved",
+                &timestamp,
+            )?;
+            Ok(step_id)
+        })
+    }
+
+    /// Records the irreversible provider-dispatch boundary before network I/O starts. Startup
+    /// recovery can therefore distinguish a merely reserved step from an outcome that may have
+    /// been processed or billed remotely.
+    pub fn mark_code_agent_step_dispatched(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        executor_lease_id: &str,
+        executor_lease_expires_at: &str,
+    ) -> Result<(), AppError> {
+        self.transaction(|| {
+            let run = self.get_code_agent_run(run_id)?;
+            if run.cancel_requested_at.is_some() {
+                return Err(AppError::new(
+                    "code_run_cancelled",
+                    "Ark Code refused to dispatch a provider request after cancellation was requested.",
+                ));
+            }
+            let timestamp = now();
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs
+                 WHERE id = ?1 AND state = 'planning' AND executor_lease_id = ?2",
+                params![run_id, executor_lease_id],
+                |row| row.get(0),
+            ).map_err(|_| AppError::new(
+                "code_run_lease_lost",
+                "Ark Code lost ownership before provider dispatch.",
+            ))?;
+            let updated_step = self.connection.execute(
+                "UPDATE code_agent_steps SET state = 'dispatched', updated_at = ?1
+                 WHERE id = ?2 AND run_id = ?3 AND state = 'reserved'",
+                params![timestamp, step_id, run_id],
+            )?;
+            let updated_run = self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET executor_lease_expires_at = ?1,
+                     next_event_sequence = next_event_sequence + 1, updated_at = ?2
+                 WHERE id = ?3 AND state = 'planning' AND executor_lease_id = ?4",
+                params![
+                    executor_lease_expires_at,
+                    timestamp,
+                    run_id,
+                    executor_lease_id
+                ],
+            )?;
+            if updated_step != 1 || updated_run != 1 {
+                return Err(AppError::new(
+                    "code_run_lease_lost",
+                    "Ark Code lost ownership before provider dispatch.",
+                ));
+            }
+            self.append_code_run_event(
+                run_id,
+                next_sequence,
+                "provider_dispatched",
+                CodeRunState::Planning,
+                "Provider request dispatched",
+                &timestamp,
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn checkpoint_code_agent_streaming_text(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        executor_lease_id: &str,
+        text: &str,
+    ) -> Result<(), AppError> {
+        let updated = self.connection.execute(
+            "UPDATE code_agent_steps SET streaming_text = ?1, updated_at = ?2
+             WHERE id = ?3 AND run_id = ?4 AND state = 'dispatched'
+               AND EXISTS (
+                   SELECT 1 FROM code_agent_runs
+                   WHERE id = ?4 AND state = 'planning' AND executor_lease_id = ?5
+               )",
+            params![text, now(), step_id, run_id, executor_lease_id],
+        )?;
+        if updated != 1 {
+            return Err(AppError::new(
+                "code_run_lease_lost",
+                "Ark Code lost ownership before streaming text could be checkpointed.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Renews a normal execution lease. A zero-row update is an ownership loss, never an
+    /// invitation to overwrite another process's state.
+    pub fn renew_code_agent_run_lease(
+        &self,
+        run_id: &str,
+        executor_lease_id: &str,
+        executor_lease_expires_at: &str,
+    ) -> Result<(), AppError> {
+        let updated = self.connection.execute(
+            "UPDATE code_agent_runs SET executor_lease_expires_at = ?1, updated_at = ?2
+             WHERE id = ?3 AND state = 'planning' AND executor_lease_id = ?4",
+            params![executor_lease_expires_at, now(), run_id, executor_lease_id],
+        )?;
+        if updated != 1 {
+            return Err(AppError::new(
+                "code_run_lease_lost",
+                "Ark Code stopped because another executor owns this run.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Terminates a claimed step after cancellation or an execution error. All writes are
+    /// ownership-checked. Unknown dispatched usage retains the conservative reservation.
+    pub fn finish_claimed_code_agent_step(
+        &self,
+        input: &crate::code_sessions::FinishCodeAgentStep<'_>,
+    ) -> Result<CodeRunDetail, AppError> {
+        self.transaction(|| {
+            if !input.run_state.is_terminal()
+                || !matches!(
+                    input.step_state,
+                    CodeAgentStepState::Failed | CodeAgentStepState::Interrupted
+                )
+            {
+                return Err(AppError::invalid_input(
+                    "A claimed Ark Code step can only be finished with terminal states.",
+                ));
+            }
+            let timestamp = now();
+            let actual_tokens = input
+                .actual_tokens
+                .map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+            let updated_step = self.connection.execute(
+                "UPDATE code_agent_steps
+                 SET state = ?1, actual_tokens = ?2, streaming_text = NULL, updated_at = ?3
+                 WHERE id = ?4 AND run_id = ?5 AND state IN ('reserved', 'dispatched')",
+                params![
+                    input.step_state.as_str(),
+                    actual_tokens,
+                    timestamp,
+                    input.step_id,
+                    input.run_id
+                ],
+            )?;
+            let next_sequence: i64 = self
+                .connection
+                .query_row(
+                    "SELECT next_event_sequence FROM code_agent_runs
+                 WHERE id = ?1 AND state = 'planning' AND executor_lease_id = ?2",
+                    params![input.run_id, input.executor_lease_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    AppError::new(
+                        "code_run_lease_lost",
+                        "Ark Code no longer owns the claimed step and did not change it.",
+                    )
+                })?;
+            let actual_delta = actual_tokens.unwrap_or(0);
+            let retained_reservation = if input.retain_reservation {
+                "reserved_tokens"
+            } else {
+                "0"
+            };
+            let sql = format!(
+                "UPDATE code_agent_runs
+                 SET state = ?1, terminal_reason = ?2, completed_at = ?3,
+                     active_elapsed_ms = active_elapsed_ms + ?4,
+                     actual_tokens = actual_tokens + ?5,
+                     reserved_tokens = {retained_reservation},
+                     executor_lease_id = NULL, executor_lease_expires_at = NULL,
+                     next_event_sequence = next_event_sequence + 1, updated_at = ?3
+                 WHERE id = ?6 AND state = 'planning' AND executor_lease_id = ?7"
+            );
+            let updated_run = self.connection.execute(
+                &sql,
+                params![
+                    input.run_state.as_str(),
+                    input.terminal_reason,
+                    timestamp,
+                    i64::try_from(input.active_elapsed_ms_delta).unwrap_or(i64::MAX),
+                    actual_delta,
+                    input.run_id,
+                    input.executor_lease_id
+                ],
+            )?;
+            if updated_step != 1 || updated_run != 1 {
+                return Err(AppError::new(
+                    "code_run_lease_lost",
+                    "Ark Code no longer owns the claimed step and did not change it.",
+                ));
+            }
+            self.append_code_run_event(
+                input.run_id,
+                next_sequence,
+                input.event_kind,
+                input.run_state,
+                input.event_summary,
+                &timestamp,
+            )?;
+            self.get_code_run_detail(input.run_id)
+        })
+    }
+
+    /// ADR 0003 startup recovery for states whose abandoned external work is classifiable
+    /// without executing a tool. A short compare-and-swap lease ensures two processes opening
+    /// the same workspace cannot both append recovery events. `executing_tool` is deliberately
+    /// excluded: it requires its persisted operation-specific verifier before any transition.
+    pub fn recover_stale_code_agent_runs(&self) -> Result<usize, AppError> {
+        let candidates = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, state FROM code_agent_runs
+                 WHERE state IN ('planning', 'observing')
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows = collect_rows(statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?)?;
+            rows
+        };
+
+        let mut recovered = 0;
+        for (run_id, state_value) in candidates {
+            let state = CodeRunState::try_from(state_value.as_str())?;
+            let changed = self.transaction(|| {
+                let timestamp = now();
+                let lease_id = Uuid::new_v4().to_string();
+                let lease_expires_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
+                let claimed = self.connection.execute(
+                    "UPDATE code_agent_runs
+                     SET executor_lease_id = ?1, executor_lease_expires_at = ?2, updated_at = ?3
+                     WHERE id = ?4 AND state = ?5
+                       AND (executor_lease_id IS NULL OR executor_lease_expires_at IS NULL
+                            OR executor_lease_expires_at <= ?3)",
+                    params![
+                        lease_id,
+                        lease_expires_at,
+                        timestamp,
+                        run_id,
+                        state.as_str()
+                    ],
+                )?;
+                if claimed == 0 {
+                    return Ok(false);
+                }
+
+                let next_sequence: i64 = self.connection.query_row(
+                    "SELECT next_event_sequence FROM code_agent_runs
+                     WHERE id = ?1 AND executor_lease_id = ?2",
+                    params![run_id, lease_id],
+                    |row| row.get(0),
+                )?;
+                let (terminal_reason, summary) = match state {
+                    CodeRunState::Planning => (
+                        "startup_provider_outcome_unknown",
+                        "Ark restarted while provider work may have been in flight; the run was interrupted without redispatch.",
+                    ),
+                    CodeRunState::Observing => (
+                        "startup_resume_required",
+                        "Ark restarted after a durable tool observation; continue with a child run to avoid replaying work.",
+                    ),
+                    _ => {
+                        return Err(AppError::new(
+                            "code_run_recovery_state_invalid",
+                            "Ark Code recovery selected a run state it cannot classify safely.",
+                        ));
+                    }
+                };
+                let retain_reservation = if state == CodeRunState::Planning {
+                    let step: Option<(String, String)> = self
+                        .connection
+                        .query_row(
+                            "SELECT id, state FROM code_agent_steps
+                             WHERE run_id = ?1
+                               AND step_index = (SELECT steps_used FROM code_agent_runs WHERE id = ?1)",
+                            params![run_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if let Some((step_id, step_state)) = step {
+                        self.connection.execute(
+                            "UPDATE code_agent_steps SET state = 'interrupted', streaming_text = NULL, updated_at = ?1
+                             WHERE id = ?2 AND state IN ('reserved', 'dispatched')",
+                            params![timestamp, step_id],
+                        )?;
+                        step_state == "dispatched"
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let updated = self.connection.execute(
+                    "UPDATE code_agent_runs
+                     SET state = 'interrupted', terminal_reason = ?1, completed_at = ?2,
+                         reserved_tokens = CASE WHEN ?6 = 1 THEN reserved_tokens ELSE 0 END,
+                         executor_lease_id = NULL, executor_lease_expires_at = NULL,
+                         next_event_sequence = next_event_sequence + 1, updated_at = ?2
+                     WHERE id = ?3 AND state = ?4 AND executor_lease_id = ?5",
+                    params![
+                        terminal_reason,
+                        timestamp,
+                        run_id,
+                        state.as_str(),
+                        lease_id,
+                        i64::from(retain_reservation)
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(AppError::new(
+                        "code_run_recovery_conflict",
+                        "Ark Code recovery lost ownership of a claimed run and made no assumptions.",
+                    ));
+                }
+                self.append_code_run_event(
+                    &run_id,
+                    next_sequence,
+                    "run_recovered_interrupted",
+                    CodeRunState::Interrupted,
+                    summary,
+                    &timestamp,
+                )?;
+                Ok(true)
+            })?;
+            recovered += usize::from(changed);
+        }
+        Ok(recovered)
+    }
+
+    /// ADR 0003 operation-specific recovery for an edit whose execution intent was durable but
+    /// whose process disappeared before verification committed. Recovery only reads and hashes
+    /// the target; it never replays the write.
+    pub fn recover_executing_code_edits(&self) -> Result<usize, AppError> {
+        let candidates = {
+            let mut statement = self.connection.prepare(
+                "SELECT inv.run_id, inv.id, inv.execution_lease_id,
+                        inv.verification_plan_json, runs.repository_path_snapshot
+                 FROM code_tool_invocations inv
+                 JOIN code_agent_runs runs ON runs.id = inv.run_id
+                 WHERE inv.tool_name = 'edit_file' AND inv.state = 'executing'
+                   AND runs.state = 'executing_tool'
+                   AND (runs.executor_lease_expires_at IS NULL
+                        OR runs.executor_lease_expires_at <= ?1)
+                 ORDER BY inv.created_at ASC, inv.id ASC",
+            )?;
+            let rows = collect_rows(statement.query_map(params![now()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?)?;
+            rows
+        };
+
+        let mut recovered = 0;
+        for (run_id, invocation_id, lease_id, plan_json, repository_root) in candidates {
+            let Some(lease_id) = lease_id else { continue };
+            let verification =
+                (|| -> Result<(crate::code_sessions::CodeRecoveryOutcome, String), AppError> {
+                    let plan: serde_json::Value =
+                        serde_json::from_str(plan_json.as_deref().ok_or_else(|| {
+                            AppError::new(
+                                "code_edit_recovery_plan_missing",
+                                "The interrupted edit has no verification plan.",
+                            )
+                        })?)
+                        .map_err(|_| {
+                            AppError::new(
+                                "code_edit_recovery_plan_invalid",
+                                "The interrupted edit verification plan is invalid.",
+                            )
+                        })?;
+                    let path = plan
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            AppError::new(
+                                "code_edit_recovery_plan_invalid",
+                                "The edit recovery path is missing.",
+                            )
+                        })?;
+                    let before_hash = plan
+                        .get("beforeHash")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            AppError::new(
+                                "code_edit_recovery_plan_invalid",
+                                "The edit recovery before-hash is missing.",
+                            )
+                        })?;
+                    let expected_hash = plan
+                        .get("expectedAfterHash")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            AppError::new(
+                                "code_edit_recovery_plan_invalid",
+                                "The edit recovery expected-hash is missing.",
+                            )
+                        })?;
+                    let target = crate::repository::resolve_existing_repository_path(
+                        std::path::Path::new(&repository_root),
+                        path,
+                    )?;
+                    let observed_hash =
+                        crate::code_sessions::sha256_hex(&std::fs::read(target).map_err(|_| {
+                            AppError::new(
+                                "code_edit_recovery_read_failed",
+                                "Ark could not read the interrupted edit target for recovery.",
+                            )
+                        })?);
+                    let outcome = if observed_hash == expected_hash {
+                        crate::code_sessions::CodeRecoveryOutcome::Applied
+                    } else if observed_hash == before_hash {
+                        crate::code_sessions::CodeRecoveryOutcome::NotApplied
+                    } else {
+                        crate::code_sessions::CodeRecoveryOutcome::Diverged
+                    };
+                    Ok((
+                        outcome,
+                        crate::code_sessions::serialize_json(&serde_json::json!({
+                            "recoveredAtStartup": true,
+                            "path": path,
+                            "observedAfterHash": observed_hash,
+                        }))?,
+                    ))
+                })();
+            let (outcome, evidence, observation) = match verification {
+                Ok((outcome, evidence)) => (
+                    outcome,
+                    evidence,
+                    format!("Ark recovered the interrupted edit by hashing the target: {outcome:?}. No write was replayed."),
+                ),
+                Err(error) => (
+                    crate::code_sessions::CodeRecoveryOutcome::Unknown,
+                    crate::code_sessions::serialize_json(&serde_json::json!({
+                        "recoveredAtStartup": true,
+                        "errorCode": error.code,
+                        "message": error.message,
+                    }))?,
+                    "Ark could not verify an interrupted edit. No write was replayed; inspect the Repository before continuing."
+                        .to_string(),
+                ),
+            };
+            match self.finalize_approved_code_edit(&crate::code_sessions::FinalizeCodeEdit {
+                run_id: &run_id,
+                invocation_id: &invocation_id,
+                tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+                execution_lease_id: &lease_id,
+                outcome,
+                evidence_json: &evidence,
+                observation_content: &observation,
+            }) {
+                Ok(_) => recovered += 1,
+                Err(error) if error.code == "code_edit_execution_conflict" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(recovered)
+    }
+
+    /// Operation-specific crash recovery for CODE-005's Git and command proposals. Git is
+    /// classified from the isolated branch's actual ref/tree. A command whose completion receipt
+    /// was not committed is necessarily `unknown`; it is never replayed.
+    pub fn recover_executing_code_operations(&self) -> Result<usize, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT inv.run_id, inv.id, inv.tool_name, inv.execution_lease_id,
+                    inv.verification_plan_json, inv.canonical_arguments_json,
+                    runs.repository_path_snapshot, runs.session_id
+             FROM code_tool_invocations inv
+             JOIN code_agent_runs runs ON runs.id = inv.run_id
+             WHERE inv.tool_name IN ('git_checkpoint', 'git_rollback', 'run_verification_command')
+               AND inv.state = 'executing' AND runs.state = 'executing_tool'
+               AND (runs.executor_lease_expires_at IS NULL OR runs.executor_lease_expires_at <= ?1)
+             ORDER BY inv.created_at ASC, inv.id ASC",
+        )?;
+        let candidates = collect_rows(statement.query_map(params![now()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?)?;
+        drop(statement);
+
+        let mut recovered = 0;
+        for (
+            run_id,
+            invocation_id,
+            tool_name,
+            lease_id,
+            plan_json,
+            arguments_json,
+            root,
+            session_id,
+        ) in candidates
+        {
+            let Some(lease_id) = lease_id else { continue };
+            let plan = plan_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+            let (outcome, evidence) = match (tool_name.as_str(), plan.as_ref()) {
+                (crate::code_git_tools::CHECKPOINT_TOOL_ID, Some(plan)) => {
+                    let before = plan
+                        .get("beforeHeadOid")
+                        .and_then(serde_json::Value::as_str);
+                    let tree = plan
+                        .get("expectedTreeOid")
+                        .and_then(serde_json::Value::as_str);
+                    match (before, tree) {
+                        (Some(before), Some(tree)) => {
+                            let verification =
+                                crate::code_git_tools::verify_checkpoint_sync(&root, before, tree);
+                            if verification.outcome == CodeRecoveryOutcome::Applied {
+                                if let (Some(commit_oid), Ok(arguments)) = (
+                                    verification.observed_head_oid.as_deref(),
+                                    serde_json::from_str::<
+                                        crate::code_git_tools::GitCheckpointArguments,
+                                    >(&arguments_json),
+                                ) {
+                                    self.record_code_git_checkpoint(&NewCodeGitCheckpoint {
+                                        session_id: &session_id,
+                                        run_id: &run_id,
+                                        invocation_id: &invocation_id,
+                                        commit_oid,
+                                        parent_commit_oid: before,
+                                        tree_oid: tree,
+                                        message: &arguments.message,
+                                    })?;
+                                }
+                            }
+                            (
+                                verification.outcome,
+                                crate::code_sessions::serialize_json(&verification)?,
+                            )
+                        }
+                        _ => (
+                            CodeRecoveryOutcome::Unknown,
+                            "{\"recoveryError\":\"invalid_plan\"}".to_string(),
+                        ),
+                    }
+                }
+                (crate::code_git_tools::ROLLBACK_TOOL_ID, Some(plan)) => {
+                    let before = plan
+                        .get("beforeHeadOid")
+                        .and_then(serde_json::Value::as_str);
+                    let target = plan
+                        .get("targetCommitOid")
+                        .and_then(serde_json::Value::as_str);
+                    match (before, target) {
+                        (Some(before), Some(target)) => {
+                            let outcome =
+                                crate::code_git_tools::verify_rollback_sync(&root, before, target);
+                            (
+                                outcome,
+                                crate::code_sessions::serialize_json(&serde_json::json!({
+                                    "recoveredAtStartup": true,
+                                    "beforeHeadOid": before,
+                                    "targetCommitOid": target,
+                                    "outcome": outcome,
+                                }))?,
+                            )
+                        }
+                        _ => (
+                            CodeRecoveryOutcome::Unknown,
+                            "{\"recoveryError\":\"invalid_plan\"}".to_string(),
+                        ),
+                    }
+                }
+                _ => (
+                    CodeRecoveryOutcome::Unknown,
+                    crate::code_sessions::serialize_json(&serde_json::json!({
+                        "recoveredAtStartup": true,
+                        "outcome": "unknown",
+                        "reason": "A command process disappeared before its completion receipt was committed; it was not replayed."
+                    }))?,
+                ),
+            };
+            let observation = format!(
+                "Ark recovered an interrupted {tool_name} operation as {outcome:?}. No operation was replayed."
+            );
+            match self.finalize_approved_code_edit(&crate::code_sessions::FinalizeCodeEdit {
+                run_id: &run_id,
+                invocation_id: &invocation_id,
+                tool_name: &tool_name,
+                execution_lease_id: &lease_id,
+                outcome,
+                evidence_json: &evidence,
+                observation_content: &observation,
+            }) {
+                Ok(_) => recovered += 1,
+                Err(error) if error.code == "code_edit_execution_conflict" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(recovered)
+    }
+
+    /// Persists one already-reserved and dispatched `code_agent::run_step` outcome: all executed
+    /// tool invocations/observations (G2/RC-08: now a `Vec`), an optional model-text observation,
+    /// an optional `completion_rejected` observation (G2/RC-03), and the run counter/state update
+    /// as one ownership-checked transaction.
+    pub fn commit_code_agent_step(
+        &self,
+        input: &crate::code_sessions::NewCodeAgentStep<'_>,
+    ) -> Result<CodeRunDetail, AppError> {
+        self.transaction(|| {
+            let timestamp = now();
+            let updated_step = self.connection.execute(
+                "UPDATE code_agent_steps
+                 SET state = 'completed', actual_tokens = ?1, streaming_text = NULL, updated_at = ?2
+                 WHERE id = ?3 AND run_id = ?4 AND step_index = ?5 AND state = 'dispatched'",
+                params![
+                    input
+                        .actual_tokens
+                        .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                    timestamp,
+                    input.step_id,
+                    input.run_id,
+                    i64::from(input.step_index),
+                ],
+            )?;
+            if updated_step != 1 {
+                return Err(AppError::new(
+                    "code_run_step_conflict",
+                    "Ark Code could not commit a step that was not durably dispatched.",
+                ));
+            }
 
             if let Some(text) = &input.model_text {
                 let observation_id = Uuid::new_v4().to_string();
@@ -1805,7 +2918,7 @@ impl Database {
                     params![
                         observation_id,
                         input.run_id,
-                        step_id,
+                        input.step_id,
                         text,
                         crate::code_sessions::sha256_hex(text.as_bytes()),
                         format!("{{\"stepIndex\":{}}}", input.step_index),
@@ -1814,66 +2927,137 @@ impl Database {
                 )?;
             }
 
-            if let Some(tool_call) = &input.tool_call {
+            // G2/RC-08: persist all tool calls in deterministic order (read-only calls first,
+            // then any single approval/proposal call).
+            for tool_call in &input.tool_calls {
                 let invocation_id = Uuid::new_v4().to_string();
-                let call_hash =
-                    crate::code_sessions::sha256_hex(tool_call.canonical_arguments_json.as_bytes());
-                let state = if tool_call.succeeded {
+                let call_hash = tool_call
+                    .approval_preview
+                    .as_ref()
+                    .map(|preview| preview.call_hash.clone())
+                    .unwrap_or_else(|| {
+                        crate::code_sessions::sha256_hex(
+                            tool_call.canonical_arguments_json.as_bytes(),
+                        )
+                    });
+                let invocation_state = if tool_call.approval_preview.is_some() {
+                    "proposed"
+                } else if tool_call.succeeded {
                     "applied"
                 } else {
                     "failed"
+                };
+                let preview = tool_call
+                    .approval_preview
+                    .as_ref()
+                    .map(|preview| preview.content.as_str());
+                let preview_hash = tool_call
+                    .approval_preview
+                    .as_ref()
+                    .map(|preview| preview.preview_hash.as_str());
+                let precondition_hash = tool_call
+                    .approval_preview
+                    .as_ref()
+                    .map(|preview| preview.precondition_hash.as_str());
+                let idempotency_policy = if tool_call.approval_preview.is_some() {
+                    "requires_fresh_approval"
+                } else {
+                    "idempotent"
                 };
                 self.connection.execute(
                     "INSERT INTO code_tool_invocations (
                         id, run_id, step_id, provider_call_id, tool_name,
                         canonical_arguments_json, call_hash, scope_json, idempotency_policy,
-                        state, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, 'idempotent', ?8, ?9, ?9)",
+                        state, preview, preview_hash, precondition_hash, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
                     params![
                         invocation_id,
                         input.run_id,
-                        step_id,
+                        input.step_id,
+                        tool_call.provider_call_id,
                         tool_call.tool_name,
                         tool_call.canonical_arguments_json,
                         call_hash,
                         tool_call.scope_json,
-                        state,
+                        idempotency_policy,
+                        invocation_state,
+                        preview,
+                        preview_hash,
+                        precondition_hash,
                         timestamp,
                     ],
                 )?;
+                if tool_call.approval_preview.is_some() {
+                    self.append_audit_event(
+                        AuditEventKind::ApprovalRequested,
+                        tool_call.tool_name,
+                        "Ark Code requested one precondition-bound local-user approval",
+                    )?;
+                }
+                if let Some(content) = &tool_call.observation_content {
+                    let observation_id = Uuid::new_v4().to_string();
+                    let kind = if tool_call.succeeded {
+                        "tool_result"
+                    } else {
+                        "tool_error"
+                    };
+                    self.connection.execute(
+                        "INSERT INTO code_observations (
+                        id, run_id, step_id, invocation_id, kind, content, content_hash,
+                        provenance_json, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            observation_id,
+                            input.run_id,
+                            input.step_id,
+                            invocation_id,
+                            kind,
+                            content,
+                            crate::code_sessions::sha256_hex(content.as_bytes()),
+                            format!(
+                                "{{\"tool\":{}}}",
+                                serde_json::to_string(tool_call.tool_name).unwrap_or_default()
+                            ),
+                            timestamp,
+                        ],
+                    )?;
+                }
+            }
+
+            // G2/RC-03: persist typed rejection reason so the next turn sees it as context.
+            if let Some(rejection) = &input.completion_rejection {
                 let observation_id = Uuid::new_v4().to_string();
-                let kind = if tool_call.succeeded {
-                    "tool_result"
-                } else {
-                    "tool_error"
-                };
                 self.connection.execute(
                     "INSERT INTO code_observations (
                         id, run_id, step_id, invocation_id, kind, content, content_hash,
                         provenance_json, created_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     ) VALUES (?1, ?2, ?3, NULL, 'completion_rejected', ?4, ?5, ?6, ?7)",
                     params![
                         observation_id,
                         input.run_id,
-                        step_id,
-                        invocation_id,
-                        kind,
-                        tool_call.observation_content,
-                        crate::code_sessions::sha256_hex(tool_call.observation_content.as_bytes()),
-                        format!(
-                            "{{\"tool\":{}}}",
-                            serde_json::to_string(tool_call.tool_name).unwrap_or_default()
-                        ),
+                        input.step_id,
+                        rejection,
+                        crate::code_sessions::sha256_hex(rejection.as_bytes()),
+                        format!("{{\"stepIndex\":{}}}", input.step_index),
                         timestamp,
                     ],
                 )?;
             }
 
-            let next_sequence: i64 = self.connection.query_row(
-                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1",
-                params![input.run_id],
-                |row| row.get(0),
-            )?;
+            let next_sequence: i64 = self
+                .connection
+                .query_row(
+                    "SELECT next_event_sequence FROM code_agent_runs
+                 WHERE id = ?1 AND state = 'planning' AND executor_lease_id = ?2",
+                    params![input.run_id, input.executor_lease_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    AppError::new(
+                        "code_run_lease_lost",
+                        "Ark Code lost ownership before the completed step could be committed.",
+                    )
+                })?;
             let completed_at = input.new_run_state.is_terminal().then(|| timestamp.clone());
             let active_elapsed_delta =
                 i64::try_from(input.active_elapsed_ms_delta).unwrap_or(i64::MAX);
@@ -1881,37 +3065,365 @@ impl Database {
                 .actual_tokens
                 .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
                 .unwrap_or(0);
-            self.connection.execute(
+            let updated_run = self.connection.execute(
                 "UPDATE code_agent_runs
                  SET state = ?1, steps_used = steps_used + 1,
                      active_elapsed_ms = active_elapsed_ms + ?2,
                      actual_tokens = actual_tokens + ?3,
-                     completed_at = ?4, next_event_sequence = next_event_sequence + 1,
-                     updated_at = ?5
-                 WHERE id = ?6",
+                     reserved_tokens = 0, completed_at = ?4, terminal_reason = ?9,
+                     executor_lease_id = CASE WHEN ?1 = 'observing' THEN ?5 ELSE NULL END,
+                     executor_lease_expires_at = CASE WHEN ?1 = 'observing' THEN ?6 ELSE NULL END,
+                     next_event_sequence = next_event_sequence + 1, updated_at = ?7
+                 WHERE id = ?8 AND state = 'planning' AND executor_lease_id = ?5",
                 params![
                     input.new_run_state.as_str(),
                     active_elapsed_delta,
                     actual_tokens_delta,
                     completed_at,
+                    input.executor_lease_id,
+                    input.executor_lease_expires_at,
                     timestamp,
                     input.run_id,
+                    input.terminal_reason,
                 ],
             )?;
+            if updated_run != 1 {
+                return Err(AppError::new(
+                    "code_run_lease_lost",
+                    "Ark Code lost ownership before the completed step could be committed.",
+                ));
+            }
+            let event_summary = match (input.tool_calls.len(), input.completion_rejection.is_some())
+            {
+                (0, true) => "Step completed: final answer rejected, awaiting re-investigation",
+                (0, false) => "Step completed with a final response",
+                (1, _) => "Step completed with a tool call",
+                (n, _) => {
+                    // Static strings for the common cases keep heap allocation out of the fast path
+                    match n {
+                        2 => "Step completed with 2 tool calls",
+                        3 => "Step completed with 3 tool calls",
+                        _ => "Step completed with multiple tool calls",
+                    }
+                }
+            };
             self.append_code_run_event(
                 input.run_id,
                 next_sequence,
                 "step_completed",
                 input.new_run_state,
-                if input.tool_call.is_some() {
-                    "Step completed with a tool call"
-                } else {
-                    "Step completed with a final response"
-                },
+                event_summary,
                 &timestamp,
             )?;
 
             self.get_code_run_detail(input.run_id)
+        })
+    }
+
+    /// Returns true only when the two most recently committed invocations in this run exactly
+    /// match the proposed third call. Non-consecutive repeats do not trip the guard.
+    pub fn would_repeat_code_tool_call_three_times(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        call_hash: &str,
+    ) -> Result<bool, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT inv.tool_name, inv.call_hash FROM code_tool_invocations inv
+             JOIN code_agent_steps steps ON steps.id = inv.step_id
+             WHERE inv.run_id = ?1 ORDER BY steps.step_index DESC, inv.id DESC LIMIT 2",
+        )?;
+        let recent = collect_rows(statement.query_map(params![run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?)?;
+        Ok(recent.len() == 2
+            && recent.iter().all(|(recent_tool, recent_hash)| {
+                recent_tool == tool_name && recent_hash == call_hash
+            }))
+    }
+
+    /// Atomically records the user's hash-bound authorization and the execution intent before
+    /// any Repository write begins. A stale UI, changed proposal, or duplicate click cannot
+    /// acquire the invocation.
+    pub fn begin_approved_code_edit(
+        &self,
+        input: &crate::code_sessions::ApproveCodeEdit<'_>,
+    ) -> Result<(), AppError> {
+        self.transaction(|| {
+            let timestamp = now();
+            let invocation_updated = self.connection.execute(
+                "UPDATE code_tool_invocations
+                 SET state = 'executing', approved_call_hash = ?1,
+                     approved_preview_hash = ?2, approved_precondition_hash = ?3,
+                     approved_by = 'local_user', approved_at = ?4,
+                     execution_lease_id = ?5, execution_started_at = ?4,
+                     verification_plan_json = ?6, updated_at = ?4
+                 WHERE id = ?7 AND run_id = ?8 AND state = 'proposed'
+                   AND tool_name = ?9
+                   AND call_hash = ?1 AND preview_hash = ?2 AND precondition_hash = ?3",
+                params![
+                    input.call_hash,
+                    input.preview_hash,
+                    input.precondition_hash,
+                    timestamp,
+                    input.execution_lease_id,
+                    input.verification_plan_json,
+                    input.invocation_id,
+                    input.run_id,
+                    input.tool_name,
+                ],
+            )?;
+            if invocation_updated != 1 {
+                return Err(AppError::new(
+                    "code_edit_approval_stale",
+                    "This edit proposal changed or was already handled. Review the current run before approving.",
+                ));
+            }
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs
+                 WHERE id = ?1 AND state = 'awaiting_approval'",
+                params![input.run_id],
+                |row| row.get(0),
+            ).map_err(|_| AppError::new(
+                "code_edit_approval_stale",
+                "This run is no longer awaiting approval.",
+            ))?;
+            let run_updated = self.connection.execute(
+                "UPDATE code_agent_runs
+                 SET state = 'executing_tool', executor_lease_id = ?1,
+                     executor_lease_expires_at = ?4,
+                     next_event_sequence = next_event_sequence + 1, updated_at = ?2
+                 WHERE id = ?3 AND state = 'awaiting_approval'",
+                params![
+                    input.execution_lease_id,
+                    timestamp,
+                    input.run_id,
+                    input.execution_lease_expires_at,
+                ],
+            )?;
+            if run_updated != 1 {
+                return Err(AppError::new(
+                    "code_edit_approval_stale",
+                    "This run is no longer awaiting approval.",
+                ));
+            }
+            self.append_code_run_event(
+                input.run_id,
+                next_sequence,
+                &format!("{}_approved", input.tool_name),
+                CodeRunState::ExecutingTool,
+                &format!("User approved the proposed {} operation", input.tool_name),
+                &timestamp,
+            )
+        })
+    }
+
+    /// Commits verification evidence and the tool observation after the atomic write attempt.
+    /// Non-applied and diverged outcomes stop the run for explicit user recovery; they are never
+    /// replayed automatically.
+    pub fn finalize_approved_code_edit(
+        &self,
+        input: &crate::code_sessions::FinalizeCodeEdit<'_>,
+    ) -> Result<CodeRunDetail, AppError> {
+        self.transaction(|| {
+            let timestamp = now();
+            let applied = input.outcome == crate::code_sessions::CodeRecoveryOutcome::Applied;
+            let invocation_state = if applied { "applied" } else { "interrupted" };
+            let outcome = match input.outcome {
+                crate::code_sessions::CodeRecoveryOutcome::Applied => "applied",
+                crate::code_sessions::CodeRecoveryOutcome::NotApplied => "not_applied",
+                crate::code_sessions::CodeRecoveryOutcome::Diverged => "diverged",
+                crate::code_sessions::CodeRecoveryOutcome::Unknown => "unknown",
+            };
+            let invocation_updated = self.connection.execute(
+                "UPDATE code_tool_invocations
+                 SET state = ?1, verification_outcome = ?2,
+                     verification_evidence_json = ?3, updated_at = ?4
+                 WHERE id = ?5 AND run_id = ?6 AND state = 'executing'
+                   AND execution_lease_id = ?7 AND tool_name = ?8",
+                params![
+                    invocation_state,
+                    outcome,
+                    input.evidence_json,
+                    timestamp,
+                    input.invocation_id,
+                    input.run_id,
+                    input.execution_lease_id,
+                    input.tool_name,
+                ],
+            )?;
+            if invocation_updated != 1 {
+                return Err(AppError::new(
+                    "code_edit_execution_conflict",
+                    "Ark Code lost ownership of the approved edit before verification completed.",
+                ));
+            }
+            self.append_audit_event(
+                AuditEventKind::Invoked,
+                input.tool_name,
+                &format!("Ark Code execution verified as {outcome}"),
+            )?;
+            let step_id: String = self.connection.query_row(
+                "SELECT step_id FROM code_tool_invocations WHERE id = ?1",
+                params![input.invocation_id],
+                |row| row.get(0),
+            )?;
+            let observation_id = Uuid::new_v4().to_string();
+            self.connection.execute(
+                "INSERT INTO code_observations (
+                    id, run_id, step_id, invocation_id, kind, content, content_hash,
+                    provenance_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    observation_id,
+                    input.run_id,
+                    step_id,
+                    input.invocation_id,
+                    if applied { "tool_result" } else { "tool_error" },
+                    input.observation_content,
+                    crate::code_sessions::sha256_hex(input.observation_content.as_bytes()),
+                    format!(
+                        "{{\"verificationOutcome\":{}}}",
+                        crate::code_sessions::serialize_json(outcome)?
+                    ),
+                    timestamp,
+                ],
+            )?;
+            let (next_sequence, cancellation_requested): (i64, bool) = self
+                .connection
+                .query_row(
+                    "SELECT next_event_sequence, cancel_requested_at IS NOT NULL FROM code_agent_runs
+                 WHERE id = ?1 AND state = 'executing_tool' AND executor_lease_id = ?2",
+                    params![input.run_id, input.execution_lease_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| {
+                    AppError::new(
+                        "code_edit_execution_conflict",
+                        "Ark Code lost ownership of the run before edit verification completed.",
+                    )
+                })?;
+            let run_state = if applied && cancellation_requested {
+                CodeRunState::Cancelled
+            } else if applied {
+                CodeRunState::Observing
+            } else {
+                CodeRunState::Interrupted
+            };
+            let terminal_reason = match run_state {
+                CodeRunState::Cancelled => Some("user_cancelled".to_string()),
+                CodeRunState::Interrupted => Some(format!(
+                    "{}_verification_requires_attention",
+                    input.tool_name
+                )),
+                _ => None,
+            };
+            let completed_at = run_state.is_terminal().then(|| timestamp.clone());
+            let run_updated = self.connection.execute(
+                "UPDATE code_agent_runs SET state = ?1, executor_lease_id = NULL,
+                     executor_lease_expires_at = NULL, terminal_reason = ?2,
+                     completed_at = ?3, next_event_sequence = next_event_sequence + 1,
+                     updated_at = ?6
+                 WHERE id = ?4 AND state = 'executing_tool' AND executor_lease_id = ?5",
+                params![
+                    run_state.as_str(),
+                    terminal_reason,
+                    completed_at,
+                    input.run_id,
+                    input.execution_lease_id,
+                    timestamp,
+                ],
+            )?;
+            if run_updated != 1 {
+                return Err(AppError::new(
+                    "code_edit_execution_conflict",
+                    "Ark Code lost ownership of the run before edit verification completed.",
+                ));
+            }
+            self.append_code_run_event(
+                input.run_id,
+                next_sequence,
+                &format!("{}_verified", input.tool_name),
+                run_state,
+                if run_state == CodeRunState::Cancelled {
+                    "Approved tool operation completed and was verified; the run then stopped as requested"
+                } else if applied {
+                    "Approved tool operation completed and was verified"
+                } else {
+                    "Approved tool operation requires recovery attention"
+                },
+                &timestamp,
+            )?;
+            self.get_code_run_detail(input.run_id)
+        })
+    }
+
+    pub fn deny_code_edit(
+        &self,
+        run_id: &str,
+        invocation_id: &str,
+        call_hash: &str,
+    ) -> Result<CodeRunDetail, AppError> {
+        self.transaction(|| {
+            let timestamp = now();
+            let (step_id, tool_name): (String, String) = self
+                .connection
+                .query_row(
+                    "SELECT step_id, tool_name FROM code_tool_invocations
+                     WHERE id = ?1 AND run_id = ?2 AND state = 'proposed' AND call_hash = ?3",
+                    params![invocation_id, run_id, call_hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| {
+                    AppError::new(
+                        "code_edit_approval_stale",
+                        "This tool proposal changed or was already handled.",
+                    )
+                })?;
+            let updated = self.connection.execute(
+                "UPDATE code_tool_invocations SET state = 'denied', updated_at = ?1
+                 WHERE id = ?2 AND run_id = ?3 AND state = 'proposed' AND call_hash = ?4",
+                params![timestamp, invocation_id, run_id, call_hash],
+            )?;
+            if updated != 1 {
+                return Err(AppError::new(
+                    "code_edit_approval_stale",
+                    "This edit proposal changed or was already handled.",
+                ));
+            }
+            self.append_audit_event(
+                AuditEventKind::ApprovalDenied,
+                &tool_name,
+                "Local user denied one Ark Code proposal",
+            )?;
+            let next_sequence: i64 = self.connection.query_row(
+                "SELECT next_event_sequence FROM code_agent_runs WHERE id = ?1 AND state = 'awaiting_approval'",
+                params![run_id],
+                |row| row.get(0),
+            ).map_err(|_| AppError::new("code_edit_approval_stale", "This run is no longer awaiting approval."))?;
+            let content = format!(
+                "The user rejected this {tool_name} proposal. Do not assume it was applied."
+            );
+            self.connection.execute(
+                "INSERT INTO code_observations (
+                    id, run_id, step_id, invocation_id, kind, content, content_hash,
+                    provenance_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'tool_error', ?5, ?6, '{\"decision\":\"denied\"}', ?7)",
+                params![Uuid::new_v4().to_string(), run_id, step_id, invocation_id, content,
+                    crate::code_sessions::sha256_hex(content.as_bytes()), timestamp],
+            )?;
+            let run_updated = self.connection.execute(
+                "UPDATE code_agent_runs SET state = 'interrupted', terminal_reason = 'tool_proposal_rejected',
+                     completed_at = ?1, next_event_sequence = next_event_sequence + 1, updated_at = ?1
+                 WHERE id = ?2 AND state = 'awaiting_approval'",
+                params![timestamp, run_id],
+            )?;
+            if run_updated != 1 {
+                return Err(AppError::new("code_edit_approval_stale", "This run is no longer awaiting approval."));
+            }
+            self.append_code_run_event(run_id, next_sequence, &format!("{tool_name}_denied"), CodeRunState::Interrupted,
+                &format!("User denied the proposed {tool_name} operation"), &timestamp)?;
+            self.get_code_run_detail(run_id)
         })
     }
 
@@ -4171,6 +5683,58 @@ fn map_code_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
     })
 }
 
+fn map_code_session_repository(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSessionRepository> {
+    Ok(CodeSessionRepository {
+        session_id: row.get(0)?,
+        root_path: row.get(1)?,
+        repository_identity_hash: row.get(2)?,
+        branch_name: row.get(3)?,
+        base_commit_oid: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn map_code_git_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeGitCheckpoint> {
+    Ok(CodeGitCheckpoint {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        run_id: row.get(2)?,
+        invocation_id: row.get(3)?,
+        commit_oid: row.get(4)?,
+        parent_commit_oid: row.get(5)?,
+        tree_oid: row.get(6)?,
+        message: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+type RawCodeCommandRow = (String, String, String, String, i64, bool, String, String);
+
+fn decode_code_command_row(row: RawCodeCommandRow) -> Result<CodeCommandDefinition, AppError> {
+    let arguments = serde_json::from_str::<Vec<String>>(&row.3).map_err(|_| {
+        AppError::new(
+            "code_command_definition_invalid",
+            "A persisted Ark Code command definition is invalid.",
+        )
+    })?;
+    Ok(CodeCommandDefinition {
+        id: row.0,
+        label: row.1,
+        program: row.2,
+        arguments,
+        timeout_seconds: u32::try_from(row.4).map_err(|_| {
+            AppError::new(
+                "code_command_definition_invalid",
+                "A persisted Ark Code command timeout is invalid.",
+            )
+        })?,
+        enabled: row.5,
+        created_at: row.6,
+        updated_at: row.7,
+    })
+}
+
 fn map_code_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeAgentRun> {
     let state: String = row.get(8)?;
     let recovery_outcome: Option<String> = row.get(20)?;
@@ -4214,20 +5778,31 @@ fn map_code_agent_step(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeAgentSte
         state: code_agent_step_state_from_str(&state)?,
         reserved_tokens: row.get::<_, i64>(4)? as u64,
         actual_tokens: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
-        created_at: row.get(6)?,
+        streaming_text: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
 fn map_code_tool_invocation(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeToolInvocation> {
-    let state: String = row.get(5)?;
+    let state: String = row.get(6)?;
+    let verification_outcome: Option<String> = row.get(11)?;
     Ok(CodeToolInvocation {
         id: row.get(0)?,
         run_id: row.get(1)?,
         step_id: row.get(2)?,
         tool_name: row.get(3)?,
         canonical_arguments_json: row.get(4)?,
+        call_hash: row.get(5)?,
         state: code_tool_invocation_state_from_str(&state)?,
-        created_at: row.get(6)?,
+        preview: row.get(7)?,
+        preview_hash: row.get(8)?,
+        precondition_hash: row.get(9)?,
+        approved_at: row.get(10)?,
+        verification_outcome: verification_outcome
+            .as_deref()
+            .map(code_recovery_outcome_from_str)
+            .transpose()?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -5726,6 +7301,23 @@ mod tests {
     }
 
     #[test]
+    fn repeated_new_chat_creates_distinct_durable_rows() {
+        let (db, path) = test_db();
+
+        let first = db.create_conversation(None).expect("first conversation");
+        let second = db.create_conversation(None).expect("second conversation");
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.title, "New conversation");
+        assert_eq!(second.title, "New conversation");
+        assert!(db.get_conversation(&first.id).is_ok());
+        assert!(db.get_conversation(&second.id).is_ok());
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn new_conversations_start_with_no_settings_override_and_inherit_the_provider_default() {
         let (db, path) = test_db();
 
@@ -5831,6 +7423,41 @@ mod tests {
             .set_conversation_pinned(&created.id, false)
             .expect("unpinned — undo is just the opposite call");
         assert_eq!(unpinned.pinned_at, None);
+
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pinned_navigation_query_is_global_ordered_bounded_and_excludes_archived() {
+        let (db, path) = test_db();
+        let older = db
+            .create_conversation(Some("Older pin".to_string()))
+            .expect("older");
+        let newer = db
+            .create_conversation(Some("Newer pin".to_string()))
+            .expect("newer");
+        let archived = db
+            .create_conversation(Some("Archived pin".to_string()))
+            .expect("archived");
+        db.connection
+            .execute(
+                "UPDATE conversations SET pinned_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+                params![older.id],
+            )
+            .expect("pin older");
+        db.connection
+            .execute(
+                "UPDATE conversations SET pinned_at = '2026-01-02T00:00:00Z' WHERE id = ?1",
+                params![newer.id],
+            )
+            .expect("pin newer");
+        db.connection.execute("UPDATE conversations SET pinned_at = '2026-01-03T00:00:00Z', archived = 1 WHERE id = ?1", params![archived.id]).expect("pin archived");
+
+        let pinned = db.list_pinned_conversations(1).expect("list pins");
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, newer.id);
+        assert!(db.list_pinned_conversations(0).is_err());
 
         drop(db);
         let _ = fs::remove_file(path);
@@ -8940,6 +10567,685 @@ mod tests {
         assert_eq!(detail.events[0].sequence, 0);
         assert_eq!(detail.events[0].schema_version, 1);
         assert_eq!(detail.events[0].state, CodeRunState::Queued);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn code_step_claim_reserves_before_dispatch_and_enforces_executor_ownership() {
+        let (db, path) = test_db();
+        let project = db.create_project("Claim project").expect("project created");
+        let session = db
+            .create_code_session(
+                &project.id,
+                "Claim session",
+                "claim-session",
+                &"1".repeat(64),
+            )
+            .expect("session created");
+        let run = db
+            .create_code_agent_run(&NewCodeRun {
+                session_id: &session.id,
+                parent_run_id: None,
+                provider_id: DEFAULT_PROVIDER_ID,
+                model_id: "test-model",
+                task: "Prove executor ownership",
+                repository_path_snapshot: "C:\\repository",
+                repository_identity_hash: &"d".repeat(64),
+                max_steps: 4,
+                max_active_ms: 60_000,
+                max_tokens: 1_000,
+                max_cost_microunits: None,
+                idempotency_key: "claim-run",
+                request_hash: &"2".repeat(64),
+            })
+            .expect("run created");
+        let claim = crate::code_sessions::NewCodeAgentStepClaim {
+            run_id: &run.id,
+            step_index: 0,
+            prompt_manifest_json: "{\"task\":\"test\"}",
+            context_compaction_summary: Some(
+                "For this test model, Ark omitted one older tool observation.",
+            ),
+            reserved_tokens: 500,
+            reserved_cost_microunits: None,
+            executor_lease_id: "executor-one",
+            executor_lease_expires_at: "2999-01-01T00:00:00Z",
+        };
+        let step_id = db.claim_code_agent_step(&claim).expect("step claimed");
+        let claimed = db.get_code_run_detail(&run.id).expect("claimed run loaded");
+        assert_eq!(claimed.run.state, CodeRunState::Planning);
+        assert_eq!(claimed.run.reserved_tokens, 500);
+        assert_eq!(claimed.steps.len(), 1);
+        assert_eq!(claimed.steps[0].state, CodeAgentStepState::Reserved);
+        assert_eq!(claimed.observations.len(), 1);
+        assert_eq!(claimed.observations[0].kind, CodeObservationKind::System);
+        assert_eq!(
+            claimed.events.last().expect("claim event").kind,
+            "step_reserved"
+        );
+        assert_eq!(claimed.events[1].kind, "context_compacted");
+
+        let competing = crate::code_sessions::NewCodeAgentStepClaim {
+            executor_lease_id: "executor-two",
+            ..claim
+        };
+        let conflict = db
+            .claim_code_agent_step(&competing)
+            .expect_err("a second executor cannot claim the planning run");
+        assert_eq!(conflict.code, "code_run_state_conflict");
+        assert_eq!(
+            db.renew_code_agent_run_lease(&run.id, "executor-two", "2999-01-01T00:00:01Z")
+                .expect_err("a foreign lease cannot renew")
+                .code,
+            "code_run_lease_lost"
+        );
+        db.renew_code_agent_run_lease(&run.id, "executor-one", "2999-01-01T00:00:01Z")
+            .expect("the owner renews");
+        db.mark_code_agent_step_dispatched(
+            &run.id,
+            &step_id,
+            "executor-one",
+            "2999-01-01T00:00:02Z",
+        )
+        .expect("dispatch boundary recorded");
+        db.checkpoint_code_agent_streaming_text(
+            &run.id,
+            &step_id,
+            "executor-one",
+            "Streaming answer",
+        )
+        .expect("owner checkpoints streaming text");
+        assert_eq!(
+            db.get_code_run_detail(&run.id)
+                .expect("streaming run loaded")
+                .steps[0]
+                .streaming_text
+                .as_deref(),
+            Some("Streaming answer")
+        );
+        assert_eq!(
+            db.checkpoint_code_agent_streaming_text(&run.id, &step_id, "executor-two", "forged",)
+                .expect_err("foreign streaming writer rejected")
+                .code,
+            "code_run_lease_lost"
+        );
+
+        let wrong_owner = crate::code_sessions::NewCodeAgentStep {
+            run_id: &run.id,
+            step_id: &step_id,
+            executor_lease_id: "executor-two",
+            executor_lease_expires_at: "2999-01-01T00:00:03Z",
+            step_index: 0,
+            actual_tokens: Some(25),
+            active_elapsed_ms_delta: 5,
+            model_text: Some("must roll back".to_string()),
+            tool_calls: vec![],
+            completion_rejection: None,
+            new_run_state: CodeRunState::Completed,
+            terminal_reason: None,
+        };
+        assert_eq!(
+            db.commit_code_agent_step(&wrong_owner)
+                .expect_err("a foreign executor cannot commit")
+                .code,
+            "code_run_lease_lost"
+        );
+        let unchanged = db.get_code_run_detail(&run.id).expect("run reloaded");
+        assert_eq!(unchanged.steps[0].state, CodeAgentStepState::Dispatched);
+        assert_eq!(unchanged.observations.len(), 1);
+        assert_eq!(unchanged.observations[0].kind, CodeObservationKind::System);
+
+        let finished = db
+            .finish_claimed_code_agent_step(&crate::code_sessions::FinishCodeAgentStep {
+                run_id: &run.id,
+                step_id: &step_id,
+                executor_lease_id: "executor-one",
+                step_state: CodeAgentStepState::Interrupted,
+                run_state: CodeRunState::Interrupted,
+                terminal_reason: "test_interruption",
+                event_kind: "run_interrupted",
+                event_summary: "Test interrupted after known usage",
+                actual_tokens: Some(25),
+                active_elapsed_ms_delta: 5,
+                retain_reservation: false,
+            })
+            .expect("owner terminates claimed step");
+        assert_eq!(finished.run.actual_tokens, 25);
+        assert_eq!(finished.run.reserved_tokens, 0);
+        assert_eq!(finished.steps[0].state, CodeAgentStepState::Interrupted);
+        assert_eq!(finished.steps[0].streaming_text, None);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn code_edit_proposal_requires_exact_approval_and_commits_verified_outcome() {
+        let (db, path) = test_db();
+        let project = db.create_project("Edit project").expect("project created");
+        let session = db
+            .create_code_session(&project.id, "Edit session", "edit-session", &"1".repeat(64))
+            .expect("session created");
+        let run = db
+            .create_code_agent_run(&NewCodeRun {
+                session_id: &session.id,
+                parent_run_id: None,
+                provider_id: DEFAULT_PROVIDER_ID,
+                model_id: "test-model",
+                task: "Edit a file",
+                repository_path_snapshot: "C:\\repository",
+                repository_identity_hash: &"2".repeat(64),
+                max_steps: 4,
+                max_active_ms: 60_000,
+                max_tokens: 1_000,
+                max_cost_microunits: None,
+                idempotency_key: "edit-run",
+                request_hash: &"3".repeat(64),
+            })
+            .expect("run created");
+        let step_id = db
+            .claim_code_agent_step(&crate::code_sessions::NewCodeAgentStepClaim {
+                run_id: &run.id,
+                step_index: 0,
+                prompt_manifest_json: "{}",
+                context_compaction_summary: None,
+                reserved_tokens: 200,
+                reserved_cost_microunits: None,
+                executor_lease_id: "planner",
+                executor_lease_expires_at: "2999-01-01T00:00:00Z",
+            })
+            .expect("step claimed");
+        db.mark_code_agent_step_dispatched(&run.id, &step_id, "planner", "2999-01-01T00:00:01Z")
+            .expect("step dispatched");
+        let preview = crate::code_write_tools::EditFilePreview {
+            path: "src/lib.rs".to_string(),
+            diff: "- old\n+ new\n".to_string(),
+            before_hash: "4".repeat(64),
+            expected_after_hash: "5".repeat(64),
+            call_hash: "6".repeat(64),
+            preview_hash: "7".repeat(64),
+            precondition_hash: "8".repeat(64),
+        };
+        let proposed = db
+            .commit_code_agent_step(&crate::code_sessions::NewCodeAgentStep {
+                run_id: &run.id,
+                step_id: &step_id,
+                executor_lease_id: "planner",
+                executor_lease_expires_at: "2999-01-01T00:00:02Z",
+                step_index: 0,
+                actual_tokens: Some(20),
+                active_elapsed_ms_delta: 5,
+                model_text: None,
+                tool_calls: vec![crate::code_sessions::NewCodeToolCallOutcome {
+                    provider_call_id: Some("provider-call"),
+                    tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+                    canonical_arguments_json:
+                        "{\"path\":\"src/lib.rs\",\"edits\":[{\"search\":\"old\",\"replace\":\"new\"}]}"
+                            .to_string(),
+                    scope_json: "{}".to_string(),
+                    succeeded: true,
+                    observation_content: None,
+                    approval_preview: Some(preview.clone().into()),
+                    loop_detected: false,
+                }],
+                completion_rejection: None,
+                new_run_state: CodeRunState::AwaitingApproval,
+                terminal_reason: None,
+            })
+            .expect("proposal committed");
+        assert_eq!(proposed.run.state, CodeRunState::AwaitingApproval);
+        assert_eq!(
+            proposed.invocations[0].state,
+            crate::code_sessions::CodeToolInvocationState::Proposed
+        );
+        assert!(proposed.observations.is_empty());
+        let invocation_id = proposed.invocations[0].id.clone();
+        let proposal_audit = db.list_audit_events().expect("proposal audit listed");
+        assert!(proposal_audit.iter().any(|event| {
+            event.kind == AuditEventKind::ApprovalRequested
+                && event.tool_id == crate::code_write_tools::EDIT_FILE_TOOL_ID
+        }));
+
+        let stale = db
+            .begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+                run_id: &run.id,
+                invocation_id: &invocation_id,
+                tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+                call_hash: &"9".repeat(64),
+                preview_hash: &preview.preview_hash,
+                precondition_hash: &preview.precondition_hash,
+                execution_lease_id: "edit-executor",
+                execution_lease_expires_at: "2999-01-01T00:00:00Z",
+                verification_plan_json: "{}",
+            })
+            .expect_err("changed approval hash rejected");
+        assert_eq!(stale.code, "code_edit_approval_stale");
+        assert_eq!(
+            db.get_code_run_detail(&run.id)
+                .expect("run reloaded")
+                .invocations[0]
+                .state,
+            crate::code_sessions::CodeToolInvocationState::Proposed
+        );
+
+        db.begin_approved_code_edit(&crate::code_sessions::ApproveCodeEdit {
+            run_id: &run.id,
+            invocation_id: &invocation_id,
+            tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+            call_hash: &preview.call_hash,
+            preview_hash: &preview.preview_hash,
+            precondition_hash: &preview.precondition_hash,
+            execution_lease_id: "edit-executor",
+            execution_lease_expires_at: "2999-01-01T00:00:00Z",
+            verification_plan_json: "{}",
+        })
+        .expect("exact approval acquires execution");
+        let executing = db
+            .get_code_run_detail(&run.id)
+            .expect("executing run loaded");
+        assert_eq!(executing.run.state, CodeRunState::ExecutingTool);
+        assert_eq!(
+            executing.invocations[0].state,
+            crate::code_sessions::CodeToolInvocationState::Executing
+        );
+
+        let finalized = db
+            .finalize_approved_code_edit(&crate::code_sessions::FinalizeCodeEdit {
+                run_id: &run.id,
+                invocation_id: &invocation_id,
+                tool_name: crate::code_write_tools::EDIT_FILE_TOOL_ID,
+                execution_lease_id: "edit-executor",
+                outcome: crate::code_sessions::CodeRecoveryOutcome::Applied,
+                evidence_json: "{}",
+                observation_content: "{\"outcome\":\"applied\"}",
+            })
+            .expect("verified edit finalized");
+        assert_eq!(finalized.run.state, CodeRunState::Observing);
+        assert_eq!(finalized.run.completed_at, None);
+        assert_eq!(
+            finalized.invocations[0].state,
+            crate::code_sessions::CodeToolInvocationState::Applied
+        );
+        assert_eq!(finalized.observations.len(), 1);
+        let finalized_audit = db.list_audit_events().expect("final audit listed");
+        assert!(finalized_audit.iter().any(|event| {
+            event.kind == AuditEventKind::Invoked
+                && event.tool_id == crate::code_write_tools::EDIT_FILE_TOOL_ID
+        }));
+
+        // Simulate a crash after a second edit's atomic rename but before its verification
+        // transaction. Startup must classify the actual file and must not replay the write.
+        let recovery_root =
+            std::env::temp_dir().join(format!("ark-edit-recovery-{}", Uuid::new_v4()));
+        fs::create_dir_all(&recovery_root).expect("recovery repository created");
+        fs::write(recovery_root.join("lib.rs"), b"new").expect("simulated rename landed");
+        let before_hash = crate::code_sessions::sha256_hex(b"old");
+        let expected_hash = crate::code_sessions::sha256_hex(b"new");
+        let recovery_invocation_id = Uuid::new_v4().to_string();
+        let recovery_plan = crate::code_sessions::serialize_json(&serde_json::json!({
+            "kind": "file_hash_v1",
+            "path": "lib.rs",
+            "beforeHash": before_hash,
+            "expectedAfterHash": expected_hash,
+        }))
+        .expect("recovery plan serialized");
+        db.connection
+            .execute(
+                "UPDATE code_agent_runs SET state = 'executing_tool', completed_at = NULL,
+                     terminal_reason = NULL, repository_path_snapshot = ?1,
+                     executor_lease_id = 'recovery-owner',
+                     executor_lease_expires_at = '2000-01-01T00:00:00Z'
+                 WHERE id = ?2",
+                params![recovery_root.display().to_string(), run.id],
+            )
+            .expect("crashed run staged");
+        db.connection
+            .execute(
+                "INSERT INTO code_tool_invocations (
+                    id, run_id, step_id, tool_name, canonical_arguments_json, call_hash,
+                    scope_json, idempotency_policy, state, execution_lease_id,
+                    verification_plan_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'edit_file', '{}', ?4, '{}',
+                           'requires_fresh_approval', 'executing', 'recovery-owner', ?5, ?6, ?6)",
+                params![
+                    recovery_invocation_id,
+                    run.id,
+                    step_id,
+                    "a".repeat(64),
+                    recovery_plan,
+                    now(),
+                ],
+            )
+            .expect("crashed invocation staged");
+        assert_eq!(
+            db.recover_executing_code_edits()
+                .expect("startup edit recovery runs"),
+            1
+        );
+        let recovered = db
+            .get_code_run_detail(&run.id)
+            .expect("recovered run loaded");
+        assert_eq!(recovered.run.state, CodeRunState::Observing);
+        let recovered_invocation = recovered
+            .invocations
+            .iter()
+            .find(|item| item.id == recovery_invocation_id)
+            .expect("recovered invocation present");
+        assert_eq!(
+            recovered_invocation.verification_outcome,
+            Some(crate::code_sessions::CodeRecoveryOutcome::Applied)
+        );
+        assert_eq!(
+            fs::read(recovery_root.join("lib.rs")).expect("recovered target readable"),
+            b"new",
+            "recovery verifies but never replays or rewrites the edit"
+        );
+        let _ = fs::remove_dir_all(recovery_root);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn code_run_cancellation_is_durable_state_aware_and_idempotent() {
+        let (db, path) = test_db();
+        let project = db
+            .create_project("Cancellation project")
+            .expect("project created");
+
+        let create_run = |session_id: &str, suffix: &str| {
+            db.create_code_agent_run(&NewCodeRun {
+                session_id,
+                parent_run_id: None,
+                provider_id: DEFAULT_PROVIDER_ID,
+                model_id: "test-model",
+                task: "Investigate cancellation",
+                repository_path_snapshot: "C:\\repository",
+                repository_identity_hash: &"d".repeat(64),
+                max_steps: 12,
+                max_active_ms: 600_000,
+                max_tokens: 32_768,
+                max_cost_microunits: None,
+                idempotency_key: suffix,
+                request_hash: &"e".repeat(64),
+            })
+            .expect("run created")
+        };
+
+        let queued_session = db
+            .create_code_session(
+                &project.id,
+                "Queued cancellation",
+                "queued-session",
+                &"1".repeat(64),
+            )
+            .expect("queued session created");
+        let queued = create_run(&queued_session.id, "queued-run");
+        let cancelled = db
+            .request_code_agent_run_cancellation(&queued.id)
+            .expect("queued run cancellation committed");
+        assert_eq!(cancelled.state, CodeRunState::Cancelled);
+        assert_eq!(cancelled.terminal_reason.as_deref(), Some("user_cancelled"));
+        assert!(cancelled.cancel_requested_at.is_some());
+        assert!(cancelled.completed_at.is_some());
+        let cancelled_detail = db.get_code_run_detail(&queued.id).expect("detail loaded");
+        assert_eq!(cancelled_detail.events.len(), 2);
+        assert_eq!(cancelled_detail.events[1].kind, "run_cancelled");
+        assert_eq!(cancelled_detail.events[1].sequence, 1);
+        db.request_code_agent_run_cancellation(&queued.id)
+            .expect("repeated cancellation is accepted");
+        assert_eq!(
+            db.get_code_run_detail(&queued.id)
+                .expect("detail reloaded")
+                .events
+                .len(),
+            2,
+            "idempotent cancellation must not append duplicate events"
+        );
+
+        let planning_session = db
+            .create_code_session(
+                &project.id,
+                "Planning cancellation",
+                "planning-session",
+                &"2".repeat(64),
+            )
+            .expect("planning session created");
+        let planning = create_run(&planning_session.id, "planning-run");
+        db.transition_code_agent_run(
+            &planning.id,
+            &[CodeRunState::Queued],
+            CodeRunState::Planning,
+            None,
+            "run_planning",
+            "Planning started",
+        )
+        .expect("run starts planning");
+        let requested = db
+            .request_code_agent_run_cancellation(&planning.id)
+            .expect("planning cancellation requested");
+        assert_eq!(requested.state, CodeRunState::Planning);
+        assert!(requested.cancel_requested_at.is_some());
+        assert!(requested.completed_at.is_none());
+        let requested_detail = db.get_code_run_detail(&planning.id).expect("detail loaded");
+        assert_eq!(requested_detail.events.len(), 3);
+        assert_eq!(requested_detail.events[2].kind, "cancel_requested");
+        assert_eq!(requested_detail.events[2].state, CodeRunState::Planning);
+
+        drop(db);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn code_run_startup_recovery_is_leased_conservative_and_idempotent() {
+        let (db, path) = test_db();
+        let project = db
+            .create_project("Recovery project")
+            .expect("project created");
+        let create_run = |name: &str| {
+            let session = db
+                .create_code_session(
+                    &project.id,
+                    name,
+                    &format!("{name}-session"),
+                    &"1".repeat(64),
+                )
+                .expect("session created");
+            db.create_code_agent_run(&NewCodeRun {
+                session_id: &session.id,
+                parent_run_id: None,
+                provider_id: DEFAULT_PROVIDER_ID,
+                model_id: "test-model",
+                task: "Recover safely",
+                repository_path_snapshot: "C:\\repository",
+                repository_identity_hash: &"d".repeat(64),
+                max_steps: 12,
+                max_active_ms: 600_000,
+                max_tokens: 32_768,
+                max_cost_microunits: None,
+                idempotency_key: &format!("{name}-run"),
+                request_hash: &"2".repeat(64),
+            })
+            .expect("run created")
+        };
+        let transition = |run_id: &str, state: CodeRunState| {
+            db.transition_code_agent_run(
+                run_id,
+                &[CodeRunState::Queued],
+                CodeRunState::Planning,
+                None,
+                "run_planning",
+                "Planning started",
+            )
+            .expect("planning entered");
+            if state != CodeRunState::Planning {
+                db.transition_code_agent_run(
+                    run_id,
+                    &[CodeRunState::Planning],
+                    state,
+                    (state == CodeRunState::Completed).then_some("fixture_completed"),
+                    if state == CodeRunState::Completed {
+                        "run_completed"
+                    } else {
+                        "run_observing"
+                    },
+                    "Fixture transition",
+                )
+                .expect("target state entered");
+            }
+        };
+
+        let queued = create_run("queued");
+        let planning = create_run("planning");
+        transition(&planning.id, CodeRunState::Planning);
+        let observing = create_run("observing");
+        transition(&observing.id, CodeRunState::Observing);
+        let completed = create_run("completed");
+        transition(&completed.id, CodeRunState::Completed);
+        let leased = create_run("leased");
+        transition(&leased.id, CodeRunState::Planning);
+        db.connection
+            .execute(
+                "UPDATE code_agent_runs
+                 SET executor_lease_id = 'other-process', executor_lease_expires_at = '2999-01-01T00:00:00Z'
+                 WHERE id = ?1",
+                params![leased.id],
+            )
+            .expect("unexpired competing lease recorded");
+
+        let reserved = create_run("reserved-step");
+        let reserved_step = db
+            .claim_code_agent_step(&crate::code_sessions::NewCodeAgentStepClaim {
+                run_id: &reserved.id,
+                step_index: 0,
+                prompt_manifest_json: "{}",
+                context_compaction_summary: None,
+                reserved_tokens: 512,
+                reserved_cost_microunits: None,
+                executor_lease_id: "crashed-before-dispatch",
+                executor_lease_expires_at: "2000-01-01T00:00:00Z",
+            })
+            .expect("reserved step created");
+        let dispatched = create_run("dispatched-step");
+        let dispatched_step = db
+            .claim_code_agent_step(&crate::code_sessions::NewCodeAgentStepClaim {
+                run_id: &dispatched.id,
+                step_index: 0,
+                prompt_manifest_json: "{}",
+                context_compaction_summary: None,
+                reserved_tokens: 512,
+                reserved_cost_microunits: None,
+                executor_lease_id: "crashed-after-dispatch",
+                executor_lease_expires_at: "2999-01-01T00:00:00Z",
+            })
+            .expect("dispatched step reserved");
+        db.mark_code_agent_step_dispatched(
+            &dispatched.id,
+            &dispatched_step,
+            "crashed-after-dispatch",
+            "2000-01-01T00:00:00Z",
+        )
+        .expect("dispatch recorded with an expired fixture lease");
+
+        assert_eq!(
+            db.recover_stale_code_agent_runs().expect("recovery runs"),
+            4
+        );
+        assert_eq!(
+            db.get_code_agent_run(&queued.id)
+                .expect("queued reloaded")
+                .state,
+            CodeRunState::Queued
+        );
+        let planning = db
+            .get_code_run_detail(&planning.id)
+            .expect("planning reloaded");
+        assert_eq!(planning.run.state, CodeRunState::Interrupted);
+        assert_eq!(
+            planning.run.terminal_reason.as_deref(),
+            Some("startup_provider_outcome_unknown")
+        );
+        assert_eq!(
+            planning.events.last().expect("recovery event").kind,
+            "run_recovered_interrupted"
+        );
+        let observing = db
+            .get_code_agent_run(&observing.id)
+            .expect("observing reloaded");
+        assert_eq!(observing.state, CodeRunState::Interrupted);
+        assert_eq!(
+            observing.terminal_reason.as_deref(),
+            Some("startup_resume_required")
+        );
+        assert_eq!(
+            db.get_code_agent_run(&completed.id)
+                .expect("completed reloaded")
+                .state,
+            CodeRunState::Completed
+        );
+        assert_eq!(
+            db.get_code_agent_run(&leased.id)
+                .expect("leased reloaded")
+                .state,
+            CodeRunState::Planning,
+            "an unexpired lease owned elsewhere must win the recovery race"
+        );
+        let reserved = db
+            .get_code_run_detail(&reserved.id)
+            .expect("reserved step recovered");
+        assert_eq!(reserved.run.reserved_tokens, 0);
+        assert_eq!(reserved.steps[0].id, reserved_step);
+        assert_eq!(reserved.steps[0].state, CodeAgentStepState::Interrupted);
+        let dispatched = db
+            .get_code_run_detail(&dispatched.id)
+            .expect("dispatched step recovered");
+        assert_eq!(
+            dispatched.run.reserved_tokens, 512,
+            "unknown dispatched usage keeps the worst-case reservation"
+        );
+        assert_eq!(dispatched.steps[0].state, CodeAgentStepState::Interrupted);
+
+        db.connection
+            .execute(
+                "UPDATE code_agent_runs SET executor_lease_expires_at = '2000-01-01T00:00:00Z'
+                 WHERE id = ?1",
+                params![leased.id],
+            )
+            .expect("lease expired for retry");
+        assert_eq!(
+            db.recover_stale_code_agent_runs()
+                .expect("expired lease recovered"),
+            1
+        );
+        assert_eq!(
+            db.recover_stale_code_agent_runs()
+                .expect("recovery repeats"),
+            0
+        );
+        let leased = db
+            .get_code_agent_run(&leased.id)
+            .expect("leased run reloaded");
+        assert_eq!(leased.state, CodeRunState::Interrupted);
+        let cleared_lease: (Option<String>, Option<String>) = db
+            .connection
+            .query_row(
+                "SELECT executor_lease_id, executor_lease_expires_at
+                 FROM code_agent_runs WHERE id = ?1",
+                params![leased.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("cleared lease loaded");
+        assert_eq!(cleared_lease, (None, None));
 
         drop(db);
         let _ = fs::remove_file(&path);

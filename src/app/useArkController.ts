@@ -2,6 +2,7 @@ import * as React from "react";
 import { getErrorMessage, normalizeError } from "../lib/arkErrors";
 import type { SettingsSectionId } from "../lib/settingsSections";
 import { findShortcut, matchesShortcut } from "../lib/shortcuts";
+import { needsNewChatConfirmation } from "../lib/newChatLifecycle";
 import { useArkClient } from "../lib/useArkClient";
 import {
   entityCollection,
@@ -21,6 +22,7 @@ import {
 } from "../state/reconciliation";
 import { useArkStores } from "../state/useArkStores";
 import type {
+  AccentPalette,
   BuiltInRuntimeStatus,
   Conversation,
   Message,
@@ -43,7 +45,9 @@ const MESSAGE_PAGE_INCREMENT = 50;
 
 export interface ArkController {
   bootstrap: () => Promise<void>;
-  createConversation: () => Promise<void>;
+  createConversation: (discardDraft?: boolean) => Promise<void>;
+  setChatComposerDraft: (draft: string) => void;
+  dismissNewChatConfirmation: () => void;
   selectConversation: (id: string) => void;
   deleteActiveConversation: () => void;
   importConversation: (conversation: Conversation) => void;
@@ -53,6 +57,7 @@ export interface ArkController {
    * if there's nothing more to load or a page is already in flight. */
   loadOlderMessages: () => Promise<void>;
   searchConversations: (query: string) => Promise<void>;
+  filterConversationsByProject: (projectId: string | null) => Promise<void>;
   loadMoreConversations: () => Promise<void>;
   /** FTR-002: undo is calling this again with the opposite value. */
   changeConversationArchived: (id: string, archived: boolean) => Promise<void>;
@@ -76,6 +81,7 @@ export interface ArkController {
   removePersona: (id: string) => void;
   changeApplicationInstructions: (instructions: string | null) => Promise<void>;
   changeTheme: (theme: ThemeMode) => Promise<void>;
+  changeAccentPalette: (palette: AccentPalette) => Promise<void>;
   changeBuiltInModelPath: (path: string) => Promise<void>;
   changeManagedModelDirectory: (path: string | null) => Promise<void>;
   changeCrashCaptureEnabled: (enabled: boolean) => Promise<void>;
@@ -144,6 +150,7 @@ export function useArkController(): ArkController {
   const client = useArkClient();
   const stores = useArkStores();
   const historySequenceRef = React.useRef(0);
+  const createConversationInFlightRef = React.useRef(false);
   const transcriptSequenceRef = React.useRef(0);
   const reconciliationSequenceByConversationRef = React.useRef(new Map<string, number>());
   // FTR-009: per-provider sequencing so a slower, earlier refresh can never overwrite a
@@ -379,19 +386,25 @@ export function useArkController(): ArkController {
   const bootstrap = React.useCallback(async () => {
     patchStore(stores.shell, { booting: true, bootstrapError: null });
     try {
-      const [data, sidecarStatus] = await Promise.all([client.getAppBootstrap(), client.getBuiltInRuntimeStatus()]);
+      const [data, sidecarStatus, pinnedConversations] = await Promise.all([
+        client.getAppBootstrap(),
+        client.getBuiltInRuntimeStatus(),
+        client.listPinnedConversations(50),
+      ]);
       let conversations = data.conversationPage.items;
       if (conversations.length === 0) {
         conversations = [await client.createConversation()];
       }
       stores.catalog.set({
         conversations: entityCollection(conversations),
+        pinnedConversations: entityCollection(pinnedConversations),
         nextCursor: data.conversationPage.nextCursor ?? null,
         search: "",
         isLoading: false,
         activeId: conversations[0]?.id,
         searchSnippets: data.conversationPage.searchSnippets,
         showArchived: false,
+        selectedProjectId: null,
       });
       stores.providers.set({
         providers: entityCollection(data.providers),
@@ -405,6 +418,7 @@ export function useArkController(): ArkController {
         workspace: data.workspace,
         applicationInstructions: data.applicationInstructions,
         theme: data.deviceSettings.theme,
+        accentPalette: data.deviceSettings.accentPalette,
         builtInStatus: sidecarStatus,
         builtInModelPath: data.deviceSettings.builtInModelPath ?? null,
         managedModelDirectory: data.deviceSettings.managedModelDirectory ?? null,
@@ -441,29 +455,58 @@ export function useArkController(): ArkController {
     }
   }, [client, loadConversation, refreshProviderModels, stores]);
 
-  const createConversation = React.useCallback(async () => {
-    try {
-      const conversation = await client.createConversation();
-      const catalog = stores.catalog.getSnapshot();
-      const conversations = entityList(catalog.conversations);
-      stores.catalog.set({
-        ...catalog,
-        conversations: entityCollection([conversation, ...conversations.filter((item) => item.id !== conversation.id)]),
-        activeId: conversation.id,
-      });
-      stores.transcript.set({
-        conversationId: conversation.id,
-        messages: [],
-        isLoading: false,
-        hasMoreOlder: false,
-        isLoadingOlder: false,
-      });
-      const shell = stores.shell.getSnapshot();
-      patchStore(stores.shell, { view: "chat", focusComposerSignal: shell.focusComposerSignal + 1 });
-    } catch (error) {
-      setError(getErrorMessage(error));
-    }
-  }, [client, setError, stores]);
+  const createConversation = React.useCallback(
+    async (discardDraft = false) => {
+      const initialShell = stores.shell.getSnapshot();
+      if (needsNewChatConfirmation(initialShell.chatComposerDraft, discardDraft)) {
+        patchStore(stores.shell, { newChatConfirmationRequested: true });
+        return;
+      }
+      if (createConversationInFlightRef.current) return;
+      createConversationInFlightRef.current = true;
+      try {
+        const conversation = await client.createConversation();
+        const catalog = stores.catalog.getSnapshot();
+        const conversations = entityList(catalog.conversations);
+        stores.catalog.set({
+          ...catalog,
+          conversations: entityCollection([
+            conversation,
+            ...conversations.filter((item) => item.id !== conversation.id),
+          ]),
+          activeId: conversation.id,
+        });
+        stores.transcript.set({
+          conversationId: conversation.id,
+          messages: [],
+          isLoading: false,
+          hasMoreOlder: false,
+          isLoadingOlder: false,
+        });
+        const shell = stores.shell.getSnapshot();
+        patchStore(stores.shell, {
+          view: "chat",
+          focusComposerSignal: shell.focusComposerSignal + 1,
+          chatComposerDraft: "",
+          newChatConfirmationRequested: false,
+        });
+      } catch (error) {
+        setError(getErrorMessage(error));
+      } finally {
+        createConversationInFlightRef.current = false;
+      }
+    },
+    [client, setError, stores],
+  );
+
+  const setChatComposerDraft = React.useCallback(
+    (chatComposerDraft: string) => patchStore(stores.shell, { chatComposerDraft }),
+    [stores],
+  );
+  const dismissNewChatConfirmation = React.useCallback(
+    () => patchStore(stores.shell, { newChatConfirmationRequested: false }),
+    [stores],
+  );
 
   const deleteActiveConversation = React.useCallback(() => {
     const catalog = stores.catalog.getSnapshot();
@@ -515,6 +558,7 @@ export function useArkController(): ArkController {
       const normalizedQuery = query.trim();
       const sequence = ++historySequenceRef.current;
       const showArchived = stores.catalog.getSnapshot().showArchived;
+      const selectedProjectId = stores.catalog.getSnapshot().selectedProjectId;
       patchStore(stores.catalog, { search: normalizedQuery, isLoading: true });
       try {
         const page = await client.listConversations({
@@ -523,6 +567,7 @@ export function useArkController(): ArkController {
           // FTR-002: `null` includes archived conversations alongside active ones; `false`
           // (the default) excludes them, matching the existing pre-toggle behavior.
           archived: showArchived ? null : false,
+          projectId: selectedProjectId,
         });
         if (!isLatestRequest(sequence, historySequenceRef.current)) return;
         const catalog = stores.catalog.getSnapshot();
@@ -560,6 +605,7 @@ export function useArkController(): ArkController {
         cursor: catalog.nextCursor,
         query: catalog.search || null,
         archived: catalog.showArchived ? null : false,
+        projectId: catalog.selectedProjectId,
       });
       if (!isLatestRequest(sequence, historySequenceRef.current)) return;
       const current = stores.catalog.getSnapshot();
@@ -577,6 +623,14 @@ export function useArkController(): ArkController {
       }
     }
   }, [client, setError, stores]);
+
+  const filterConversationsByProject = React.useCallback(
+    async (selectedProjectId: string | null) => {
+      patchStore(stores.catalog, { selectedProjectId });
+      await searchConversations(stores.catalog.getSnapshot().search);
+    },
+    [searchConversations, stores],
+  );
 
   /** FTR-002: re-runs the current search/archived-visibility combination — the same fetch
    * `searchConversations`/`loadMoreConversations` already know how to do, just re-triggered
@@ -604,10 +658,15 @@ export function useArkController(): ArkController {
             conversations: entityCollection(
               entityList(stores.catalog.getSnapshot().conversations).filter((item) => item.id !== id),
             ),
+            pinnedConversations: removeEntity(stores.catalog.getSnapshot().pinnedConversations, id),
           });
         } else {
           patchStore(stores.catalog, {
             conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+            pinnedConversations:
+              updated.pinnedAt && !updated.archived
+                ? upsertEntity(stores.catalog.getSnapshot().pinnedConversations, updated)
+                : removeEntity(stores.catalog.getSnapshot().pinnedConversations, id),
           });
         }
       } catch (error) {
@@ -623,6 +682,9 @@ export function useArkController(): ArkController {
         const updated = await client.setConversationPinned(id, pinned);
         patchStore(stores.catalog, {
           conversations: upsertEntity(stores.catalog.getSnapshot().conversations, updated),
+          pinnedConversations: pinned
+            ? upsertEntity(stores.catalog.getSnapshot().pinnedConversations, updated)
+            : removeEntity(stores.catalog.getSnapshot().pinnedConversations, id),
         });
       } catch (error) {
         setError(getErrorMessage(error));
@@ -742,6 +804,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: settings.builtInModelPath,
           managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
@@ -773,6 +836,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme: settings.theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: path,
           managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
@@ -799,6 +863,41 @@ export function useArkController(): ArkController {
     [client, setError, stores],
   );
 
+  const changeAccentPalette = React.useCallback(
+    async (accentPalette: AccentPalette) => {
+      const settings = stores.settings.getSnapshot();
+      const sequence = ++settingsMutationSequenceRef.current;
+      patchStore(stores.settings, { accentPalette });
+      const operation = settingsWriteQueueRef.current.then(() =>
+        client.updateDeviceSettings({
+          theme: settings.theme,
+          accentPalette,
+          builtInModelPath: settings.builtInModelPath,
+          managedModelDirectory: settings.managedModelDirectory,
+          crashCaptureEnabled: settings.crashCaptureEnabled,
+          completionNotificationsEnabled: settings.completionNotificationsEnabled,
+          perfMetricsEnabled: settings.perfMetricsEnabled,
+        }),
+      );
+      settingsWriteQueueRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        await operation;
+      } catch (error) {
+        if (
+          sequence === settingsMutationSequenceRef.current &&
+          stores.settings.getSnapshot().accentPalette === accentPalette
+        ) {
+          patchStore(stores.settings, { accentPalette: settings.accentPalette });
+        }
+        setError(getErrorMessage(error));
+      }
+    },
+    [client, setError, stores],
+  );
+
   const changeManagedModelDirectory = React.useCallback(
     async (path: string | null) => {
       const settings = stores.settings.getSnapshot();
@@ -807,6 +906,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme: settings.theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: settings.builtInModelPath,
           managedModelDirectory: path,
           crashCaptureEnabled: settings.crashCaptureEnabled,
@@ -843,6 +943,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme: settings.theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: settings.builtInModelPath,
           managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: enabled,
@@ -888,6 +989,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme: settings.theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: settings.builtInModelPath,
           managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
@@ -925,6 +1027,7 @@ export function useArkController(): ArkController {
       const operation = settingsWriteQueueRef.current.then(() =>
         client.updateDeviceSettings({
           theme: settings.theme,
+          accentPalette: settings.accentPalette,
           builtInModelPath: settings.builtInModelPath,
           managedModelDirectory: settings.managedModelDirectory,
           crashCaptureEnabled: settings.crashCaptureEnabled,
@@ -1064,6 +1167,7 @@ export function useArkController(): ArkController {
     const applySettings = () => {
       const settings = stores.settings.getSnapshot();
       document.documentElement.classList.toggle("dark", settings.theme === "dark");
+      document.documentElement.dataset.accent = settings.accentPalette;
       localStorage.setItem("ark.theme", settings.theme);
     };
     const applyShell = () => {
@@ -1142,6 +1246,8 @@ export function useArkController(): ArkController {
     () => ({
       bootstrap,
       createConversation,
+      setChatComposerDraft,
+      dismissNewChatConfirmation,
       selectConversation,
       deleteActiveConversation,
       importConversation,
@@ -1149,6 +1255,7 @@ export function useArkController(): ArkController {
       setMessages,
       loadOlderMessages,
       searchConversations,
+      filterConversationsByProject,
       loadMoreConversations,
       changeConversationArchived,
       changeConversationPinned,
@@ -1165,6 +1272,7 @@ export function useArkController(): ArkController {
       removePersona,
       changeApplicationInstructions,
       changeTheme,
+      changeAccentPalette,
       changeBuiltInModelPath,
       changeManagedModelDirectory,
       changeCrashCaptureEnabled,
@@ -1195,7 +1303,10 @@ export function useArkController(): ArkController {
       changeCompletionNotificationsEnabled,
       changePerfMetricsEnabled,
       changeTheme,
+      changeAccentPalette,
       createConversation,
+      setChatComposerDraft,
+      dismissNewChatConfirmation,
       deleteActiveConversation,
       importConversation,
       loadMoreConversations,
@@ -1212,6 +1323,7 @@ export function useArkController(): ArkController {
       saveProvider,
       removeProvider,
       searchConversations,
+      filterConversationsByProject,
       selectConversation,
       setBuiltInStatus,
       setShowArchived,

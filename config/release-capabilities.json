@@ -70,6 +70,10 @@
     "webSearch": false,
     "voice": false,
     "automations": false,
-    "mobileClient": false
+    "mobileClient": false,
+    "accentPreview": true
+  },
+  "internalPreviews": {
+    "accentPaletteReviewBy": "2026-09-15"
   }
 }

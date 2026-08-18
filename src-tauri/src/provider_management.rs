@@ -776,6 +776,7 @@ mod tests {
                 active_ollama_pulls: Mutex::new(HashMap::new()),
                 active_provider_refreshes: Mutex::new(HashMap::new()),
                 active_managed_model_downloads: Mutex::new(HashMap::new()),
+                active_code_runs: Mutex::new(HashMap::new()),
                 storage_maintenance: AtomicBool::new(false),
                 sidecar: std::sync::Arc::new(Mutex::new(SidecarState::new())),
                 observability_log: std::sync::Arc::new(Mutex::new(

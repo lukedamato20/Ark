@@ -2,8 +2,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   ArchiveRestore,
-  Code2,
-  Keyboard,
+  ChevronDown,
+  ChevronRight,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -12,337 +12,408 @@ import {
   Plus,
   Search,
   Settings,
+  X,
 } from "lucide-react";
 import * as React from "react";
-import { formatDate } from "../../lib/format";
-import type { Conversation } from "../../types/ark";
+import { ArkBrand } from "../../ui/arkBrand";
+import { cn } from "../../lib/cn";
+import type { Conversation, Project } from "../../types/ark";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import { cn } from "../../lib/cn";
+
+type SectionId = "pinned" | "projects" | "chats";
 
 interface ConversationSidebarProps {
   conversations: Conversation[];
+  pinnedConversations: Conversation[];
+  projects: Project[];
   activeConversationId?: string;
+  activeMode: "chat" | "code";
   collapsed: boolean;
-  /** UX-001: hides the internal rail/expanded toggle when this sidebar is rendered inside a
-   * phone-width drawer, where collapsing to a rail doesn't make sense. */
   hideCollapseToggle?: boolean;
   focusSearchSignal: number;
   hasMore: boolean;
   isLoading: boolean;
-  /** FTR-002: conversation id -> a short matched-text excerpt, shown instead of the date line
-   * while a search query is active and this conversation matched on content, not just title. */
   searchSnippets: Record<string, string>;
   showArchived: boolean;
   onToggleCollapsed: () => void;
   onCreate: () => void;
+  onCreateProject: (name: string) => Promise<void>;
   onSelect: (id: string) => void;
   onSearch: (query: string) => void;
+  onProjectFilter: (projectId: string | null) => void;
   onLoadMore: () => void;
   onOpenSettings: () => void;
-  onOpenCode: () => void;
-  onOpenShortcuts: () => void;
+  onModeChange: (mode: "chat" | "code") => void;
   onShowArchivedChange: (showArchived: boolean) => void;
-  /** FTR-002: undo is calling this again with the opposite value. */
   onArchive: (id: string, archived: boolean) => void;
   onPin: (id: string, pinned: boolean) => void;
-  shortcutsTriggerRef: React.RefObject<HTMLButtonElement | null>;
 }
 
-export function ConversationSidebar({
-  conversations,
-  activeConversationId,
-  collapsed,
-  hideCollapseToggle = false,
-  focusSearchSignal,
-  hasMore,
-  isLoading,
-  searchSnippets,
-  showArchived,
-  onToggleCollapsed,
-  onCreate,
-  onSelect,
-  onSearch,
-  onLoadMore,
-  onOpenSettings,
-  onOpenCode,
-  onOpenShortcuts,
-  onShowArchivedChange,
-  onArchive,
-  onPin,
-  shortcutsTriggerRef,
-}: ConversationSidebarProps) {
+function readSectionState(): Record<SectionId, boolean> {
+  try {
+    const value = JSON.parse(localStorage.getItem("ark.sidebar.sections") ?? "null") as Partial<
+      Record<SectionId, boolean>
+    > | null;
+    return { pinned: value?.pinned ?? true, projects: value?.projects ?? true, chats: value?.chats ?? true };
+  } catch {
+    return { pinned: true, projects: true, chats: true };
+  }
+}
+
+export function ConversationSidebar(props: ConversationSidebarProps) {
+  const {
+    conversations,
+    pinnedConversations,
+    projects,
+    activeConversationId,
+    activeMode,
+    collapsed,
+    hideCollapseToggle = false,
+    focusSearchSignal,
+    hasMore,
+    isLoading,
+    searchSnippets,
+    showArchived,
+    onToggleCollapsed,
+    onCreate,
+    onCreateProject,
+    onSelect,
+    onSearch,
+    onProjectFilter,
+    onLoadMore,
+    onOpenSettings,
+    onModeChange,
+    onShowArchivedChange,
+    onArchive,
+    onPin,
+  } = props;
   const [query, setQuery] = React.useState("");
+  const [searchOpen, setSearchOpen] = React.useState(false);
+  const [sections, setSections] = React.useState(readSectionState);
+  const [selectedProjectId, setSelectedProjectId] = React.useState<string | null>(null);
+  const [creatingProject, setCreatingProject] = React.useState(false);
+  const [projectName, setProjectName] = React.useState("");
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const searchTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const itemRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const scrollElementRef = React.useRef<HTMLElement | null>(null);
-  /** PERF-003: an index the user just requested via ArrowUp/Down that isn't mounted yet — set
-   * alongside `virtualizer.scrollToIndex`, focused by the effect below once that index's row
-   * actually appears in `itemRefs.current` (which may take a render or two after the scroll
-   * starts, unlike the pre-virtualization code where every row was always already mounted). */
-  const pendingFocusIndexRef = React.useRef<number | null>(null);
   const onSearchRef = React.useRef(onSearch);
+
   React.useEffect(() => {
     onSearchRef.current = onSearch;
   }, [onSearch]);
-
   React.useEffect(() => {
     const timer = window.setTimeout(() => onSearchRef.current(query), 200);
     return () => window.clearTimeout(timer);
   }, [query]);
-
   React.useEffect(() => {
     if (!collapsed && focusSearchSignal > 0) {
-      searchInputRef.current?.focus();
-      searchInputRef.current?.select();
+      setSearchOpen(true);
+      requestAnimationFrame(() => searchInputRef.current?.focus());
     }
   }, [collapsed, focusSearchSignal]);
+  React.useEffect(() => {
+    localStorage.setItem("ark.sidebar.sections", JSON.stringify(sections));
+  }, [sections]);
 
-  // FTR-002: pinned conversations sort first within the currently-loaded page — a pure
-  // client-side re-sort of already-fetched rows, not a change to the backend's keyset-paginated
-  // ORDER BY (see `build_conversation_page_query`'s own comment on why that boundary matters for
-  // pagination correctness). Stable otherwise: everything else keeps the order the backend gave.
-  const sortedConversations = React.useMemo(() => {
-    const pinned = conversations.filter((item) => item.pinnedAt);
-    pinned.sort((a, b) => (b.pinnedAt ?? "").localeCompare(a.pinnedAt ?? ""));
-    const unpinned = conversations.filter((item) => !item.pinnedAt);
-    return [...pinned, ...unpinned];
-  }, [conversations]);
-
-  // PERF-003: renders only the rows currently in (or near) the viewport instead of every loaded
-  // conversation — at 1,000+ loaded conversations (this task's own acceptance fixture) the
-  // previous unconditional `.map()` mounted every row's DOM/animation state at once. Estimates
-  // are refined per-row by `measureElement` (ref'd below); the two values just give the
-  // virtualizer a reasonable starting point for the two structurally-different row heights this
-  // sidebar has (collapsed: icon-only; expanded: icon + title + date/snippet lines).
+  const pinned = React.useMemo(
+    () => [...pinnedConversations].sort((a, b) => (b.pinnedAt ?? "").localeCompare(a.pinnedAt ?? "")),
+    [pinnedConversations],
+  );
+  const chats = React.useMemo(
+    () =>
+      conversations.filter((item) => !item.pinnedAt && (!selectedProjectId || item.projectId === selectedProjectId)),
+    [conversations, selectedProjectId],
+  );
   const virtualizer = useVirtualizer({
-    count: sortedConversations.length,
+    count: chats.length,
     getScrollElement: () => scrollElementRef.current,
-    estimateSize: () => (collapsed ? 44 : 60),
+    estimateSize: () => (collapsed ? 44 : 48),
     overscan: 8,
   });
-  const virtualItems = virtualizer.getVirtualItems();
 
-  React.useEffect(() => {
-    const pendingIndex = pendingFocusIndexRef.current;
-    if (pendingIndex === null) return;
-    const element = itemRefs.current[pendingIndex];
-    if (element) {
-      element.focus();
-      pendingFocusIndexRef.current = null;
-    }
-  }, [virtualItems]);
+  function toggleSection(section: SectionId) {
+    setSections((current) => ({ ...current, [section]: !current[section] }));
+  }
 
-  /** FTR-002: arrow-key traversal through the visible result list — a roving focus move, not a
-   * selection change (selection still happens on click/Enter, which native `<button>` semantics
-   * already provide with no extra handling needed). PERF-003: the target row may not be mounted
-   * (virtualized out of view) — `scrollToIndex` brings it into the DOM, and the effect above
-   * finishes the focus once it actually appears in `itemRefs.current`. */
-  function handleListKeyDown(event: React.KeyboardEvent<HTMLElement>) {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    event.preventDefault();
-    const currentIndex = itemRefs.current.findIndex((element) => element === document.activeElement);
-    const delta = event.key === "ArrowDown" ? 1 : -1;
-    const nextIndex =
-      currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), sortedConversations.length - 1);
-    const existing = itemRefs.current[nextIndex];
-    if (existing) {
-      existing.focus();
-      return;
+  async function createProject() {
+    const name = projectName.trim();
+    if (!name) return;
+    try {
+      await onCreateProject(name);
+      setProjectName("");
+      setCreatingProject(false);
+    } catch {
+      // The application callback owns user-visible error reporting; keep the draft open for retry.
     }
-    pendingFocusIndexRef.current = nextIndex;
-    virtualizer.scrollToIndex(nextIndex, { align: "auto" });
+  }
+
+  function closeSearch() {
+    setSearchOpen(false);
+    requestAnimationFrame(() => searchTriggerRef.current?.focus());
   }
 
   return (
-    // NOTE (UX-001): plain CSS width transition, not framer-motion's `animate` prop — `animate`
-    // reliably failed to commit a target width to the DOM for this persistently-mounted element
-    // in this app/environment (confirmed by DOM inspection; see `Drawer.tsx` for the fuller
-    // investigation of the same failure mode). The list items' `motion.button`s below are
-    // unaffected since those animate through `AnimatePresence`'s enter/exit path instead.
     <aside
-      aria-label="Conversations"
+      aria-label="Ark navigation"
       style={{ width: collapsed ? 72 : 288 }}
-      className="flex h-screen shrink-0 flex-col border-r border-border bg-card/80 transition-[width] duration-standard ease-out motion-reduce:transition-none"
+      className="flex h-screen shrink-0 flex-col border-r border-border bg-card transition-[width] duration-standard motion-reduce:transition-none"
     >
-      <div className="flex h-14 items-center gap-2 border-b border-border px-3">
+      <div className="flex min-h-16 items-center gap-2 border-b border-border px-3">
+        <ArkBrand compact={collapsed} className="min-w-0 flex-1" />
         {!hideCollapseToggle && (
-          <Button size="icon" variant="ghost" onClick={onToggleCollapsed} aria-label="Toggle sidebar">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onToggleCollapsed}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
             {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
           </Button>
         )}
-        {!collapsed && <div className="text-sm font-semibold tracking-wide">Ark</div>}
       </div>
 
-      <div className="space-y-2 p-3">
-        <Button
-          className="w-full justify-start"
-          variant="primary"
-          onClick={onCreate}
-          aria-label={collapsed ? "New Chat" : undefined}
-        >
-          <Plus className="h-4 w-4" />
-          {!collapsed && "New Chat"}
-        </Button>
-        {!collapsed && (
-          <>
-            <div className="relative">
+      <div className="border-b border-border p-2">
+        {collapsed ? (
+          <div className="grid gap-1">
+            <Button
+              size="icon"
+              variant={activeMode === "chat" ? "secondary" : "ghost"}
+              onClick={() => onModeChange("chat")}
+              aria-label="Ark Chat"
+            >
+              <MessageSquare className="h-4 w-4" />
+            </Button>
+            <Button
+              size="icon"
+              variant={activeMode === "code" ? "secondary" : "ghost"}
+              onClick={() => onModeChange("code")}
+              aria-label="Ark Code"
+            >
+              <span className="font-mono text-xs">&lt;/&gt;</span>
+            </Button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Ark mode">
+            <Button
+              size="sm"
+              variant={activeMode === "chat" ? "secondary" : "ghost"}
+              aria-label="Ark Chat"
+              aria-pressed={activeMode === "chat"}
+              onClick={() => onModeChange("chat")}
+            >
+              Chat
+            </Button>
+            <Button
+              size="sm"
+              variant={activeMode === "code" ? "secondary" : "ghost"}
+              aria-label="Ark Code"
+              aria-pressed={activeMode === "code"}
+              onClick={() => onModeChange("code")}
+            >
+              Code
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {!collapsed && (
+        <div className="flex min-h-12 items-center gap-1 border-b border-border px-2">
+          {searchOpen ? (
+            <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 ref={searchInputRef}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "ArrowDown" && sortedConversations.length > 0) {
-                    event.preventDefault();
-                    itemRefs.current[0]?.focus();
-                  }
+                  if (event.key === "Escape") closeSearch();
                 }}
                 placeholder="Search conversations"
                 maxLength={256}
-                className="pl-8"
+                className="pl-8 pr-8"
               />
+              <button
+                type="button"
+                aria-label="Collapse search"
+                onClick={closeSearch}
+                className="absolute right-2 top-2 rounded p-0.5 text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-            <label className="flex items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(event) => onShowArchivedChange(event.target.checked)}
-                className="h-3.5 w-3.5"
-              />
-              Show archived
-            </label>
+          ) : (
+            <Button
+              ref={searchTriggerRef}
+              variant={query ? "secondary" : "ghost"}
+              size="icon"
+              onClick={() => {
+                setSearchOpen(true);
+                requestAnimationFrame(() => searchInputRef.current?.focus());
+              }}
+              aria-label="Search conversations"
+            >
+              <Search className="h-4 w-4" />
+            </Button>
+          )}
+          <label className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(event) => onShowArchivedChange(event.target.checked)}
+            />
+            Archived
+          </label>
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {!collapsed && (
+          <>
+            <SidebarSection title="Pinned" open={sections.pinned} onToggle={() => toggleSection("pinned")}>
+              {pinned.map((conversation) => (
+                <ConversationRow
+                  key={conversation.id}
+                  conversation={conversation}
+                  active={conversation.id === activeConversationId}
+                  snippet={searchSnippets[conversation.id]}
+                  projectName={projects.find((project) => project.id === conversation.projectId)?.name}
+                  onSelect={onSelect}
+                  onArchive={onArchive}
+                  onPin={onPin}
+                />
+              ))}
+              {pinned.length === 0 && <EmptyRow>No pinned chats</EmptyRow>}
+            </SidebarSection>
+            <SidebarSection
+              title="Projects"
+              open={sections.projects}
+              onToggle={() => toggleSection("projects")}
+              actionLabel="Create project"
+              onAction={() => setCreatingProject(true)}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedProjectId(null);
+                  onProjectFilter(null);
+                }}
+                aria-pressed={!selectedProjectId}
+                className={cn(
+                  "w-full rounded px-3 py-1.5 text-left text-sm",
+                  !selectedProjectId ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted",
+                )}
+              >
+                All chats
+              </button>
+              {projects
+                .filter((project) => !project.archivedAt)
+                .map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedProjectId(project.id);
+                      onProjectFilter(project.id);
+                    }}
+                    aria-pressed={selectedProjectId === project.id}
+                    className={cn(
+                      "w-full truncate rounded px-3 py-1.5 text-left text-sm",
+                      selectedProjectId === project.id
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-muted",
+                    )}
+                  >
+                    {project.name}
+                  </button>
+                ))}
+              {creatingProject && (
+                <div className="flex gap-1 px-2 py-1">
+                  <Input
+                    autoFocus
+                    value={projectName}
+                    maxLength={120}
+                    onChange={(event) => setProjectName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void createProject();
+                      if (event.key === "Escape") setCreatingProject(false);
+                    }}
+                    placeholder="Project name"
+                  />
+                  <Button size="icon" onClick={() => void createProject()} aria-label="Save project">
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </SidebarSection>
           </>
         )}
+
+        <section className="flex min-h-0 flex-1 flex-col" aria-labelledby="sidebar-chats-heading">
+          {!collapsed && (
+            <SectionHeader
+              id="sidebar-chats-heading"
+              title="Chats"
+              open={sections.chats}
+              contentId="sidebar-chats-content"
+              onToggle={() => toggleSection("chats")}
+              actionLabel="New Chat"
+              onAction={onCreate}
+            />
+          )}
+          {(collapsed || sections.chats) && (
+            <nav
+              id="sidebar-chats-content"
+              aria-label="Chats"
+              ref={scrollElementRef}
+              className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
+            >
+              <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                  const conversation = chats[virtualRow.index];
+                  return (
+                    <div
+                      key={conversation.id}
+                      ref={virtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <ConversationRow
+                        ref={(element) => {
+                          itemRefs.current[virtualRow.index] = element;
+                        }}
+                        collapsed={collapsed}
+                        conversation={conversation}
+                        active={conversation.id === activeConversationId}
+                        snippet={searchSnippets[conversation.id]}
+                        projectName={projects.find((project) => project.id === conversation.projectId)?.name}
+                        onSelect={onSelect}
+                        onArchive={onArchive}
+                        onPin={onPin}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {!collapsed && chats.length === 0 && <EmptyRow>{isLoading ? "Searching…" : "No chats found"}</EmptyRow>}
+              {!collapsed && hasMore && (
+                <Button className="mt-2 w-full" size="sm" variant="ghost" disabled={isLoading} onClick={onLoadMore}>
+                  {isLoading ? "Loading…" : "Load more"}
+                </Button>
+              )}
+            </nav>
+          )}
+        </section>
       </div>
 
-      <nav
-        aria-label="Conversation list"
-        ref={(element) => {
-          scrollElementRef.current = element;
-        }}
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
-        onKeyDown={handleListKeyDown}
-      >
-        {sortedConversations.length > 0 && (
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
-            {virtualItems.map((virtualRow) => {
-              const conversation = sortedConversations[virtualRow.index];
-              const active = conversation.id === activeConversationId;
-              const snippet = searchSnippets[conversation.id];
-              return (
-                <div
-                  key={conversation.id}
-                  ref={virtualizer.measureElement}
-                  data-index={virtualRow.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                  className="group relative mb-1"
-                >
-                  <button
-                    ref={(element) => {
-                      itemRefs.current[virtualRow.index] = element;
-                    }}
-                    type="button"
-                    aria-label={conversation.title}
-                    aria-current={active ? "true" : undefined}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none transition-colors",
-                      "focus-visible:ring-2 focus-visible:ring-ring",
-                      active
-                        ? "bg-accent text-accent-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                    onClick={() => onSelect(conversation.id)}
-                  >
-                    <MessageSquare className="h-4 w-4 shrink-0" />
-                    {!collapsed && (
-                      <span className="min-w-0 flex-1 pr-10">
-                        <span className="flex items-center gap-1">
-                          {conversation.pinnedAt && (
-                            <Pin className="h-3 w-3 shrink-0 text-primary" aria-label="Pinned" />
-                          )}
-                          <span className="block truncate">{conversation.title}</span>
-                        </span>
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {snippet ?? formatDate(conversation.updatedAt)}
-                        </span>
-                      </span>
-                    )}
-                  </button>
-                  {!collapsed && (
-                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
-                      <button
-                        type="button"
-                        aria-label={conversation.pinnedAt ? "Unpin conversation" : "Pin conversation"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onPin(conversation.id, !conversation.pinnedAt);
-                        }}
-                        className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        {conversation.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={conversation.archived ? "Unarchive conversation" : "Archive conversation"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onArchive(conversation.id, !conversation.archived);
-                        }}
-                        className="rounded p-1 text-muted-foreground outline-none hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        {conversation.archived ? (
-                          <ArchiveRestore className="h-3.5 w-3.5" />
-                        ) : (
-                          <Archive className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {!collapsed && conversations.length === 0 && (
-          <div className="px-3 py-6 text-sm text-muted-foreground">
-            {isLoading ? "Searching conversations…" : "No conversations found."}
-          </div>
-        )}
-        {!collapsed && hasMore && (
-          <Button className="mt-2 w-full" size="sm" variant="ghost" disabled={isLoading} onClick={onLoadMore}>
-            {isLoading ? "Loading…" : "Load more"}
-          </Button>
-        )}
-      </nav>
-
-      <div className="border-t border-border p-3 grid gap-1">
-        <Button
-          className="w-full justify-start"
-          variant="ghost"
-          onClick={onOpenCode}
-          aria-label={collapsed ? "Ark Code" : undefined}
-        >
-          <Code2 className="h-4 w-4" />
-          {!collapsed && "Ark Code"}
-        </Button>
-        <Button
-          ref={shortcutsTriggerRef}
-          className="w-full justify-start"
-          variant="ghost"
-          onClick={onOpenShortcuts}
-          aria-label={collapsed ? "Keyboard shortcuts" : undefined}
-        >
-          <Keyboard className="h-4 w-4" />
-          {!collapsed && "Keyboard shortcuts"}
-        </Button>
+      <div className="border-t border-border p-2">
         <Button
           className="w-full justify-start"
           variant="ghost"
@@ -355,4 +426,159 @@ export function ConversationSidebar({
       </div>
     </aside>
   );
+}
+
+function SectionHeader({
+  id,
+  title,
+  open,
+  contentId,
+  onToggle,
+  actionLabel,
+  onAction,
+}: {
+  id?: string;
+  title: string;
+  open: boolean;
+  contentId?: string;
+  onToggle: () => void;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 px-2 py-1">
+      <button
+        id={id}
+        type="button"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={onToggle}
+        className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-1 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        {title}
+      </button>
+      {onAction && (
+        <button
+          type="button"
+          aria-label={actionLabel}
+          onClick={onAction}
+          className="rounded p-1 text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SidebarSection({
+  title,
+  open,
+  onToggle,
+  actionLabel,
+  onAction,
+  children,
+}: React.PropsWithChildren<{
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  actionLabel?: string;
+  onAction?: () => void;
+}>) {
+  const contentId = React.useId();
+  return (
+    <section className="border-b border-border/70">
+      <SectionHeader
+        title={title}
+        open={open}
+        contentId={contentId}
+        onToggle={onToggle}
+        actionLabel={actionLabel}
+        onAction={onAction}
+      />
+      {open && (
+        <div id={contentId} className="max-h-40 overflow-y-auto px-2 pb-2">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+const ConversationRow = React.forwardRef<
+  HTMLButtonElement,
+  {
+    conversation: Conversation;
+    active: boolean;
+    collapsed?: boolean;
+    snippet?: string;
+    projectName?: string;
+    onSelect: (id: string) => void;
+    onArchive: (id: string, archived: boolean) => void;
+    onPin: (id: string, pinned: boolean) => void;
+  }
+>(function ConversationRow(
+  { conversation, active, collapsed = false, snippet, projectName, onSelect, onArchive, onPin },
+  ref,
+) {
+  return (
+    <div className="group relative mb-1">
+      <button
+        ref={ref}
+        type="button"
+        aria-label={conversation.title}
+        aria-current={active ? "page" : undefined}
+        title={conversation.updatedAt}
+        onClick={() => onSelect(conversation.id)}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        )}
+      >
+        <MessageSquare className="h-4 w-4 shrink-0" />
+        {!collapsed && (
+          <span className="min-w-0 flex-1 pr-10">
+            <span className="block truncate">{conversation.title}</span>
+            {snippet && (
+              <span className="block truncate text-xs text-muted-foreground">
+                {projectName ? `${projectName} · ` : ""}
+                {snippet}
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+      {!collapsed && (
+        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+          <button
+            type="button"
+            aria-label={conversation.pinnedAt ? `Unpin ${conversation.title}` : `Pin ${conversation.title}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onPin(conversation.id, !conversation.pinnedAt);
+            }}
+            className="rounded p-1 focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {conversation.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+          </button>
+          <button
+            type="button"
+            aria-label={conversation.archived ? `Unarchive ${conversation.title}` : `Archive ${conversation.title}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onArchive(conversation.id, !conversation.archived);
+            }}
+            className="rounded p-1 focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {conversation.archived ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
+function EmptyRow({ children }: React.PropsWithChildren) {
+  return <div className="px-3 py-2 text-xs text-muted-foreground">{children}</div>;
 }

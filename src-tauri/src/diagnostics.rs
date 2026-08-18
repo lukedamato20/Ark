@@ -179,6 +179,7 @@ async fn run_benchmark(runtime: &dyn Provider, model: String) -> Result<Benchmar
                     content: "Reply with one short sentence about local AI readiness.".to_string(),
                 }],
                 untrusted_context: Vec::new(),
+                tool_history: Vec::new(),
                 temperature: Some(0.2),
                 max_tokens: Some(64),
                 user_deadline: Some(std::time::Duration::from_secs(30)),

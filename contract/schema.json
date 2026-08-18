@@ -95,6 +95,7 @@
     "RepositoryMap": ["entries", "inspectedFiles", "skippedFiles", "truncated"],
     "RepositoryGitStatus": ["clean", "porcelain"],
     "RepositoryGitDiff": ["workingTree", "staged"],
+    "CodeRepositorySupport": ["repositoryMap", "gitStatus", "gitDiff"],
     "EditFilePreview": [
       "path",
       "diff",
@@ -104,14 +105,18 @@
       "previewHash",
       "preconditionHash"
     ],
-    "EditFileOutcome": [
-      "path",
-      "beforeHash",
-      "expectedAfterHash",
-      "observedAfterHash",
-      "outcome"
-    ],
+    "EditFileOutcome": ["path", "beforeHash", "expectedAfterHash", "observedAfterHash", "outcome"],
     "CodeSession": ["id", "projectId", "title", "archived", "createdAt", "updatedAt"],
+    "CodeCommandDefinition": [
+      "id",
+      "label",
+      "program",
+      "arguments",
+      "timeoutSeconds",
+      "enabled",
+      "createdAt",
+      "updatedAt"
+    ],
     "CodeAgentRun": [
       "id",
       "sessionId",
@@ -139,6 +144,7 @@
       "completedAt"
     ],
     "CodeRunEvent": ["runId", "sequence", "schemaVersion", "kind", "state", "summary", "createdAt"],
+    "CodeRunUpdatedEvent": ["runId", "sessionId", "sequence", "schemaVersion", "state"],
     "CodeSessionDetail": ["session", "runs", "events"],
     "CodeAgentStep": [
       "id",
@@ -147,6 +153,7 @@
       "state",
       "reservedTokens",
       "actualTokens",
+      "streamingText",
       "createdAt"
     ],
     "CodeToolInvocation": [
@@ -155,7 +162,13 @@
       "stepId",
       "toolName",
       "canonicalArgumentsJson",
+      "callHash",
       "state",
+      "preview",
+      "previewHash",
+      "preconditionHash",
+      "approvedAt",
+      "verificationOutcome",
       "createdAt"
     ],
     "CodeObservation": ["id", "runId", "stepId", "kind", "content", "createdAt"],
@@ -273,6 +286,7 @@
     ],
     "DeviceSettings": [
       "theme",
+      "accentPalette",
       "builtInModelPath",
       "managedModelDirectory",
       "crashCaptureEnabled",
@@ -379,6 +393,13 @@
       "requiredDiskBytes",
       "advisories",
       "advancedOverrideAllowed"
+    ],
+    "HardwareFitEvidence": [
+      "totalMemoryBytes",
+      "availableMemoryBytes",
+      "executionDevice",
+      "acceleratorMemoryBytes",
+      "methodVersion"
     ],
     "ManagedModelDownloadProgress": ["schemaVersion", "modelId", "status", "completedBytes", "totalBytes", "resumed"],
     "AppErrorShape": ["code", "message"],

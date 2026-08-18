@@ -1,0 +1,38 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renders accessible wordmark and compact variants from one canonical asset 1`] = `
+<div>
+  <span
+    class="inline-flex min-w-0 items-center gap-2 text-foreground"
+  >
+    <img
+      alt=""
+      aria-hidden="true"
+      class="h-6 w-6 shrink-0"
+      src="data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%20fill='none'%3e%3cpath%20d='M32%203%2058%2018v28L32%2061%206%2046V18L32%203Z'%20fill='%2318181b'/%3e%3cpath%20d='m19%2043%2013-25%2013%2025M24%2034h16'%20stroke='%23f8fafc'%20stroke-width='5'%20stroke-linecap='round'%20stroke-linejoin='round'/%3e%3c/svg%3e"
+    />
+    <span
+      class="truncate text-sm font-semibold tracking-wide"
+    >
+      Ark
+    </span>
+  </span>
+</div>
+`;
+
+exports[`renders accessible wordmark and compact variants from one canonical asset 2`] = `
+<div>
+  <span
+    aria-label="Ark"
+    class="inline-flex min-w-0 items-center gap-2 text-foreground"
+    role="img"
+  >
+    <img
+      alt=""
+      aria-hidden="true"
+      class="h-6 w-6 shrink-0"
+      src="data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%20fill='none'%3e%3cpath%20d='M32%203%2058%2018v28L32%2061%206%2046V18L32%203Z'%20fill='%2318181b'/%3e%3cpath%20d='m19%2043%2013-25%2013%2025M24%2034h16'%20stroke='%23f8fafc'%20stroke-width='5'%20stroke-linecap='round'%20stroke-linejoin='round'/%3e%3c/svg%3e"
+    />
+  </span>
+</div>
+`;

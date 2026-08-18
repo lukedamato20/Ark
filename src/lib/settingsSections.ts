@@ -6,7 +6,7 @@
  * audit that produced this exact list).
  */
 export type SettingsSectionId =
-  "ai-behavior" | "providers" | "models" | "appearance" | "shortcuts" | "storage" | "privacy" | "advanced";
+  "ai-behavior" | "providers" | "models" | "tools" | "appearance" | "shortcuts" | "storage" | "privacy" | "advanced";
 
 export interface SettingsSectionMeta {
   id: SettingsSectionId;
@@ -29,6 +29,11 @@ export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
     id: "models",
     label: "Models",
     description: "Install, update, and remove local Ollama models.",
+  },
+  {
+    id: "tools",
+    label: "Tools",
+    description: "Capability grants, web search, audit status, and Ark Code verification commands.",
   },
   {
     id: "appearance",

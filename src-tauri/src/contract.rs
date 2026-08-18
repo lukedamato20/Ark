@@ -13,14 +13,15 @@ use crate::chat::{
     Message, SendChatResult, StreamEvent,
 };
 use crate::code_sessions::{
-    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeObservation, CodeObservationKind,
-    CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent, CodeRunState, CodeSession, CodeSessionDetail,
-    CodeToolInvocation, CodeToolInvocationState,
+    CodeAgentRun, CodeAgentStep, CodeAgentStepState, CodeCommandDefinition, CodeObservation,
+    CodeObservationKind, CodeRecoveryOutcome, CodeRunDetail, CodeRunEvent, CodeRunState,
+    CodeRunUpdatedEvent, CodeSession, CodeSessionDetail, CodeToolInvocation,
+    CodeToolInvocationState,
 };
 use crate::code_tools::{
-    RepositoryDirectoryListing, RepositoryEntry, RepositoryEntryKind, RepositoryFileRead,
-    RepositoryGitDiff, RepositoryGitStatus, RepositoryMap, RepositorySearchMatch,
-    RepositorySearchResult,
+    CodeRepositorySupport, RepositoryDirectoryListing, RepositoryEntry, RepositoryEntryKind,
+    RepositoryFileRead, RepositoryGitDiff, RepositoryGitStatus, RepositoryMap,
+    RepositorySearchMatch, RepositorySearchResult,
 };
 use crate::code_write_tools::{EditFileOutcome, EditFilePreview};
 use crate::commands::ImportProgressEvent;
@@ -35,7 +36,7 @@ use crate::import_export::{
     WorkspaceImportPreview, WorkspaceImportPreviewEntry, WorkspaceImportResult,
 };
 use crate::managed_models::{
-    HardwareFitRisk, ManagedModelCatalogEntry, ManagedModelCompatibility,
+    HardwareFitEvidence, HardwareFitRisk, ManagedModelCatalogEntry, ManagedModelCompatibility,
     ManagedModelDownloadProgress, ManagedModelOperation, ManagedModelPreflight, ManagedModelStatus,
 };
 use crate::personas::{Persona, PersonaDeletionPreview, PersonaVersionSummary};
@@ -503,6 +504,25 @@ fn ark_code_repository_dtos_match_contract() {
             staged: String::new(),
         },
     );
+    assert_matches_contract(
+        "CodeRepositorySupport",
+        &CodeRepositorySupport {
+            repository_map: RepositoryMap {
+                entries: vec![sample_repository_entry()],
+                inspected_files: 1,
+                skipped_files: 0,
+                truncated: false,
+            },
+            git_status: RepositoryGitStatus {
+                clean: true,
+                porcelain: String::new(),
+            },
+            git_diff: RepositoryGitDiff {
+                working_tree: String::new(),
+                staged: String::new(),
+            },
+        },
+    );
 }
 
 #[test]
@@ -552,8 +572,31 @@ fn ark_code_session_dtos_match_contract() {
         created_at: timestamp,
     };
     assert_matches_contract("CodeSession", &session);
+    assert_matches_contract(
+        "CodeCommandDefinition",
+        &CodeCommandDefinition {
+            id: "command-1".to_string(),
+            label: "Rust tests".to_string(),
+            program: "cargo".to_string(),
+            arguments: vec!["test".to_string()],
+            timeout_seconds: 300,
+            enabled: true,
+            created_at: run.created_at.clone(),
+            updated_at: run.updated_at.clone(),
+        },
+    );
     assert_matches_contract("CodeAgentRun", &run);
     assert_matches_contract("CodeRunEvent", &event);
+    assert_matches_contract(
+        "CodeRunUpdatedEvent",
+        &CodeRunUpdatedEvent {
+            run_id: run.id.clone(),
+            session_id: run.session_id.clone(),
+            sequence: event.sequence,
+            schema_version: event.schema_version,
+            state: run.state,
+        },
+    );
     assert_matches_contract(
         "CodeSessionDetail",
         &CodeSessionDetail {
@@ -570,6 +613,7 @@ fn ark_code_session_dtos_match_contract() {
         state: CodeAgentStepState::Completed,
         reserved_tokens: 4_096,
         actual_tokens: Some(512),
+        streaming_text: None,
         created_at: run.created_at.clone(),
     };
     let invocation = CodeToolInvocation {
@@ -578,7 +622,13 @@ fn ark_code_session_dtos_match_contract() {
         step_id: step.id.clone(),
         tool_name: "read_file".to_string(),
         canonical_arguments_json: "{\"path\":\"src/lib.rs\"}".to_string(),
+        call_hash: "a".repeat(64),
         state: CodeToolInvocationState::Applied,
+        preview: None,
+        preview_hash: None,
+        precondition_hash: None,
+        approved_at: None,
+        verification_outcome: None,
         created_at: run.created_at.clone(),
     };
     let observation = CodeObservation {
@@ -589,9 +639,18 @@ fn ark_code_session_dtos_match_contract() {
         content: "fn main() {}".to_string(),
         created_at: run.created_at.clone(),
     };
+    let rejection_observation = CodeObservation {
+        id: "code-observation-2".to_string(),
+        run_id: run.id.clone(),
+        step_id: step.id.clone(),
+        kind: CodeObservationKind::CompletionRejected,
+        content: "No repository content has been read in this run yet.".to_string(),
+        created_at: run.created_at.clone(),
+    };
     assert_matches_contract("CodeAgentStep", &step);
     assert_matches_contract("CodeToolInvocation", &invocation);
     assert_matches_contract("CodeObservation", &observation);
+    assert_matches_contract("CodeObservation", &rejection_observation);
     assert_matches_contract(
         "CodeRunDetail",
         &CodeRunDetail {
@@ -802,6 +861,7 @@ fn app_bootstrap_matches_contract() {
             workspace: sample_workspace_info(),
             device_settings: crate::device_settings::DeviceSettings {
                 theme: "dark".to_string(),
+                accent_palette: crate::device_settings::AccentPalette::Blue,
                 built_in_model_path: None,
                 managed_model_directory: None,
                 crash_capture_enabled: false,
@@ -819,11 +879,26 @@ fn device_settings_matches_contract() {
         "DeviceSettings",
         &crate::device_settings::DeviceSettings {
             theme: "dark".to_string(),
+            accent_palette: crate::device_settings::AccentPalette::Blue,
             built_in_model_path: Some("model.gguf".to_string()),
             managed_model_directory: None,
             crash_capture_enabled: true,
             completion_notifications_enabled: true,
             perf_metrics_enabled: true,
+        },
+    );
+}
+
+#[test]
+fn hardware_fit_evidence_matches_contract() {
+    assert_matches_contract(
+        "HardwareFitEvidence",
+        &HardwareFitEvidence {
+            total_memory_bytes: 16,
+            available_memory_bytes: 8,
+            execution_device: "local_device".to_string(),
+            accelerator_memory_bytes: None,
+            method_version: "ark-fit-v1".to_string(),
         },
     );
 }

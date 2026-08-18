@@ -29,3 +29,11 @@ test("suggested Ollama model tag names are non-empty and contain no whitespace",
     assert.ok(!/\s/.test(model.name), `${model.name} must not contain whitespace`);
   }
 });
+
+test("every curated entry carries reviewed provenance", () => {
+  for (const model of SUGGESTED_OLLAMA_MODELS) {
+    assert.equal(model.metadataConfidence, "reviewed_approximate");
+    assert.match(model.reviewedAt, /^\d{4}-\d{2}-\d{2}$/);
+    assert.match(model.sourceUrl, /^https:\/\/ollama\.com\/library\//);
+  }
+});

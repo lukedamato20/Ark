@@ -21,7 +21,10 @@ import type {
   CompanionApiStatus,
   CompanionApiTokenReveal,
   CodeAgentRun,
+  CodeCommandDefinition,
   CodeRunDetail,
+  CodeRunUpdatedEvent,
+  CodeRepositorySupport,
   CodeSession,
   CodeSessionDetail,
   EditBlock,
@@ -34,6 +37,7 @@ import type {
   ManagedModelDownloadProgress,
   ManagedModelOperation,
   ManagedModelPreflight,
+  HardwareFitEvidence,
   ManagedModelStatus,
   NoteWriteAction,
   OllamaPullProgress,
@@ -188,6 +192,22 @@ export interface CodeExecuteEditFileInput {
   preconditionHash: string;
 }
 
+export interface CodeApproveEditInput {
+  sessionId: string;
+  runId: string;
+  invocationId: string;
+  callHash: string;
+  previewHash: string;
+  preconditionHash: string;
+}
+
+export interface CodeRejectEditInput {
+  sessionId: string;
+  runId: string;
+  invocationId: string;
+  callHash: string;
+}
+
 export interface CreateCodeSessionInput {
   projectId: string;
   title: string;
@@ -205,6 +225,15 @@ export interface CreateCodeRunInput {
   maxTokens?: number | null;
   maxCostMicrounits?: number | null;
   idempotencyKey: string;
+}
+
+export interface SaveCodeCommandDefinitionInput {
+  id?: string | null;
+  label: string;
+  program: string;
+  arguments: string[];
+  timeoutSeconds: number;
+  enabled: boolean;
 }
 
 export interface CreatePersonaInput {
@@ -300,6 +329,7 @@ export interface ArkClient {
   recordFrontendPerfMetric(name: string, valueMs: number): Promise<void>;
 
   listConversations(input: ListConversationsInput): Promise<ConversationPage>;
+  listPinnedConversations(limit?: number): Promise<Conversation[]>;
   createConversation(title?: string): Promise<Conversation>;
   renameConversation(id: string, title: string): Promise<Conversation>;
   /** FTR-004: each field independently `null`/omitted clears that override tier back to
@@ -416,14 +446,26 @@ export interface ArkClient {
   /** CODE-005: applies an approved `edit_file` write. Refuses (without writing) if the echoed
    * hashes no longer match current Repository state. */
   codeExecuteEditFile(input: CodeExecuteEditFileInput): Promise<EditFileOutcome>;
+  /** Approves the exact inline proposal currently shown in the Ark Code conversation. */
+  codeApproveEdit(input: CodeApproveEditInput): Promise<CodeRunDetail>;
+  codeRejectEdit(input: CodeRejectEditInput): Promise<CodeRunDetail>;
   createCodeSession(input: CreateCodeSessionInput): Promise<CodeSession>;
   listCodeSessions(includeArchived?: boolean): Promise<CodeSession[]>;
+  listCodeCommandDefinitions(): Promise<CodeCommandDefinition[]>;
+  saveCodeCommandDefinition(input: SaveCodeCommandDefinitionInput): Promise<CodeCommandDefinition>;
+  deleteCodeCommandDefinition(id: string): Promise<void>;
   getCodeSession(id: string): Promise<CodeSessionDetail>;
   createCodeRun(input: CreateCodeRunInput): Promise<CodeAgentRun>;
+  initializeProjectGitRepository(projectId: string): Promise<void>;
   /** CODE-007: drives exactly one model turn of an existing `queued`/`observing` run — awaited in
    * full, not backgrounded/streamed. See `code_agent::run_step`'s doc comment. */
   runCodeAgentStep(sessionId: string, runId: string): Promise<CodeRunDetail>;
+  /** Starts the normal background executor; updates arrive as refetch notifications. */
+  startCodeAgentRun(sessionId: string, runId: string): Promise<CodeRunDetail>;
+  cancelCodeAgentRun(sessionId: string, runId: string): Promise<CodeRunDetail>;
   getCodeRunDetail(runId: string): Promise<CodeRunDetail>;
+  getCodeRunRepositorySupport(runId: string): Promise<CodeRepositorySupport>;
+  searchCodeRunRepository(runId: string, query: string, path?: string | null): Promise<RepositorySearchResult>;
 
   /** CMP-003: every built-in tool's declared definition plus whichever grant (if any) currently
    * governs it. Today this is always exactly the one built-in "notes" tool. */
@@ -491,6 +533,7 @@ export interface ArkClient {
   startBuiltInRuntime(modelPath: string, modelSource: string, modelLicense: string): Promise<BuiltInRuntimeStatus>;
   listManagedModels(): Promise<ManagedModelStatus[]>;
   preflightManagedModel(modelId: string, operation: ManagedModelOperation): Promise<ManagedModelPreflight>;
+  getHardwareFitEvidence(): Promise<HardwareFitEvidence>;
   downloadManagedModel(
     modelId: string,
     acknowledgeWarning?: boolean,
@@ -522,6 +565,7 @@ export interface ArkClient {
   onOllamaPullProgress(handler: (event: OllamaPullProgress) => void): Promise<UnlistenFn>;
   onManagedModelDownloadProgress(handler: (event: ManagedModelDownloadProgress) => void): Promise<UnlistenFn>;
   onImportProgress(handler: (event: ImportProgressEvent) => void): Promise<UnlistenFn>;
+  onCodeRunUpdated(handler: (event: CodeRunUpdatedEvent) => void): Promise<UnlistenFn>;
 }
 
 /** The highest `StreamEvent.schemaVersion` this build knows how to interpret. */
@@ -593,6 +637,7 @@ export function createTauriArkClient(): ArkClient {
           projectId: input.projectId ?? undefined,
         },
       }),
+    listPinnedConversations: (limit = 50) => invoke<Conversation[]>("list_pinned_conversations", { limit }),
     createConversation: (title) => invoke<Conversation>("create_conversation", { title }),
     renameConversation: (id, title) => invoke<Conversation>("rename_conversation", { request: { id, title } }),
     updateConversationSettings: (input) =>
@@ -736,12 +781,26 @@ export function createTauriArkClient(): ArkClient {
     codeGitDiff: (projectId) => invoke<RepositoryGitDiff>("code_git_diff", { request: { projectId } }),
     codePreviewEditFile: (input) => invoke<EditFilePreview>("code_preview_edit_file", { request: input }),
     codeExecuteEditFile: (input) => invoke<EditFileOutcome>("code_execute_edit_file", { request: input }),
+    codeApproveEdit: (input) => invoke<CodeRunDetail>("code_approve_edit", { request: input }),
+    codeRejectEdit: (input) => invoke<CodeRunDetail>("code_reject_edit", { request: input }),
     createCodeSession: (input) => invoke<CodeSession>("create_code_session", { request: input }),
     listCodeSessions: (includeArchived = false) => invoke<CodeSession[]>("list_code_sessions", { includeArchived }),
+    listCodeCommandDefinitions: () => invoke<CodeCommandDefinition[]>("list_code_command_definitions"),
+    saveCodeCommandDefinition: (input) =>
+      invoke<CodeCommandDefinition>("save_code_command_definition", { request: input }),
+    deleteCodeCommandDefinition: (id) => invoke<void>("delete_code_command_definition", { id }),
     getCodeSession: (id) => invoke<CodeSessionDetail>("get_code_session", { id }),
     createCodeRun: (input) => invoke<CodeAgentRun>("create_code_run", { request: input }),
+    initializeProjectGitRepository: (projectId) => invoke<void>("initialize_project_git_repository", { projectId }),
     runCodeAgentStep: (sessionId, runId) => invoke<CodeRunDetail>("run_code_agent_step", { sessionId, runId }),
+    startCodeAgentRun: (sessionId, runId) => invoke<CodeRunDetail>("start_code_agent_run", { sessionId, runId }),
+    cancelCodeAgentRun: (sessionId, runId) => invoke<CodeRunDetail>("cancel_code_agent_run", { sessionId, runId }),
     getCodeRunDetail: (runId) => invoke<CodeRunDetail>("get_code_run_detail", { runId }),
+    getCodeRunRepositorySupport: (runId) => invoke<CodeRepositorySupport>("get_code_run_repository_support", { runId }),
+    searchCodeRunRepository: (runId, query, path) =>
+      invoke<RepositorySearchResult>("search_code_run_repository", {
+        request: { runId, query, path: path ?? null },
+      }),
 
     listTools: () => invoke<ToolStatus[]>("list_tools"),
     grantToolCapability: (toolId, ttlMinutes) =>
@@ -797,6 +856,7 @@ export function createTauriArkClient(): ArkClient {
     listManagedModels: () => invoke<ManagedModelStatus[]>("list_managed_models"),
     preflightManagedModel: (modelId, operation) =>
       invoke<ManagedModelPreflight>("preflight_managed_model", { modelId, operation }),
+    getHardwareFitEvidence: () => invoke<HardwareFitEvidence>("get_hardware_fit_evidence"),
     downloadManagedModel: (modelId, acknowledgeWarning = false, advancedOverride = false, overrideReason = null) =>
       invoke<ManagedModelStatus>("download_managed_model", {
         request: { modelId, acknowledgeWarning, advancedOverride, overrideReason },
@@ -825,6 +885,10 @@ export function createTauriArkClient(): ArkClient {
         if (e.payload.schemaVersion === 1) handler(e.payload);
       }),
     onImportProgress: (handler) => listen<ImportProgressEvent>("import:progress", (e) => handler(e.payload)),
+    onCodeRunUpdated: (handler) =>
+      listen<CodeRunUpdatedEvent>("code:run-updated", (e) => {
+        if (e.payload.schemaVersion === 1) handler(e.payload);
+      }),
   };
 }
 
@@ -871,6 +935,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     recordFrontendPerfMetric: async () => undefined,
 
     listConversations: async () => ({ items: [], nextCursor: null, searchSnippets: {} }),
+    listPinnedConversations: async () => [],
     createConversation: notImplemented("createConversation"),
     renameConversation: notImplemented("renameConversation"),
     updateConversationSettings: notImplemented("updateConversationSettings"),
@@ -944,12 +1009,22 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     codeGitDiff: notImplemented("codeGitDiff"),
     codePreviewEditFile: notImplemented("codePreviewEditFile"),
     codeExecuteEditFile: notImplemented("codeExecuteEditFile"),
+    codeApproveEdit: notImplemented("codeApproveEdit"),
+    codeRejectEdit: notImplemented("codeRejectEdit"),
     createCodeSession: notImplemented("createCodeSession"),
     listCodeSessions: async () => [],
+    listCodeCommandDefinitions: async () => [],
+    saveCodeCommandDefinition: notImplemented("saveCodeCommandDefinition"),
+    deleteCodeCommandDefinition: async () => undefined,
     getCodeSession: notImplemented("getCodeSession"),
     createCodeRun: notImplemented("createCodeRun"),
+    initializeProjectGitRepository: notImplemented("initializeProjectGitRepository"),
     runCodeAgentStep: notImplemented("runCodeAgentStep"),
+    startCodeAgentRun: notImplemented("startCodeAgentRun"),
+    cancelCodeAgentRun: notImplemented("cancelCodeAgentRun"),
     getCodeRunDetail: notImplemented("getCodeRunDetail"),
+    getCodeRunRepositorySupport: notImplemented("getCodeRunRepositorySupport"),
+    searchCodeRunRepository: notImplemented("searchCodeRunRepository"),
 
     listTools: async () => [],
     grantToolCapability: notImplemented("grantToolCapability"),
@@ -1000,6 +1075,13 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     startBuiltInRuntime: notImplemented("startBuiltInRuntime"),
     listManagedModels: async () => [],
     preflightManagedModel: notImplemented("preflightManagedModel"),
+    getHardwareFitEvidence: async () => ({
+      totalMemoryBytes: 0,
+      availableMemoryBytes: 0,
+      executionDevice: "local_device",
+      acceleratorMemoryBytes: null,
+      methodVersion: "ark-fit-v1",
+    }),
     downloadManagedModel: notImplemented("downloadManagedModel"),
     cancelManagedModelDownload: async () => undefined,
     deleteManagedModel: async () => undefined,
@@ -1014,6 +1096,7 @@ export function createFakeArkClient(overrides: Partial<ArkClient> = {}): ArkClie
     onOllamaPullProgress: noopSubscribe,
     onManagedModelDownloadProgress: noopSubscribe,
     onImportProgress: noopSubscribe,
+    onCodeRunUpdated: noopSubscribe,
   };
 
   return { ...defaults, ...overrides };

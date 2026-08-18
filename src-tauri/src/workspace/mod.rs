@@ -55,18 +55,16 @@ struct WorkspaceConfig {
 pub fn resolve_workspace_for_startup(
     app: &AppHandle,
 ) -> Result<(Workspace, Option<AppError>), AppError> {
-    let default_root = default_workspace_root(app)?;
-    let default_root = crate::validation::validate_directory_target_path(
-        default_root.to_str().ok_or_else(|| {
-            AppError::new(
-                "workspace_error",
-                "The default workspace path is not valid Unicode.",
-            )
-        })?,
-        "Default workspace path",
-    )?;
+    let unresolved_default_root = default_workspace_root(app)?;
+    // COR-010: an inaccessible default app-data directory is an expected storage failure, not a
+    // reason to abort Tauri's setup hook. Keep the OS-produced absolute path only as recovery UI
+    // metadata and open the same in-memory fallback used for corrupt/locked workspace databases.
+    // No filesystem or database operation receives this unvalidated path while the error is set.
+    let (default_root, default_root_error) =
+        resolve_default_root_for_startup(unresolved_default_root);
     let config_path = workspace_config_path(app)?;
     let (configured_root, config_error) = read_workspace_config_recoverably(&config_path);
+    let uses_default_root = configured_root.is_none();
     let root = configured_root.unwrap_or_else(|| default_root.clone());
     let is_portable = root != default_root;
     let workspace = Workspace {
@@ -78,6 +76,11 @@ pub fn resolve_workspace_for_startup(
 
     if let Some(error) = config_error {
         return Ok((workspace, Some(error)));
+    }
+    if uses_default_root {
+        if let Some(error) = default_root_error {
+            return Ok((workspace, Some(error)));
+        }
     }
     if workspace.is_portable && !workspace.root.exists() {
         return Ok((
@@ -93,6 +96,21 @@ pub fn resolve_workspace_for_startup(
     }
 
     Ok((workspace, None))
+}
+
+fn resolve_default_root_for_startup(unresolved: PathBuf) -> (PathBuf, Option<AppError>) {
+    let result = unresolved.to_str().ok_or_else(|| {
+        AppError::new(
+            "workspace_error",
+            "The default workspace path is not valid Unicode.",
+        )
+    });
+    match result.and_then(|path| {
+        crate::validation::validate_directory_target_path(path, "Default workspace path")
+    }) {
+        Ok(path) => (path, None),
+        Err(error) => (unresolved, Some(error)),
+    }
 }
 
 /// FTR-001's `copy_data` seeds the new location with a verified copy of the current workspace
@@ -366,6 +384,22 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ark-workspace-test-{name}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn inaccessible_default_root_is_preserved_for_recovery_instead_of_aborting_startup() {
+        let blocking_file = temp_dir("blocked-default-parent");
+        fs::write(&blocking_file, b"not a directory").expect("seed blocking file");
+        let unresolved = blocking_file.join("workspace");
+
+        let (root, error) = resolve_default_root_for_startup(unresolved.clone());
+
+        assert_eq!(root, unresolved);
+        assert_eq!(
+            error.expect("storage failure is retained").code,
+            "invalid_input"
+        );
+        fs::remove_file(blocking_file).expect("remove fixture");
     }
 
     #[test]

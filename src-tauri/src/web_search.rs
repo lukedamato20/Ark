@@ -23,6 +23,7 @@ use crate::errors::AppError;
 use crate::tool_policy::{IdempotencyPolicy, SideEffectPreview};
 use crate::tools::{ToolInvocationAttempt, WEB_SEARCH_TOOL_ID};
 use crate::AppState;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -33,6 +34,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Capped both for prompt-injection surface area (fewer untrusted blocks reaching the model) and
 /// token budget — Brave itself can return far more per query.
 const MAX_RESULTS: usize = 6;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TITLE_CHARS: usize = 512;
+const MAX_URL_CHARS: usize = 2_048;
+const MAX_SNIPPET_CHARS: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,13 +86,94 @@ fn parse_brave_response(body: &str) -> Result<Vec<SearchCitation>, AppError> {
         .map(|web| web.results)
         .unwrap_or_default()
         .into_iter()
+        .filter_map(validate_brave_result)
         .take(MAX_RESULTS)
-        .map(|result| SearchCitation {
-            title: result.title,
-            url: result.url,
-            snippet: result.description,
-        })
         .collect())
+}
+
+fn validate_brave_result(result: BraveResult) -> Option<SearchCitation> {
+    let title = bounded_nonempty(result.title, MAX_TITLE_CHARS)?;
+    let url = bounded_nonempty(result.url, MAX_URL_CHARS)?;
+    let parsed_url = reqwest::Url::parse(&url).ok()?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return None;
+    }
+    let snippet = bounded_text(result.description, MAX_SNIPPET_CHARS)?;
+    Some(SearchCitation {
+        title,
+        url: parsed_url.to_string(),
+        snippet,
+    })
+}
+
+fn bounded_nonempty(value: String, maximum: usize) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.chars().count() <= maximum).then(|| value.to_string())
+}
+
+fn bounded_text(value: String, maximum: usize) -> Option<String> {
+    (value.chars().count() <= maximum).then_some(value)
+}
+
+fn append_bounded_response(target: &mut Vec<u8>, chunk: &[u8]) -> Result<(), AppError> {
+    if target.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+        return Err(AppError::new(
+            "web_search_response_too_large",
+            "Brave Search returned more data than Ark's safe response limit.",
+        ));
+    }
+    target.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn read_bounded_response(response: reqwest::Response) -> Result<String, AppError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::new(
+            "web_search_response_too_large",
+            "Brave Search returned more data than Ark's safe response limit.",
+        ));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            AppError::new(
+                "web_search_failed",
+                format!("Could not read Brave Search's response body: {error}"),
+            )
+        })?;
+        append_bounded_response(&mut body, &chunk)?;
+    }
+    String::from_utf8(body).map_err(|_| {
+        AppError::new(
+            "web_search_failed",
+            "Brave Search returned a response that was not valid UTF-8.",
+        )
+    })
+}
+
+fn brave_status_error(status: reqwest::StatusCode) -> AppError {
+    match status.as_u16() {
+        301 | 302 | 303 | 307 | 308 => AppError::new(
+            "web_search_redirect_blocked",
+            "Brave Search attempted to redirect the request; Ark did not follow it.",
+        ),
+        401 | 403 => AppError::new(
+            "web_search_unauthorized",
+            "Brave Search rejected the configured API key. Check the key in Settings → Tools.",
+        ),
+        429 => AppError::new(
+            "web_search_rate_limited",
+            "Brave Search's rate limit was hit. Wait and try again.",
+        ),
+        _ => AppError::new(
+            "web_search_failed",
+            format!("Brave Search returned HTTP {status}."),
+        ),
+    }
 }
 
 fn http_client() -> Result<Client, AppError> {
@@ -115,28 +201,10 @@ async fn brave_search(api_key: &str, query: &str) -> Result<Vec<SearchCitation>,
         .await
     {
         Ok(response) if response.status().is_success() => {
-            let body = response.text().await.map_err(|error| {
-                AppError::new(
-                    "web_search_failed",
-                    format!("Could not read Brave Search's response body: {error}"),
-                )
-            })?;
+            let body = read_bounded_response(response).await?;
             parse_brave_response(&body)
         }
-        Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
-            Err(AppError::new(
-                "web_search_unauthorized",
-                "Brave Search rejected the configured API key. Check the key in Settings → Tools.",
-            ))
-        }
-        Ok(response) if response.status().as_u16() == 429 => Err(AppError::new(
-            "web_search_rate_limited",
-            "Brave Search's rate limit was hit. Wait and try again.",
-        )),
-        Ok(response) => Err(AppError::new(
-            "web_search_failed",
-            format!("Brave Search returned HTTP {}.", response.status()),
-        )),
+        Ok(response) => Err(brave_status_error(response.status())),
         Err(error) if error.is_timeout() => Err(AppError::new(
             "web_search_timeout",
             "The search request to Brave Search timed out.",
@@ -284,5 +352,52 @@ mod tests {
     fn parse_brave_response_rejects_malformed_json_with_a_distinct_code() {
         let error = parse_brave_response("not json").unwrap_err();
         assert_eq!(error.code, "web_search_failed");
+    }
+
+    #[test]
+    fn parse_brave_response_drops_unsafe_or_oversized_fields_without_weakening_valid_results() {
+        let oversized = "x".repeat(MAX_TITLE_CHARS + 1);
+        let body = serde_json::json!({
+            "web": { "results": [
+                { "title": "Unsafe", "url": "javascript:alert(1)", "description": "x" },
+                { "title": oversized, "url": "https://example.test/large", "description": "x" },
+                { "title": "Safe", "url": "https://example.test/path", "description": "bounded" }
+            ] }
+        })
+        .to_string();
+        let citations = parse_brave_response(&body).expect("valid envelope parses");
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].title, "Safe");
+        assert_eq!(citations[0].url, "https://example.test/path");
+    }
+
+    #[test]
+    fn response_size_limit_rejects_the_first_overflowing_chunk() {
+        let mut body = vec![0; MAX_RESPONSE_BYTES];
+        let error = append_bounded_response(&mut body, &[1]).unwrap_err();
+        assert_eq!(error.code, "web_search_response_too_large");
+        assert_eq!(body.len(), MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn brave_statuses_have_stable_auth_quota_redirect_and_generic_failures() {
+        for status in [401, 403] {
+            assert_eq!(
+                brave_status_error(reqwest::StatusCode::from_u16(status).expect("status")).code,
+                "web_search_unauthorized"
+            );
+        }
+        assert_eq!(
+            brave_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS).code,
+            "web_search_rate_limited"
+        );
+        assert_eq!(
+            brave_status_error(reqwest::StatusCode::TEMPORARY_REDIRECT).code,
+            "web_search_redirect_blocked"
+        );
+        assert_eq!(
+            brave_status_error(reqwest::StatusCode::BAD_GATEWAY).code,
+            "web_search_failed"
+        );
     }
 }

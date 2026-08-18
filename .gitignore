@@ -3,6 +3,7 @@ dist
 dist-ssr
 target
 src-tauri/target
+.cargo-target-fixes
 *.log
 .DS_Store
 .env
@@ -10,6 +11,7 @@ src-tauri/target
 ark-workspace
 .pnpm-store
 .artifacts
+.tmp
 
 # llama.cpp runtime binaries — downloaded via scripts/setup-llama.ps1 / setup-llama.sh
 # Run the appropriate script from the repo root before launching the dev environment.

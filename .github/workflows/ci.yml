@@ -65,6 +65,12 @@ jobs:
       - name: Frontend unit and reconciliation tests
         run: pnpm test:frontend
 
+      - name: Install pinned Chromium for browser regressions
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser accessibility and viewport regressions
+        run: pnpm test:e2e
+
       - name: Build
         run: pnpm build
 

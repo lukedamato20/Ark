@@ -133,6 +133,30 @@ pub struct ManagedModelPreflight {
     pub advanced_override_allowed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareFitEvidence {
+    pub total_memory_bytes: u64,
+    pub available_memory_bytes: u64,
+    pub execution_device: String,
+    pub accelerator_memory_bytes: Option<u64>,
+    pub method_version: String,
+}
+
+pub fn local_hardware_fit_evidence() -> HardwareFitEvidence {
+    let mut system = System::new_all();
+    system.refresh_memory();
+    HardwareFitEvidence {
+        total_memory_bytes: system.total_memory(),
+        available_memory_bytes: system.available_memory(),
+        execution_device: "local_device".to_string(),
+        // Ark deliberately reports unknown rather than inferring shared/dedicated GPU memory
+        // from platform-specific APIs that have not yet been qualified on the support matrix.
+        accelerator_memory_bytes: None,
+        method_version: "ark-fit-v1".to_string(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedModelDownloadRequest {

@@ -597,9 +597,7 @@ pub async fn wait_for_assigned_port(
 
 #[cfg(windows)]
 fn configure_process_isolation(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    crate::process_window::isolate_std_process_window(command);
 }
 
 #[cfg(unix)]

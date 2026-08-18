@@ -12,9 +12,13 @@ export interface SuggestedOllamaModel {
   label: string;
   description: string;
   approxSizeGb: number;
+  category: "general" | "coding" | "vision" | "embedding";
+  sourceUrl: string;
+  reviewedAt: string;
+  metadataConfidence: "reviewed_approximate";
 }
 
-export const SUGGESTED_OLLAMA_MODELS: SuggestedOllamaModel[] = [
+const CURATED_MODELS = [
   {
     name: "llama3.2:1b",
     label: "Llama 3.2 1B",
@@ -99,4 +103,19 @@ export const SUGGESTED_OLLAMA_MODELS: SuggestedOllamaModel[] = [
     description: "An extremely small model for testing on very limited hardware.",
     approxSizeGb: 0.6,
   },
-];
+] as const;
+
+export const SUGGESTED_OLLAMA_MODELS: SuggestedOllamaModel[] = CURATED_MODELS.map((model) => ({
+  ...model,
+  category:
+    model.name.includes("coder") || model.name.includes("codellama")
+      ? "coding"
+      : model.name.includes("llava")
+        ? "vision"
+        : model.name.includes("embed")
+          ? "embedding"
+          : "general",
+  sourceUrl: `https://ollama.com/library/${model.name.split(":")[0]}`,
+  reviewedAt: "2026-08-17",
+  metadataConfidence: "reviewed_approximate",
+}));

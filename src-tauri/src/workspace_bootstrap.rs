@@ -136,6 +136,7 @@ pub fn retry_workspace_open(app: &AppHandle, state: &AppState) -> Result<AppBoot
     // underlying files/fallback states.
     match crate::open_database_pair(&workspace.database_path()) {
         Ok((new_db, new_read_db)) => {
+            new_db.recover_stale_code_agent_runs()?;
             {
                 let mut db_guard = crate::commands::lock_db(state)?;
                 *db_guard = new_db;
@@ -149,6 +150,7 @@ pub fn retry_workspace_open(app: &AppHandle, state: &AppState) -> Result<AppBoot
                 .lock()
                 .map_err(|_| AppError::new("state_error", "Could not access recovery state."))? =
                 None;
+            crate::code_agent::schedule_stale_run_recovery(app.clone());
         }
         Err(error) => {
             *state

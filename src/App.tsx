@@ -3,6 +3,8 @@ import * as React from "react";
 import { Drawer } from "./components/Drawer";
 import { RightPanel } from "./components/RightPanel";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { StartupView } from "./components/StartupView";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { useArkController, type ArkController } from "./app/useArkController";
 import { ConversationSidebar } from "./features/conversations/ConversationSidebar";
 import {
@@ -11,11 +13,15 @@ import {
   getWorkspaceRecoveryActions,
 } from "./lib/workspaceRecovery";
 import { useBreakpoint } from "./lib/useBreakpoint";
+import { useArkClient } from "./lib/useArkClient";
+import { getErrorMessage } from "./lib/arkErrors";
 import { entityList } from "./state/arkStores";
 import { useStore, useStoreSelector } from "./state/externalStore";
 import { useArkStores } from "./state/useArkStores";
 import { Button } from "./ui/button";
 import { StatePanel } from "./ui/statePanel";
+import { ArkBrand } from "./ui/arkBrand";
+import { ActivityIndicator } from "./ui/activityIndicator";
 import type { AppErrorShape } from "./types/ark";
 
 const ChatView = React.lazy(() => import("./features/chat/ChatView").then((module) => ({ default: module.ChatView })));
@@ -29,6 +35,8 @@ export default function App() {
   const stores = useArkStores();
   const view = useStoreSelector(stores.shell, (state) => state.view);
   const bootstrapError = useStoreSelector(stores.shell, (state) => state.bootstrapError);
+  const booting = useStoreSelector(stores.shell, (state) => state.booting);
+  const workspaceOpenError = useStoreSelector(stores.settings, (state) => state.workspaceOpenError);
   const breakpoint = useBreakpoint();
 
   // UX-001: the sidebar is a docked column (rail or expanded, per the persisted preference) at
@@ -50,6 +58,7 @@ export default function App() {
   const contextTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const shortcutsTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const shortcutsOpen = useStoreSelector(stores.shell, (state) => state.shortcutsOpen);
+  const newChatConfirmationRequested = useStoreSelector(stores.shell, (state) => state.newChatConfirmationRequested);
 
   // UX-004: a total bootstrap failure means nothing else below loaded — no conversations,
   // providers, or settings — so this replaces the entire shell rather than layering a banner on
@@ -61,6 +70,10 @@ export default function App() {
   // successful `bootstrap()` retry does that).
   if (bootstrapError && view !== "settings") {
     return <BootstrapFailurePanel error={bootstrapError} controller={controller} />;
+  }
+
+  if (booting && !workspaceOpenError) {
+    return <StartupView />;
   }
 
   return (
@@ -89,11 +102,11 @@ export default function App() {
             <ConversationSidebarContainer
               controller={controller}
               forceExpanded
-              shortcutsTriggerRef={shortcutsTriggerRef}
+              onNavigate={() => setSidebarDrawerOpen(false)}
             />
           </Drawer>
         ) : (
-          <ConversationSidebarContainer controller={controller} shortcutsTriggerRef={shortcutsTriggerRef} />
+          <ConversationSidebarContainer controller={controller} />
         )}
         <React.Suspense fallback={<MainViewFallback />}>
           {view === "settings" ? (
@@ -124,6 +137,14 @@ export default function App() {
         open={shortcutsOpen}
         onClose={() => controller.setShortcutsOpen(false)}
         triggerRef={shortcutsTriggerRef}
+      />
+      <ConfirmDialog
+        open={newChatConfirmationRequested}
+        title="Discard unsent message?"
+        description="Creating a new chat will discard the text currently in the composer. A running response will continue in its original chat."
+        confirmLabel="Discard and create chat"
+        onClose={controller.dismissNewChatConfirmation}
+        onConfirm={() => void controller.createConversation(true)}
       />
     </>
   );
@@ -183,22 +204,28 @@ function ShellTopBar({
 function ConversationSidebarContainer({
   controller,
   forceExpanded = false,
-  shortcutsTriggerRef,
+  onNavigate,
 }: {
   controller: ArkController;
   /** Inside a phone-width drawer (App.tsx): always show full content, and hide the internal
    * rail/expanded toggle — collapsing to a 72px rail inside an already-narrow drawer doesn't
    * make sense, and this must never mutate the persisted desktop/compact collapse preference. */
   forceExpanded?: boolean;
-  shortcutsTriggerRef: React.RefObject<HTMLButtonElement | null>;
+  /** Closes the phone drawer after an action that changes the main surface. */
+  onNavigate?: () => void;
 }) {
   const stores = useArkStores();
+  const client = useArkClient();
   const catalog = useStore(stores.catalog);
   const shell = useStore(stores.shell);
+  const projects = useStore(stores.projects);
   return (
     <ConversationSidebar
       conversations={entityList(catalog.conversations)}
+      pinnedConversations={entityList(catalog.pinnedConversations)}
+      projects={entityList(projects.projects)}
       activeConversationId={catalog.activeId}
+      activeMode={shell.view === "code" ? "code" : "chat"}
       collapsed={forceExpanded ? false : shell.sidebarCollapsed}
       hideCollapseToggle={forceExpanded}
       focusSearchSignal={shell.focusSearchSignal}
@@ -207,17 +234,39 @@ function ConversationSidebarContainer({
       searchSnippets={catalog.searchSnippets}
       showArchived={catalog.showArchived}
       onToggleCollapsed={controller.toggleSidebar}
-      onCreate={() => void controller.createConversation()}
-      onSelect={controller.selectConversation}
+      onCreate={() => {
+        void controller.createConversation();
+        onNavigate?.();
+      }}
+      onCreateProject={async (name) => {
+        try {
+          controller.saveProject(await client.createProject(name));
+        } catch (error) {
+          controller.setError(getErrorMessage(error));
+          throw error;
+        }
+      }}
+      onSelect={(id) => {
+        controller.selectConversation(id);
+        onNavigate?.();
+      }}
       onSearch={(query) => void controller.searchConversations(query)}
+      onProjectFilter={(projectId) => {
+        void controller.filterConversationsByProject(projectId);
+        onNavigate?.();
+      }}
       onLoadMore={() => void controller.loadMoreConversations()}
-      onOpenSettings={() => controller.setView("settings")}
-      onOpenCode={() => controller.setView("code")}
-      onOpenShortcuts={() => controller.setShortcutsOpen(true)}
+      onOpenSettings={() => {
+        controller.setView("settings");
+        onNavigate?.();
+      }}
+      onModeChange={(mode) => {
+        controller.setView(mode);
+        onNavigate?.();
+      }}
       onShowArchivedChange={(showArchived) => void controller.setShowArchived(showArchived)}
       onArchive={(id, archived) => void controller.changeConversationArchived(id, archived)}
       onPin={(id, pinned) => void controller.changeConversationPinned(id, pinned)}
-      shortcutsTriggerRef={shortcutsTriggerRef}
     />
   );
 }
@@ -248,6 +297,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
   const personaState = useStore(stores.personas);
   const booting = useStoreSelector(stores.shell, (state) => state.booting);
   const focusComposerSignal = useStoreSelector(stores.shell, (state) => state.focusComposerSignal);
+  const composerDraft = useStoreSelector(stores.shell, (state) => state.chatComposerDraft);
   return (
     <ChatView
       conversation={activeConversation}
@@ -262,6 +312,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       isLoadingOlderMessages={transcript.isLoadingOlder}
       onLoadOlderMessages={controller.loadOlderMessages}
       focusComposerSignal={focusComposerSignal}
+      composerDraft={composerDraft}
       onMessagesChange={controller.setMessages}
       onConversationDeleted={controller.deleteActiveConversation}
       onConversationImported={controller.importConversation}
@@ -271,6 +322,7 @@ function ChatContainer({ controller }: { controller: ArkController }) {
       onRefreshProviderModels={controller.refreshProviderModels}
       onError={controller.setError}
       onInfo={controller.setInfo}
+      onDraftChange={controller.setChatComposerDraft}
     />
   );
 }
@@ -295,6 +347,7 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       applicationInstructions={settings.applicationInstructions}
       onApplicationInstructionsChange={controller.changeApplicationInstructions}
       theme={settings.theme}
+      accentPalette={settings.accentPalette}
       workspace={settings.workspace}
       builtInStatus={settings.builtInStatus}
       onBuiltInStatusChange={controller.setBuiltInStatus}
@@ -309,6 +362,7 @@ function SettingsContainer({ controller }: { controller: ArkController }) {
       perfMetricsEnabled={settings.perfMetricsEnabled}
       onPerfMetricsEnabledChange={controller.changePerfMetricsEnabled}
       onThemeChange={controller.changeTheme}
+      onAccentPaletteChange={controller.changeAccentPalette}
       onWorkspaceChange={controller.setWorkspace}
       onProviderSaved={controller.saveProvider}
       onProviderDeleted={controller.removeProvider}
@@ -499,8 +553,15 @@ function AppFeedback({ controller }: { controller: ArkController }) {
 
 function MainViewFallback() {
   return (
-    <section className="flex min-w-0 flex-1 items-center justify-center text-sm text-muted-foreground">
-      Loading Ark
+    <section
+      className="flex min-w-0 flex-1 items-center justify-center bg-background text-foreground"
+      role="status"
+      aria-label="Loading view"
+    >
+      <div className="flex flex-col items-center gap-3">
+        <ArkBrand />
+        <ActivityIndicator state="preparing" announce={false} />
+      </div>
     </section>
   );
 }
